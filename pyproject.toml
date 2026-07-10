@@ -44,6 +44,13 @@ dependencies = [
 [dependency-groups]
 clic = ["pathos", "vector", "fastjet", "energyflow"] # has problems on isambard
 tide = ["numba>=0.61.2"] # has problems on isambard
+hgq = [
+    "keras>=3.8,<4",
+    "hgq2>=0.1.9,<0.2",
+    "hls4ml>=1.2.0,<2",
+    # no linux-aarch64 wheels; only needed for the hls4ml/FPGA conversion step
+    "da4ml>=0.6; platform_machine != 'aarch64'",
+]
 fa2 = ["flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.4.17/flash_attn-2.8.3%2Bcu128torch2.9-cp312-cp312-linux_x86_64.whl"]
 
 [build-system]
@@ -79,6 +86,10 @@ isambard = { features = ["gpu"] }
 cpu = { features = ["cpu"] }
 clic = { features = ["clic"] }
 tide = { features = ["tide"] }
+# NOTE: the `hgq` dependency group is currently uv-only. Wiring it into a pixi
+# environment (e.g. ci) requires regenerating pixi.lock on a linux machine —
+# cross-locking from macOS fails because the editable hepattn build and some
+# group sdists cannot be built for foreign platforms.
 ci = { features = ["cpu", "clic", "tide"]}
 
 [tool.pixi.system-requirements]
