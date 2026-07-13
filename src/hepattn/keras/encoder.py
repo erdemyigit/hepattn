@@ -40,6 +40,7 @@ class KerasEncoderLayer(nn.Module):
         dense_kwargs: dict | None = None,
         attn_kwargs: dict | None = None,
         factory: LayerFactory | None = None,
+        name: str = "encoder_layer",
     ) -> None:
         """Mirror of hepattn EncoderLayer: residual self-attention + residual feed-forward."""
         super().__init__()
@@ -55,8 +56,8 @@ class KerasEncoderLayer(nn.Module):
 
         self.dim = dim
         residual = partial(Residual, dim=dim, layer_scale=layer_scale, drop_path=drop_path)
-        self.attn = residual(KerasAttention(dim, qkv_norm=qkv_norm, norm=norm, factory=factory, **attn_kwargs), norm=attn_norm)
-        self.dense = residual(KerasDense(dim, factory=factory, **dense_kwargs), norm=norm, post_norm=dense_post_norm)
+        self.attn = residual(KerasAttention(dim, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_attn", **attn_kwargs), norm=attn_norm)
+        self.dense = residual(KerasDense(dim, factory=factory, name=f"{name}_ffn", **dense_kwargs), norm=norm, post_norm=dense_post_norm)
 
     def forward(self, x: Tensor, **kwargs) -> Tensor:
         return self.dense(self.attn(x, **kwargs))
@@ -112,7 +113,9 @@ class KerasEncoder(nn.Module):
         layer_kwargs["value_residual"] = self.value_residual
         layer_kwargs["attn_kwargs"] = attn_kwargs
 
-        self.layers = nn.ModuleList([KerasEncoderLayer(dim=dim, depth=i, factory=factory, **layer_kwargs) for i in range(num_layers)])
+        self.layers = nn.ModuleList([
+            KerasEncoderLayer(dim=dim, depth=i, factory=factory, name=f"encoder_l{i}", **layer_kwargs) for i in range(num_layers)
+        ])
 
     def set_backend(self, attn_type: str) -> None:
         if attn_type != "torch":

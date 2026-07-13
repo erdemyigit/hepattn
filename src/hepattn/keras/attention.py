@@ -33,6 +33,7 @@ class KerasAttention(nn.Module):
         value_residual: bool = False,
         is_first_layer: bool = False,
         factory: LayerFactory | None = None,
+        name: str | None = None,
     ) -> None:
         """Multi-head attention from factory-built (quantizable) leaves.
 
@@ -64,15 +65,18 @@ class KerasAttention(nn.Module):
         self.value_residual = value_residual
         self.is_first_layer = is_first_layer
 
-        self.q_proj = factory.dense(dim, use_bias=bias)
-        self.k_proj = factory.dense(dim, use_bias=bias)
-        self.v_proj = factory.dense(dim, use_bias=bias)
-        self.out_proj = factory.dense(dim, use_bias=bias)
+        def sub(part: str) -> str | None:
+            return f"{name}_{part}" if name else None
+
+        self.q_proj = factory.dense(dim, use_bias=bias, name=sub("q_proj"))
+        self.k_proj = factory.dense(dim, use_bias=bias, name=sub("k_proj"))
+        self.v_proj = factory.dense(dim, use_bias=bias, name=sub("v_proj"))
+        self.out_proj = factory.dense(dim, use_bias=bias, name=sub("out_proj"))
         for layer in (self.q_proj, self.k_proj, self.v_proj, self.out_proj):
             layer.build((None, dim))
 
         if self.value_residual and not self.is_first_layer:
-            self.value_residual_mix = factory.dense(num_heads, activation="sigmoid", use_bias=True)
+            self.value_residual_mix = factory.dense(num_heads, activation="sigmoid", use_bias=True, name=sub("value_residual_mix"))
             self.value_residual_mix.build((None, dim))
 
         if self.qkv_norm:
@@ -83,9 +87,9 @@ class KerasAttention(nn.Module):
             self.v_norm = norm_cls(dim)
 
         # explicit attention core: quantizable scores einsum, softmax, values einsum
-        self.scores_einsum = factory.einsum("bhqd,bhkd->bhqk")
-        self.attn_softmax = factory.softmax(axis=-1)
-        self.values_einsum = factory.einsum("bhqk,bhkd->bhqd")
+        self.scores_einsum = factory.einsum("bhqd,bhkd->bhqk", name=sub("scores"))
+        self.attn_softmax = factory.softmax(axis=-1, name=sub("softmax"))
+        self.values_einsum = factory.einsum("bhqk,bhkd->bhqd", name=sub("values"))
 
     def set_backend(self, attn_type: str, **kwargs) -> str:
         """Duck-typed counterpart of Attention.set_backend; only 'torch' is expressible.

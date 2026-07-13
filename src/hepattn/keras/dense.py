@@ -47,7 +47,14 @@ class KerasDense(nn.Module):
         dropout: float = 0.0,
         bias: bool = True,
         factory: LayerFactory | None = None,
+        name: str | None = None,
     ) -> None:
+        """Args mirror hepattn Dense; ``name`` is a deterministic keras-name prefix.
+
+        Explicit names matter: keras embeds the layer name in the torch parameter keys
+        (``..._torch_params.<name>/kernel``), so auto-generated names (global counter)
+        would make state_dict keys depend on construction order within the process.
+        """
         super().__init__()
         factory = factory or LayerFactory()
 
@@ -70,11 +77,11 @@ class KerasDense(nn.Module):
         node_list = [input_size, *hidden_layers]
         for i in range(len(node_list) - 1):
             proj_dim = node_list[i + 1] * 2 if self.gate else node_list[i + 1]
-            layer = factory.dense(proj_dim, activation=None if self.gate else activation, use_bias=bias)
+            layer = factory.dense(proj_dim, activation=None if self.gate else activation, use_bias=bias, name=f"{name}_hidden{i}" if name else None)
             layer.build((None, node_list[i]))
             hidden.append(layer)
 
-        final = factory.dense(output_size, activation=final_activation, use_bias=bias)
+        final = factory.dense(output_size, activation=final_activation, use_bias=bias, name=f"{name}_final" if name else None)
         final.build((None, node_list[-1]))
 
         self.hidden = nn.ModuleList(hidden)
@@ -83,10 +90,10 @@ class KerasDense(nn.Module):
         if dropout:
             if factory.quantize:
                 raise NotImplementedError("dropout is not supported in quantized mode")
-            self.dropout = keras.layers.Dropout(dropout)
+            self.dropout = keras.layers.Dropout(dropout, name=f"{name}_dropout" if name else None)
 
     @classmethod
-    def from_torch(cls, dense: Dense, factory: LayerFactory | None = None) -> "KerasDense":
+    def from_torch(cls, dense: Dense, factory: LayerFactory | None = None, name: str | None = None) -> "KerasDense":
         """Build a structurally identical KerasDense by introspecting a torch Dense (weights not ported)."""
         modules = list(dense.net)
         linears = [m for m in modules if isinstance(m, nn.Linear)]
@@ -114,6 +121,7 @@ class KerasDense(nn.Module):
             dropout=dropouts[0].p if dropouts else 0.0,
             bias=linears[0].bias is not None,
             factory=factory,
+            name=name,
         )
 
     def forward(self, x: Tensor) -> Tensor:

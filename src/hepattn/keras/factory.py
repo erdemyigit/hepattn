@@ -60,8 +60,10 @@ class SoftmaxOp(keras.layers.Layer):
     """Float twin of hgq.layers.QSoftmax with optional boolean masking.
 
     The mask uses the hepattn convention (True = participates). Masked-out scores are
-    set to -inf before the softmax, matching torch scaled_dot_product_attention with a
-    boolean attention mask (fully-masked rows therefore produce NaN in both frameworks).
+    set to -inf before the softmax. Fully-masked rows produce ZERO attention weights,
+    matching the torch fused SDPA kernels the reference model runs on (an unguarded
+    softmax would yield NaN there, which poisons valid outputs downstream via 0*NaN
+    in the values contraction — padded decoder keys hit exactly this case).
     """
 
     def __init__(self, axis: int = -1, **kwargs):
@@ -71,9 +73,12 @@ class SoftmaxOp(keras.layers.Layer):
     # the argument is named attn_mask (not mask) to keep it out of keras's built-in
     # mask-propagation machinery, which special-cases a call argument named `mask`
     def call(self, x, attn_mask=None):
-        if attn_mask is not None:
-            x = keras.ops.where(attn_mask, x, float("-inf"))
-        return keras.ops.softmax(x, axis=self.axis)
+        if attn_mask is None:
+            return keras.ops.softmax(x, axis=self.axis)
+        x = keras.ops.where(attn_mask, x, float("-inf"))
+        out = keras.ops.softmax(x, axis=self.axis)
+        any_valid = keras.ops.any(attn_mask, axis=self.axis, keepdims=True)
+        return keras.ops.where(any_valid, out, keras.ops.zeros_like(out))
 
     def get_config(self):
         return {**super().get_config(), "axis": self.axis}

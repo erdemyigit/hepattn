@@ -96,3 +96,52 @@ def port_encoder(encoder: Encoder, kencoder: KerasEncoder) -> None:
         kencoder.register_tokens.copy_(encoder.register_tokens)
     for layer, klayer in zip(encoder.layers, kencoder.layers, strict=True):
         port_encoder_layer(layer, klayer)
+
+
+@torch.no_grad()
+def port_swapped_module(module: nn.Module, kmodule: nn.Module) -> None:
+    """Port a module whose Dense children were swapped by kerasify_module.
+
+    All non-swapped state (norms, buffers such as FourierPositionEncoder.B or
+    FeatureScaler statistics) is copied via a filtered state_dict load; each swapped
+    Dense is then ported into its KerasDense twin at the same attribute path.
+    """
+    t_denses = {name: m for name, m in module.named_modules() if isinstance(m, Dense)}
+    k_denses = {name: m for name, m in kmodule.named_modules() if isinstance(m, KerasDense)}
+    assert set(t_denses) == set(k_denses), f"swapped-Dense mismatch at: {set(t_denses) ^ set(k_denses)}"
+
+    prefixes = tuple(f"{name}." for name in t_denses)
+    shared = {key: value for key, value in module.state_dict().items() if not key.startswith(prefixes)}
+    result = kmodule.load_state_dict(shared, strict=False)
+    assert not result.unexpected_keys, f"unexpected keys while porting swapped module: {result.unexpected_keys}"
+
+    for name, tdense in t_denses.items():
+        port_dense(tdense, k_denses[name])
+
+
+@torch.no_grad()
+def port_decoder(decoder, kdecoder) -> None:
+    """Port a torch MaskFormerDecoder into a KerasMaskFormerDecoder."""
+    assert len(decoder.decoder_layers) == len(kdecoder.decoder_layers), "decoder depth mismatch"
+    if not decoder.dynamic_queries:
+        kdecoder.initial_queries.copy_(decoder.initial_queries)
+    for layer, klayer in zip(decoder.decoder_layers, kdecoder.decoder_layers, strict=True):
+        port_residual(layer.q_ca, klayer.q_ca, port_attention)
+        port_residual(layer.q_sa, klayer.q_sa, port_attention)
+        port_residual(layer.q_dense, klayer.q_dense, port_dense)
+        if layer.bidirectional_ca:
+            port_residual(layer.kv_ca, klayer.kv_ca, port_attention)
+            port_residual(layer.kv_dense, klayer.kv_dense, port_dense)
+
+
+@torch.no_grad()
+def port_maskformer(model, kmodel) -> None:
+    """Port a torch MaskFormer into a KerasMaskFormer (same config, float or quantized)."""
+    for input_net, k_input_net in zip(model.input_nets, kmodel.input_nets, strict=True):
+        port_swapped_module(input_net, k_input_net)
+    port_encoder(model.encoder, kmodel.encoder)
+    port_decoder(model.decoder, kmodel.decoder)
+    for task, ktask in zip(model.tasks, kmodel.tasks, strict=True):
+        port_swapped_module(task, ktask)
+    for task, ktask in zip(model.encoder_tasks, kmodel.encoder_tasks, strict=True):
+        port_swapped_module(task, ktask)
