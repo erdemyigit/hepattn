@@ -14,7 +14,7 @@ the torch model with no keras/HGQ2 counterpart.
 
 from torch import Tensor, nn
 
-from hepattn.keras.factory import LayerFactory
+from hepattn.keras.factory import LayerFactory, apply_softmax
 from hepattn.models.attention import merge_masks
 from hepattn.models.norm import NORM_TYPES
 
@@ -68,16 +68,19 @@ class KerasAttention(nn.Module):
         def sub(part: str) -> str | None:
             return f"{name}_{part}" if name else None
 
+        # float: eager build; quantized: lazy build on first forward (see KerasDense)
         self.q_proj = factory.dense(dim, use_bias=bias, name=sub("q_proj"))
         self.k_proj = factory.dense(dim, use_bias=bias, name=sub("k_proj"))
         self.v_proj = factory.dense(dim, use_bias=bias, name=sub("v_proj"))
         self.out_proj = factory.dense(dim, use_bias=bias, name=sub("out_proj"))
-        for layer in (self.q_proj, self.k_proj, self.v_proj, self.out_proj):
-            layer.build((None, dim))
+        if not factory.quantize:
+            for layer in (self.q_proj, self.k_proj, self.v_proj, self.out_proj):
+                layer.build((None, dim))
 
         if self.value_residual and not self.is_first_layer:
             self.value_residual_mix = factory.dense(num_heads, activation="sigmoid", use_bias=True, name=sub("value_residual_mix"))
-            self.value_residual_mix.build((None, dim))
+            if not factory.quantize:
+                self.value_residual_mix.build((None, dim))
 
         if self.qkv_norm:
             assert norm is not None
@@ -176,7 +179,7 @@ class KerasAttention(nn.Module):
         # scale queries before the matmul, matching the order of operations in torch SDPA
         qp = qp * (self.head_dim**-0.5)
         scores = self.scores_einsum([qp, kp], training=self.training)
-        attn = self.attn_softmax(scores, attn_mask=mask, training=self.training)
+        attn = apply_softmax(self.attn_softmax, scores, attn_mask=mask, training=self.training)
         out = self.values_einsum([attn, vp], training=self.training)
 
         out = self.recombine_heads(out)

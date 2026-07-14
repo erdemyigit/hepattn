@@ -16,6 +16,14 @@ PARITY_RECORDS: list[dict] = []
 _LEDGER_PATH = Path(__file__).parent / ".parity_ledger.jsonl"
 
 
+def record_measurement(record: dict) -> None:
+    """Append a measurement record to the in-memory list and the on-disk ledger."""
+    PARITY_RECORDS.append(record)
+    if os.environ.get("HEPATTN_PARITY_LEDGER", "1") != "0":
+        with _LEDGER_PATH.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+
+
 def make_padded_batch(batch_size: int, max_len: int, dim: int, seed: int = 0, min_len: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Random (B, S, D) embeddings with a boolean validity mask of random per-event lengths.
 
@@ -57,11 +65,7 @@ def assert_parity(
     denom = ref.abs().clamp_min(1e-12)
     max_rel = float((diff / denom).max()) if diff.numel() else 0.0
 
-    record = {"tag": tag, "config": config, "max_abs_err": max_abs, "max_rel_err": max_rel, "atol": atol, "rtol": rtol}
-    PARITY_RECORDS.append(record)
-    if os.environ.get("HEPATTN_PARITY_LEDGER", "1") != "0":
-        with _LEDGER_PATH.open("a") as f:
-            f.write(json.dumps(record) + "\n")
+    record_measurement({"tag": tag, "config": config, "max_abs_err": max_abs, "max_rel_err": max_rel, "atol": atol, "rtol": rtol})
 
     tol = atol + rtol * ref.abs()
     ok = diff <= tol

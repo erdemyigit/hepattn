@@ -60,9 +60,20 @@ criterion than any float tolerance.
 FOOTER = """
 ## Quantized deltas (HGQ2 mode vs float twin)
 
-Populated in Stage 4 (quantized mode): high-bitwidth configs are asserted close to
-the float twin while aggressively low-bitwidth configs are asserted to differ, so the
-quantizers are demonstrably active and demonstrably faithful.
+The rows tagged `quantized.delta.*` above compare the SAME weights run through the
+float twin and the HGQ2-quantized twin on layer-0 mask logits (computed before any
+mask-attention feedback, so deltas are not amplified by threshold flips). The paired
+criterion is what makes this non-vacuous: the high-bitwidth config must stay close to
+float (fails if the config scopes silently did not apply) while the low-bitwidth
+config must differ by more than 10x the high-bitwidth delta (fails if the quantizers
+are inert under the torch backend).
+
+Measured: high-bitwidth (20-bit weights, 24-bit datalane, 18-bit softmax tables)
+deviates ~0.30 abs on logits of scale ~15 (~2%) — dominated by the quantized-softmax
+exp/inv lookup tables accumulated across the attention pipeline; the `table`
+quantizer place bounds softmax accuracy INDEPENDENTLY of weight/datalane bitwidths
+(without configuring it the delta is ~2.7 regardless of the other bitwidths).
+Low-bitwidth (4-bit) deviates ~31 — a factor ~100 separation.
 """
 
 
@@ -75,9 +86,12 @@ def main() -> None:
         if key not in worst or rec["max_abs_err"] > worst[key]["max_abs_err"]:
             worst[key] = rec
 
+    def fmt(x: float) -> str:
+        return "—" if x != x else f"{x:.2e}"  # noqa: PLR0124  (NaN check)
+
     rows = []
     for (tag, config), rec in sorted(worst.items()):
-        rows.append(f"| `{tag}` | `{config}` | {rec['max_abs_err']:.2e} | {rec['max_rel_err']:.2e} | {rec['atol']:.0e} | {rec['rtol']:.0e} |")
+        rows.append(f"| `{tag}` | `{config}` | {fmt(rec['max_abs_err'])} | {fmt(rec['max_rel_err'])} | {fmt(rec['atol'])} | {fmt(rec['rtol'])} |")
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(HEADER + "\n".join(rows) + "\n" + FOOTER)

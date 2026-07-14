@@ -40,48 +40,61 @@ criterion than any float tolerance.
 
 | Component / tag | Configuration | Max abs err | Max rel err | atol | rtol |
 |---|---|---|---|---|---|
-| `attention.cross_masked` | `dim64h8+qkvnorm` | 2.38e-07 | 2.30e-04 | 1e-06 | 1e-05 |
-| `attention.k_proj` | `dim64h8` | 0.00e+00 | 0.00e+00 | 1e-06 | 1e-05 |
-| `attention.q_proj` | `dim64h8` | 0.00e+00 | 0.00e+00 | 1e-06 | 1e-05 |
-| `attention.self_masked` | `dim64h8+qkvnorm` | 2.98e-07 | 4.65e-04 | 1e-06 | 1e-05 |
-| `attention.v_proj` | `dim64h8` | 0.00e+00 | 0.00e+00 | 1e-06 | 1e-05 |
-| `attention.value_residual_l1` | `dim64h8` | 1.49e-07 | 8.41e-04 | 1e-06 | 1e-05 |
-| `attention.value_residual_l2` | `dim64h8` | 1.04e-07 | 3.70e-05 | 1e-06 | 1e-05 |
-| `decoder_layer.kv` | `dim32h16_bidir` | 4.77e-07 | 7.55e-04 | 1e-06 | 1e-05 |
-| `decoder_layer.q` | `dim32h16_bidir` | 7.15e-07 | 8.92e-04 | 1e-06 | 1e-05 |
-| `dense` | `clic_classification_head` | 2.98e-08 | 1.24e-06 | 1e-06 | 1e-05 |
-| `dense` | `clic_encoder_ffn_256` | 5.36e-07 | 3.84e-03 | 1e-06 | 1e-05 |
-| `dense` | `clic_input_net_27_to_256` | 2.98e-07 | 9.81e-03 | 1e-06 | 1e-05 |
-| `dense` | `clic_regression_head_518` | 2.98e-08 | 7.18e-07 | 1e-06 | 1e-05 |
-| `dense` | `final_activation_sigmoid` | 5.96e-08 | 1.44e-07 | 1e-06 | 1e-05 |
-| `dense` | `no_bias` | 0.00e+00 | 0.00e+00 | 1e-06 | 1e-05 |
-| `dense` | `swiglu_ffn` | 2.38e-07 | 7.21e-03 | 1e-06 | 1e-05 |
-| `dense` | `with_dropout_eval` | 2.98e-07 | 1.28e-03 | 1e-06 | 1e-05 |
-| `encoder.clic_shaped` | `6L_dim256_h16_hybrid_vres_8reg` | 1.55e-06 | 2.07e-02 | 2e-06 | 2e-05 |
-| `encoder.hybrid_norm` | `layer0` | 4.77e-07 | 4.46e-04 | 1e-06 | 1e-05 |
-| `encoder.hybrid_norm` | `layer1` | 7.15e-07 | 6.74e-05 | 1e-06 | 1e-05 |
-| `encoder.hybrid_norm` | `layer2` | 7.15e-07 | 5.01e-04 | 1e-06 | 1e-05 |
-| `encoder.register_tokens` | `2L+4reg` | 4.77e-07 | 6.90e-05 | 1e-06 | 1e-05 |
-| `maskformer.e2e` | `final.classification.pflow_class_prob` | 2.98e-08 | 2.07e-07 | 5e-05 | 1e-04 |
-| `maskformer.e2e` | `final.classification.pflow_logit` | 5.22e-08 | 8.63e-05 | 5e-05 | 1e-04 |
-| `maskformer.e2e` | `final.incidence.pflow_incidence` | 2.33e-09 | 3.50e-07 | 5e-05 | 1e-04 |
-| `maskformer.e2e` | `final.mask.pflow_node_logit` | 1.14e-05 | 3.36e-03 | 5e-05 | 1e-04 |
-| `maskformer.e2e` | `final.regression.pflow_proxy_regr` | 0.00e+00 | 0.00e+00 | 5e-05 | 1e-04 |
-| `maskformer.e2e` | `final.regression.pflow_regr` | 1.00e+00 | 1.35e-05 | 5e-05 | 1e-04 |
-| `maskformer.e2e` | `layer_0.mask.pflow_node_logit` | 8.11e-06 | 2.87e-03 | 5e-05 | 1e-04 |
-| `maskformer.e2e` | `layer_1.classification.pflow_class_prob` | 4.47e-08 | 2.40e-07 | 5e-05 | 1e-04 |
-| `maskformer.e2e` | `layer_1.classification.pflow_logit` | 3.73e-08 | 9.12e-05 | 5e-05 | 1e-04 |
-| `maskformer.e2e` | `layer_1.mask.pflow_node_logit` | 1.14e-05 | 3.57e-02 | 5e-05 | 1e-04 |
-| `maskformer.loss` | `final.classification.object_ce` | 0.00e+00 | 0.00e+00 | 1e-04 | 1e-03 |
-| `maskformer.loss` | `final.incidence.kl_div` | 2.38e-07 | 9.55e-08 | 1e-04 | 1e-03 |
-| `maskformer.loss` | `final.mask.mask_dice` | 0.00e+00 | 0.00e+00 | 1e-04 | 1e-03 |
-| `maskformer.loss` | `final.regression.l1` | 1.91e-06 | 2.33e-07 | 1e-04 | 1e-03 |
-| `maskformer.loss` | `layer_0.mask.mask_dice` | 0.00e+00 | 0.00e+00 | 1e-04 | 1e-03 |
-| `maskformer.loss` | `layer_1.classification.object_ce` | 0.00e+00 | 0.00e+00 | 1e-04 | 1e-03 |
-| `maskformer.loss` | `layer_1.mask.mask_dice` | 5.96e-08 | 8.64e-08 | 1e-04 | 1e-03 |
+| `attention.cross_masked` | `dim64h8+qkvnorm` | 2.38e-07 | 2.30e-04 | 1.00e-06 | 1.00e-05 |
+| `attention.k_proj` | `dim64h8` | 0.00e+00 | 0.00e+00 | 1.00e-06 | 1.00e-05 |
+| `attention.q_proj` | `dim64h8` | 0.00e+00 | 0.00e+00 | 1.00e-06 | 1.00e-05 |
+| `attention.self_masked` | `dim64h8+qkvnorm` | 2.98e-07 | 4.65e-04 | 1.00e-06 | 1.00e-05 |
+| `attention.v_proj` | `dim64h8` | 0.00e+00 | 0.00e+00 | 1.00e-06 | 1.00e-05 |
+| `attention.value_residual_l1` | `dim64h8` | 1.49e-07 | 8.41e-04 | 1.00e-06 | 1.00e-05 |
+| `attention.value_residual_l2` | `dim64h8` | 1.04e-07 | 3.70e-05 | 1.00e-06 | 1.00e-05 |
+| `decoder_layer.kv` | `dim32h16_bidir` | 4.77e-07 | 7.55e-04 | 1.00e-06 | 1.00e-05 |
+| `decoder_layer.q` | `dim32h16_bidir` | 7.15e-07 | 8.92e-04 | 1.00e-06 | 1.00e-05 |
+| `dense` | `clic_classification_head` | 2.98e-08 | 1.24e-06 | 1.00e-06 | 1.00e-05 |
+| `dense` | `clic_encoder_ffn_256` | 5.36e-07 | 3.84e-03 | 1.00e-06 | 1.00e-05 |
+| `dense` | `clic_input_net_27_to_256` | 2.98e-07 | 9.81e-03 | 1.00e-06 | 1.00e-05 |
+| `dense` | `clic_regression_head_518` | 2.98e-08 | 7.18e-07 | 1.00e-06 | 1.00e-05 |
+| `dense` | `final_activation_sigmoid` | 5.96e-08 | 1.44e-07 | 1.00e-06 | 1.00e-05 |
+| `dense` | `no_bias` | 0.00e+00 | 0.00e+00 | 1.00e-06 | 1.00e-05 |
+| `dense` | `swiglu_ffn` | 2.38e-07 | 7.21e-03 | 1.00e-06 | 1.00e-05 |
+| `dense` | `with_dropout_eval` | 2.98e-07 | 1.28e-03 | 1.00e-06 | 1.00e-05 |
+| `encoder.clic_shaped` | `6L_dim256_h16_hybrid_vres_8reg` | 1.55e-06 | 2.07e-02 | 2.00e-06 | 2.00e-05 |
+| `encoder.hybrid_norm` | `layer0` | 4.77e-07 | 4.46e-04 | 1.00e-06 | 1.00e-05 |
+| `encoder.hybrid_norm` | `layer1` | 7.15e-07 | 6.74e-05 | 1.00e-06 | 1.00e-05 |
+| `encoder.hybrid_norm` | `layer2` | 7.15e-07 | 5.01e-04 | 1.00e-06 | 1.00e-05 |
+| `encoder.register_tokens` | `2L+4reg` | 4.77e-07 | 6.90e-05 | 1.00e-06 | 1.00e-05 |
+| `maskformer.e2e` | `final.classification.pflow_class_prob` | 2.98e-08 | 2.07e-07 | 5.00e-05 | 1.00e-04 |
+| `maskformer.e2e` | `final.classification.pflow_logit` | 5.22e-08 | 8.63e-05 | 5.00e-05 | 1.00e-04 |
+| `maskformer.e2e` | `final.incidence.pflow_incidence` | 2.33e-09 | 3.50e-07 | 5.00e-05 | 1.00e-04 |
+| `maskformer.e2e` | `final.mask.pflow_node_logit` | 1.14e-05 | 3.36e-03 | 5.00e-05 | 1.00e-04 |
+| `maskformer.e2e` | `final.regression.pflow_proxy_regr` | 0.00e+00 | 0.00e+00 | 5.00e-05 | 1.00e-04 |
+| `maskformer.e2e` | `final.regression.pflow_regr` | 1.00e+00 | 1.35e-05 | 5.00e-05 | 1.00e-04 |
+| `maskformer.e2e` | `layer_0.mask.pflow_node_logit` | 8.11e-06 | 2.87e-03 | 5.00e-05 | 1.00e-04 |
+| `maskformer.e2e` | `layer_1.classification.pflow_class_prob` | 4.47e-08 | 2.40e-07 | 5.00e-05 | 1.00e-04 |
+| `maskformer.e2e` | `layer_1.classification.pflow_logit` | 3.73e-08 | 9.12e-05 | 5.00e-05 | 1.00e-04 |
+| `maskformer.e2e` | `layer_1.mask.pflow_node_logit` | 1.14e-05 | 3.57e-02 | 5.00e-05 | 1.00e-04 |
+| `maskformer.loss` | `final.classification.object_ce` | 0.00e+00 | 0.00e+00 | 1.00e-04 | 1.00e-03 |
+| `maskformer.loss` | `final.incidence.kl_div` | 2.38e-07 | 9.55e-08 | 1.00e-04 | 1.00e-03 |
+| `maskformer.loss` | `final.mask.mask_dice` | 0.00e+00 | 0.00e+00 | 1.00e-04 | 1.00e-03 |
+| `maskformer.loss` | `final.regression.l1` | 1.91e-06 | 2.33e-07 | 1.00e-04 | 1.00e-03 |
+| `maskformer.loss` | `layer_0.mask.mask_dice` | 0.00e+00 | 0.00e+00 | 1.00e-04 | 1.00e-03 |
+| `maskformer.loss` | `layer_1.classification.object_ce` | 0.00e+00 | 0.00e+00 | 1.00e-04 | 1.00e-03 |
+| `maskformer.loss` | `layer_1.mask.mask_dice` | 5.96e-08 | 8.64e-08 | 1.00e-04 | 1.00e-03 |
+| `quantized.delta.mask_l0` | `high_bitwidth_w20_d24_t18` | 3.01e-01 | — | 5.00e-01 | 0.00e+00 |
+| `quantized.delta.mask_l0` | `low_bitwidth_w4_d4_t4` | 3.11e+01 | — | 5.00e-01 | 0.00e+00 |
 
 ## Quantized deltas (HGQ2 mode vs float twin)
 
-Populated in Stage 4 (quantized mode): high-bitwidth configs are asserted close to
-the float twin while aggressively low-bitwidth configs are asserted to differ, so the
-quantizers are demonstrably active and demonstrably faithful.
+The rows tagged `quantized.delta.*` above compare the SAME weights run through the
+float twin and the HGQ2-quantized twin on layer-0 mask logits (computed before any
+mask-attention feedback, so deltas are not amplified by threshold flips). The paired
+criterion is what makes this non-vacuous: the high-bitwidth config must stay close to
+float (fails if the config scopes silently did not apply) while the low-bitwidth
+config must differ by more than 10x the high-bitwidth delta (fails if the quantizers
+are inert under the torch backend).
+
+Measured: high-bitwidth (20-bit weights, 24-bit datalane, 18-bit softmax tables)
+deviates ~0.30 abs on logits of scale ~15 (~2%) — dominated by the quantized-softmax
+exp/inv lookup tables accumulated across the attention pipeline; the `table`
+quantizer place bounds softmax accuracy INDEPENDENTLY of weight/datalane bitwidths
+(without configuring it the delta is ~2.7 regardless of the other bitwidths).
+Low-bitwidth (4-bit) deviates ~31 — a factor ~100 separation.

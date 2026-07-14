@@ -9,6 +9,37 @@ from hepattn.keras.factory import LayerFactory
 from hepattn.models.activation import SwiGLU
 from hepattn.models.dense import Dense
 
+
+def assign_dense(layer, weight: torch.Tensor, bias: torch.Tensor | None) -> None:
+    """Assign a torch-convention (out, in) weight matrix + bias to a keras Dense-like layer.
+
+    Raises:
+        RuntimeError: If the target layer has not been built yet.
+    """
+    if not layer.built:
+        raise RuntimeError(
+            f"keras layer '{layer.name}' is not built. Quantized (HGQ2) layers build lazily on their "
+            "first forward pass — run the model once on a representative batch before porting weights."
+        )
+    layer.kernel.assign(weight.detach().cpu().numpy().T)
+    if bias is not None:
+        layer.bias.assign(bias.detach().cpu().numpy())
+
+
+@torch.no_grad()
+def port_linear(linear: nn.Linear, layer) -> None:
+    assign_dense(layer, linear.weight, linear.bias)
+
+
+@torch.no_grad()
+def port_dense(dense: Dense, kdense: "KerasDense") -> None:
+    linears = [m for m in dense.net if isinstance(m, nn.Linear)]
+    klayers = [*kdense.hidden, kdense.final]
+    assert len(linears) == len(klayers), f"structure mismatch: {len(linears)} torch Linears vs {len(klayers)} keras Dense layers"
+    for lin, klayer in zip(linears, klayers, strict=True):
+        port_linear(lin, klayer)
+
+
 # torch activation-module class -> keras activation name
 ACTIVATION_NAMES: dict[type[nn.Module], str | None] = {
     nn.SiLU: "silu",
@@ -32,8 +63,10 @@ def activation_name(module: nn.Module) -> str:
 class KerasDense(nn.Module):
     """Mirror of hepattn Dense: [Linear+act (+dropout)]*hidden + Linear (+final act).
 
-    All keras sublayers are built eagerly at construction so their parameters exist
-    before Lightning's configure_optimizers runs (keras builds lazily by default).
+    Float sublayers are built eagerly at construction so their parameters exist before
+    Lightning's configure_optimizers runs. Quantized (HGQ2) sublayers build lazily at
+    the first forward (see _materialize) — quantized training drivers must run one
+    forward before creating the optimizer.
     """
 
     def __init__(
@@ -73,19 +106,30 @@ class KerasDense(nn.Module):
         if factory.quantize and self.gate:
             raise NotImplementedError("SwiGLU is not supported in quantized mode (not used by the CLIC config)")
 
+        # Float layers are built eagerly (parameters must exist before the optimizer is
+        # created). Quantized layers build LAZILY on the first forward: HGQ2 datalane
+        # quantizers materialize per-element bitwidth variables and the EBOPs parallelism
+        # count from the full static input shape, which is only known from real data
+        # (hepattn pads CLIC events to fixed max_nodes/num_queries, so shapes ARE static).
+        # Training drivers must therefore run one forward before creating the optimizer.
         hidden = []
         node_list = [input_size, *hidden_layers]
         for i in range(len(node_list) - 1):
             proj_dim = node_list[i + 1] * 2 if self.gate else node_list[i + 1]
             layer = factory.dense(proj_dim, activation=None if self.gate else activation, use_bias=bias, name=f"{name}_hidden{i}" if name else None)
-            layer.build((None, node_list[i]))
+            if not factory.quantize:
+                layer.build((None, node_list[i]))
             hidden.append(layer)
 
         final = factory.dense(output_size, activation=final_activation, use_bias=bias, name=f"{name}_final" if name else None)
-        final.build((None, node_list[-1]))
+        if not factory.quantize:
+            final.build((None, node_list[-1]))
 
         self.hidden = nn.ModuleList(hidden)
         self.final = final
+        # torch Dense whose weights are ported into this module at lazy build (quantized
+        # mode only — eagerly-built float layers are ported immediately by the caller)
+        self._pending_port: Dense | None = None
         self.dropout = None
         if dropout:
             if factory.quantize:
@@ -124,7 +168,27 @@ class KerasDense(nn.Module):
             name=name,
         )
 
+    def _materialize(self, x: Tensor) -> None:
+        """Build lazy (quantized) sublayers from the true static input shape and port pending weights.
+
+        HGQ2 layers need the full static shape (batch excluded) to size their per-element
+        bitwidth variables and EBOPs parallelism; it is only known at the first forward.
+        """
+        lead = (None, *(int(d) for d in x.shape[1:-1]))
+        in_size = self.input_size
+        for layer in self.hidden:
+            if not layer.built:
+                layer.build((*lead, in_size))
+            in_size = layer.units // 2 if self.gate else layer.units
+        if not self.final.built:
+            self.final.build((*lead, in_size))
+        if self._pending_port is not None:
+            port_dense(self._pending_port, self)
+            self._pending_port = None
+
     def forward(self, x: Tensor) -> Tensor:
+        if not self.final.built or self._pending_port is not None:
+            self._materialize(x)
         for layer in self.hidden:
             x = layer(x, training=self.training)
             if self.gate:

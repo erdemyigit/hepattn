@@ -33,12 +33,16 @@ class QuantSpec:
             HGQ2 scopes ``q_type``/``place`` are *selectors*; the quantizer type is
             chosen with ``default_q_type``.
         datalane: kwargs for ``QuantizerConfigScope(place="datalane", ...)``.
+        table: kwargs for ``QuantizerConfigScope(place="table", ...)`` — governs the
+            QSoftmax exp/inv lookup-table output precision, which bounds softmax
+            accuracy INDEPENDENTLY of weight/datalane bitwidths.
         ebops: kwargs for ``LayerConfigScope``; ``enable_ebops=True, beta0=1e-5``
             unless overridden.
     """
 
     weight: dict[str, Any] = field(default_factory=dict)
     datalane: dict[str, Any] = field(default_factory=dict)
+    table: dict[str, Any] = field(default_factory=dict)
     ebops: dict[str, Any] = field(default_factory=dict)
 
 
@@ -112,6 +116,8 @@ class LayerFactory:
                 stack.enter_context(QuantizerConfigScope(place="weight", **self.quant.weight))
             if self.quant.datalane:
                 stack.enter_context(QuantizerConfigScope(place="datalane", **self.quant.datalane))
+            if self.quant.table:
+                stack.enter_context(QuantizerConfigScope(place="table", **self.quant.table))
             stack.enter_context(LayerConfigScope(**{"enable_ebops": True, "beta0": 1e-5, **self.quant.ebops}))
             yield
 
@@ -129,3 +135,18 @@ class LayerFactory:
         if self.quantize:
             return QSoftmax(axis=axis, name=name)
         return SoftmaxOp(axis=axis, name=name)
+
+
+def apply_softmax(layer: keras.layers.Layer, x, attn_mask=None, training: bool = False):
+    """Call a factory-built softmax with a hepattn-convention (True=keep) boolean mask.
+
+    QSoftmax takes the mask via its keras `mask` argument (multiplicative, same
+    polarity, and — like SoftmaxOp and the torch fused SDPA kernels — produces zero
+    rows when fully masked); the float twin uses `attn_mask` to stay clear of keras's
+    mask-propagation machinery. QSoftmax is called directly rather than through a
+    subclass so its class path stays `hgq.layers.softmax.QSoftmax` — the hls4ml
+    converter dispatches on exactly that path.
+    """
+    if isinstance(layer, QSoftmax):
+        return layer(x, training=training, mask=attn_mask)
+    return layer(x, attn_mask=attn_mask, training=training)
