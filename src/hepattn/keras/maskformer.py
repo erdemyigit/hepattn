@@ -13,7 +13,7 @@ HGQ2 quantization-aware model on the identical graph (float weights warm-start Q
 import torch
 from torch import Tensor, nn
 
-from hepattn.keras import keras
+from hepattn.keras import get_keras_default_device, keras, set_keras_default_device
 from hepattn.keras.decoder import KerasMaskFormerDecoder
 from hepattn.keras.encoder import KerasEncoder
 from hepattn.keras.factory import LayerFactory
@@ -49,6 +49,15 @@ class KerasMaskFormer(MaskFormer):
                 (keys: weight, datalane, ebops) for the quantization-aware model.
         """
         factory = LayerFactory(quant)
+
+        # Reset keras's process-global name counters so every layer name — including the
+        # quantizer sub-layers HGQ2 creates internally, which cannot be named explicitly —
+        # is determined by construction order alone. Keras embeds these names in the torch
+        # state_dict keys; without the reset, a checkpoint written by the first model built
+        # in a process cannot be loaded into the second (e.g. Lightning's `test` restore).
+        device = get_keras_default_device()
+        keras.utils.clear_session(free_memory=False)
+        set_keras_default_device(device)
 
         with factory.scopes():
             keras_encoder = KerasEncoder(dim=dim, factory=factory, **encoder)
