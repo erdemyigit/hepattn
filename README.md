@@ -29,6 +29,7 @@ Our method has been successfully applied to various reconstruction tasks and det
 - **🚀 Performance optimised**: Full `torch.compile` and nested tensor support
 - **🧪 Thoroughly tested**: Comprehensive tests across multiple reconstruction tasks
 - **📦 Easy deployment**: Packaged with Pixi for reproducible environments
+- **🔩 FPGA-oriented quantization-aware training**: HGQ2/Keras-3 twin of the MaskFormer with hls4ml conversion — see [docs/hgq](docs/hgq/README.md)
 
 
 ## 🛠️ Setup
