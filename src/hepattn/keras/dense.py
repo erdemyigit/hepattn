@@ -128,8 +128,11 @@ class KerasDense(nn.Module):
         self.hidden = nn.ModuleList(hidden)
         self.final = final
         # torch Dense whose weights are ported into this module at lazy build (quantized
-        # mode only — eagerly-built float layers are ported immediately by the caller)
-        self._pending_port: Dense | None = None
+        # mode only — eagerly-built float layers are ported immediately by the caller).
+        # Stored via __dict__ to bypass nn.Module.__setattr__: registering it as a
+        # submodule would leak its parameters into state_dict/optimizer and expose it
+        # to later kerasify passes.
+        self.__dict__["_pending_port"] = None
         self.dropout = None
         if dropout:
             if factory.quantize:
@@ -184,7 +187,7 @@ class KerasDense(nn.Module):
             self.final.build((*lead, in_size))
         if self._pending_port is not None:
             port_dense(self._pending_port, self)
-            self._pending_port = None
+            self.__dict__["_pending_port"] = None
 
     def forward(self, x: Tensor) -> Tensor:
         if not self.final.built or self._pending_port is not None:

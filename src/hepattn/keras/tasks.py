@@ -87,7 +87,8 @@ def kerasify_module(module: nn.Module, factory: LayerFactory, name: str = "net")
             if factory.quantize:
                 # quantized layers build lazily at the first forward; the weight port
                 # happens there (KerasDense._materialize) from this retained source
-                kdense._pending_port = child  # noqa: SLF001
+                # (__dict__ storage keeps it out of the module tree — see KerasDense)
+                kdense.__dict__["_pending_port"] = child
             else:
                 port_dense(child, kdense)
             setattr(module, child_name, kdense)

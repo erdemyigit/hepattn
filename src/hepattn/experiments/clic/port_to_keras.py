@@ -36,12 +36,24 @@ def instantiate_model_section(model_cfg: dict) -> MaskFormer:
 
 
 def build_keras_maskformer_from_config(model_cfg: dict, quant: dict | None = None) -> KerasMaskFormer:
-    """Build a KerasMaskFormer from the torch model.model YAML section.
+    """Build a KerasMaskFormer from a model.model YAML section (torch or keras config).
 
-    input_nets / tasks / matcher are instantiated exactly as in the torch model (then
-    net-swapped in place by KerasMaskFormer); the encoder/decoder class_path sections
-    are reduced to their init_args dicts for the keras mirrors.
+    For a torch MaskFormer config, input_nets / tasks / matcher are instantiated exactly
+    as in the torch model (then net-swapped in place by KerasMaskFormer) and the
+    encoder/decoder class_path sections are reduced to their init_args dicts. A config
+    that already describes a KerasMaskFormer is instantiated directly (optionally with
+    a quant override) — it must not be wrapped a second time.
     """
+    if model_cfg["class_path"].rsplit(".", 1)[-1] == "KerasMaskFormer":
+        import copy  # noqa: PLC0415
+
+        cfg = copy.deepcopy(model_cfg)
+        if quant is not None:
+            cfg.setdefault("init_args", {})["quant"] = quant
+        model = instantiate_model_section(cfg)
+        assert isinstance(model, KerasMaskFormer)
+        return model
+
     init_args = dict(model_cfg["init_args"])
 
     encoder_cfg = dict(init_args["encoder"].get("init_args", init_args["encoder"]))
