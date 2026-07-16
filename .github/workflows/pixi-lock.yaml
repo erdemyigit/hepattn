@@ -1,7 +1,10 @@
 # TEMPORARY: regenerates pixi.lock on linux (cross-locking is impossible from macOS).
-# Trigger manually, download the pixi-lock artifact, commit it, then delete this file.
+# Runs on push to this branch; download the pixi-lock artifact, commit it, then delete this file.
 name: Regenerate pixi lock
-on: workflow_dispatch
+on:
+  push:
+    branches: [keras-hgq2]
+  workflow_dispatch:
 
 jobs:
   lock:
