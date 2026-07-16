@@ -12,7 +12,7 @@ import pytest
 try:
     import hepattn.keras as _hepattn_keras
 except ImportError:
-    _hepattn_keras = None
+    _hepattn_keras = None  # ty: ignore [invalid-assignment]
 
 if _hepattn_keras is not None:
     _hepattn_keras.set_keras_default_device("cpu")

@@ -20,8 +20,8 @@ import torch
 
 pytest.importorskip("hepattn.keras", reason="hgq dependency group not installed")
 
-from test_maskformer_parity import clic_dummy_batch, make_keras_model
-from test_quantized import HIGH_QUANT
+from test_maskformer_parity import clic_dummy_batch, make_keras_model  # ty: ignore [unresolved-import]
+from test_quantized import HIGH_QUANT  # ty: ignore [unresolved-import]
 
 from hepattn.keras import keras
 from hepattn.keras.export import build_functional_dense, convert_to_hls, load_keras_model, save_keras_model
@@ -176,7 +176,8 @@ def test_hls4ml_attention_core_bit_exact_csim(tmp_path):
     hls_model = csim_or_skip(model, tmp_path / "hls_core_csim")
     rng = np.random.default_rng(1)
     x = rng.standard_normal((64, 8, 16)).astype(np.float32)
-    y_keras = np.asarray(model(torch.from_numpy(x), training=False))
+    with torch.no_grad():
+        y_keras = np.asarray(model(torch.from_numpy(x), training=False))
     y_hls = np.asarray(hls_model.predict(x)).reshape(y_keras.shape)
     assert np.array_equal(y_hls, y_keras), f"attention core csim not bit-exact (max abs diff {np.abs(y_hls - y_keras).max():.3e})"
 

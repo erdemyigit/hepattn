@@ -13,7 +13,7 @@ from torch.nn import functional as F
 
 pytest.importorskip("hepattn.keras", reason="hgq dependency group not installed")
 
-from parity_utils import assert_parity, make_padded_batch
+from parity_utils import assert_parity, make_padded_batch  # ty: ignore [unresolved-import]
 
 from hepattn.keras.attention import KerasAttention
 from hepattn.keras.porting import port_attention
@@ -47,7 +47,7 @@ def test_qkv_projection_split():
     k = torch.randn(2, 14, DIM, generator=gen)
     v = torch.randn(2, 14, DIM, generator=gen)
     with torch.no_grad():
-        q_t, k_t, v_t = F._in_projection_packed(q, k, v, tattn.in_proj_weight, tattn.in_proj_bias)  # noqa: SLF001
+        q_t, k_t, v_t = F._in_projection_packed(q, k, v, tattn.in_proj_weight, tattn.in_proj_bias)  # noqa: SLF001  # ty: ignore [unresolved-attribute]
     assert_parity("attention.q_proj", "dim64h8", q_t, kattn.q_proj(q), atol=1e-6, rtol=1e-5)
     assert_parity("attention.k_proj", "dim64h8", k_t, kattn.k_proj(k), atol=1e-6, rtol=1e-5)
     assert_parity("attention.v_proj", "dim64h8", v_t, kattn.v_proj(v), atol=1e-6, rtol=1e-5)

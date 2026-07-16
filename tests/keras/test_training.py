@@ -10,8 +10,8 @@ import torch
 
 pytest.importorskip("hepattn.keras", reason="hgq dependency group not installed")
 
-from test_maskformer_parity import clic_dummy_batch, make_keras_model
-from test_quantized import HIGH_QUANT
+from test_maskformer_parity import clic_dummy_batch, make_keras_model  # ty: ignore [unresolved-import]
+from test_quantized import HIGH_QUANT  # ty: ignore [unresolved-import]
 
 
 def test_quantized_training_step_decreases_loss_and_moves_quantizers():

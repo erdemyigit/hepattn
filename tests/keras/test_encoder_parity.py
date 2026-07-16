@@ -5,7 +5,7 @@ import torch
 
 pytest.importorskip("hepattn.keras", reason="hgq dependency group not installed")
 
-from parity_utils import assert_parity, make_padded_batch
+from parity_utils import assert_parity, make_padded_batch  # ty: ignore [unresolved-import]
 
 from hepattn.keras.encoder import KerasEncoder
 from hepattn.keras.porting import port_encoder

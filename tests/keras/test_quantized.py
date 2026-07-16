@@ -15,8 +15,8 @@ import torch
 
 pytest.importorskip("hepattn.keras", reason="hgq dependency group not installed")
 
-from parity_utils import record_measurement
-from test_maskformer_parity import clic_dummy_batch, make_keras_model, make_torch_model
+from parity_utils import record_measurement  # ty: ignore [unresolved-import]
+from test_maskformer_parity import clic_dummy_batch, make_keras_model, make_torch_model  # ty: ignore [unresolved-import]
 
 from hepattn.keras.porting import port_keras_to_keras, port_maskformer
 from hepattn.keras.tasks import KerasIncidenceRegressionTask, KerasObjectHitMaskTask

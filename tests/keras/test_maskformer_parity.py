@@ -16,7 +16,7 @@ from torch import nn
 
 pytest.importorskip("hepattn.keras", reason="hgq dependency group not installed")
 
-from parity_utils import assert_parity
+from parity_utils import assert_parity  # ty: ignore [unresolved-import]
 
 import hepattn
 from hepattn.experiments.clic.pflow_data import CLICDataset
