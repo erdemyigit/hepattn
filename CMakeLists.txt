@@ -5,11 +5,13 @@ project(
   VERSION ${SKBUILD_PROJECT_VERSION}
   LANGUAGES CXX)
 
-SET(CMAKE_CXX_FLAGS "-Wall -O2 -Wfatal-errors -fstrict-aliasing -std=c++17 -fopenmp -flto -march=native")
+# NB: no -march=native — the built extension outlives the build machine (pixi/CI
+# caches, shared cluster installs), and native-only instructions SIGILL elsewhere.
+SET(CMAKE_CXX_FLAGS "-Wall -O2 -Wfatal-errors -fstrict-aliasing -std=c++17 -fopenmp -flto")
 # Check if the architecture is x86_64 and append specific flags
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
-    message(STATUS "x86_64 platform detected, adding SSE and 64-bit flags.")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -m64 -mfpmath=sse")
+    message(STATUS "x86_64 platform detected, adding SSE, AVX2 (x86-64-v3) and 64-bit flags.")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -m64 -mfpmath=sse -march=x86-64-v3")
 endif()
 
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
