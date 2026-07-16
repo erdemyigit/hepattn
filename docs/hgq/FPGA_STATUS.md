@@ -8,19 +8,23 @@ this document when they do).
 
 | Construct | Convert + HLS codegen | C-sim bit-exactness |
 |---|---|---|
-| `QDense` (linear / relu), rank-2 per-token | ✅ | gate runs on linux¹ |
-| `QDense` pointwise, rank-3 `(150, dim)` (CLIC head shape) | ✅ | gate runs on linux¹ |
-| Attention core: `QDense`×4 + `QEinsum`×2 + `QSoftmax`, fixed shapes | ✅ | gate runs on linux¹ |
+| `QDense` (linear / relu), rank-2 per-token | ✅ | ✅ verified (linux¹) |
+| `QDense` pointwise, rank-3 `(150, dim)` (CLIC head shape) | ✅ | ✅ verified (linux¹) |
+| Attention core: `QDense`×4 + `QEinsum`×2 + `QSoftmax`, fixed shapes | ✅ | ✅ verified (linux¹) |
 | silu **inline** in `QDense(activation="silu")` | ❌ (converter TypeError) | — |
-| silu as `QUnaryFunctionLUT(allow_heterogeneous_table=False)`, rank-2 | ✅ ² | gate runs on linux¹ |
+| silu as `QUnaryFunctionLUT(allow_heterogeneous_table=False)`, rank-2 | ✅ ² | codegen ✅ (add a csim gate next) |
 | `QUnaryFunctionLUT` on rank-3 (pointwise) inputs | ❌ (HGQ2 table-shape bug) | — |
 
 ¹ `hls_model.compile()` (C simulation) cannot build on macOS: hls4ml's bundled
 `ap_types` headers are incompatible with Apple's libc++ (`reference to 'complex' is
-ambiguous`). The bit-exactness tests skip there and act as gates on linux.
+ambiguous`). The gates skip there; they PASS on linux (verified in GitHub CI and on
+the falcon cluster, 2026-07-16): hls4ml C simulation of both the pointwise MLP and
+the full attention core is EXACTLY equal to keras — zero mismatches over 256/64
+random inputs.
 
 ² With a converter warning about `result_t` being propagated twice
-("bit-exactness may be compromised") — the linux csim gate is the arbiter.
+("bit-exactness may be compromised") — benign for the gated constructs above per
+the csim verdicts.
 
 Conversion must run under `torch.no_grad()` on the torch backend (the converter
 materializes LUT tables by evaluating activations and calling `.numpy()`);
