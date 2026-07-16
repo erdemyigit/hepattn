@@ -86,11 +86,11 @@ isambard = { features = ["gpu"] }
 cpu = { features = ["cpu"] }
 clic = { features = ["clic"] }
 tide = { features = ["tide"] }
-# NOTE: the `hgq` dependency group is currently uv-only. Wiring it into a pixi
-# environment (e.g. ci) requires regenerating pixi.lock on a linux machine —
+hgq = { features = ["cpu", "hgq"] }
+# NOTE: pixi.lock must be regenerated on linux after manifest changes —
 # cross-locking from macOS fails because the editable hepattn build and some
 # group sdists cannot be built for foreign platforms.
-ci = { features = ["cpu", "clic", "tide"]}
+ci = { features = ["cpu", "clic", "tide", "hgq"]}
 
 [tool.pixi.system-requirements]
 libc = "2.28"
