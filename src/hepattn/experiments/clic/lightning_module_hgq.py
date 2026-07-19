@@ -34,6 +34,25 @@ class MPflowHGQ(MPflow):
         set_keras_default_device("cpu")
         self._materialize_keras_layers(stage)
 
+    def _sync_keras_device(self) -> None:
+        # setup() ran on cpu (before Lightning moved the module); once training/eval starts
+        # on the real device, keras must create NEW tensors there too — quantizer internals
+        # (STE rounding, LUT domains) otherwise mix cpu constants with cuda activations
+        set_keras_default_device(str(self.device))
+
+    def on_fit_start(self) -> None:
+        super().on_fit_start()
+        self._sync_keras_device()
+
+    def on_validation_start(self) -> None:
+        self._sync_keras_device()
+
+    def on_test_start(self) -> None:
+        self._sync_keras_device()
+
+    def on_predict_start(self) -> None:
+        self._sync_keras_device()
+
     def _materialize_keras_layers(self, stage: str) -> None:
         datamodule = self.trainer.datamodule
         loader_fn = {
