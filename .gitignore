@@ -127,3 +127,4 @@ src/hepattn/experiments/cld/plots/
 src/hepattn/experiments/cld/eval/
 src/hepattn/experiments/trackml/eval/
 tests/keras/.parity_ledger.jsonl
+data/clic/

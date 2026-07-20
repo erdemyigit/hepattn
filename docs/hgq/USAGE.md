@@ -21,7 +21,28 @@ Notes:
   pyproject.toml and run `pixi lock`.
 - da4ml has no linux-aarch64 wheels (marker-gated; only needed for FPGA conversion).
 
-## Training (same CLI shape as the torch experiments)
+## Local training on Apple Silicon (M2/M3, MPS)
+
+For development/small studies without the cluster, `run_hgq_mac.sh` wraps the
+`pflow_hgq_local.yaml` config (MPS accelerator, batch 8 sized for 16 GB unified
+memory, logger disabled, `num_train`-bounded load of the full ROOT file, same
+calibrated β as production).
+
+```bash
+uv sync --group hgq --no-install-project   # --no-install-project: lap1015 C++ ext
+                                           # won't build with Apple clang (scipy
+                                           # matcher is the default; lap1015 optional)
+# stage the CLIC files once:
+scp falcon:~/data/clic/{train_clic_fix,val_clic_fix,test_clic_common_infer}.root data/clic/
+./src/hepattn/experiments/clic/run_hgq_mac.sh fit
+```
+
+The runner sets `PYTORCH_ENABLE_MPS_FALLBACK=1` (a few ops still route to CPU) and
+`TORCHDYNAMO_DISABLE=1` (the compiled loss registries are unsupported on Metal).
+Expect ~0.15–0.2 it/s — this path is for iteration and debugging, not production
+throughput; use the cluster for full campaigns.
+
+## Cluster training (same CLI shape as the torch experiments)
 
 ```bash
 # HGQ2 quantization-aware training
