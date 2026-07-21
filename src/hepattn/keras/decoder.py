@@ -12,7 +12,7 @@ from typing import Literal
 
 from torch import nn
 
-from hepattn.keras.attention import KerasAttention
+from hepattn.keras.attention import build_keras_attention
 from hepattn.keras.dense import KerasDense
 from hepattn.keras.factory import LayerFactory
 from hepattn.models.decoder import MaskFormerDecoder, MaskFormerDecoderLayer
@@ -53,24 +53,29 @@ class KerasMaskFormerDecoderLayer(MaskFormerDecoderLayer):
         self.dim = dim
         self.bidirectional_ca = bidirectional_ca
         self.cross_attn_mode = cross_attn_mode
-        self.attn_type = "torch"
 
         attn_norm, dense_post_norm, qkv_norm = get_hybrid_norm_config(norm, depth, hybrid_norm, qkv_norm)
 
         attn_kwargs = dict(attn_kwargs or {})
-        attn_kwargs.pop("attn_type", None)  # keras layers always use torch-SDPA semantics
+        attn_type = attn_kwargs.pop("attn_type", "torch")
+        if attn_type in {"flash", "flash-varlen"}:  # identical math on the dense-mask path
+            attn_type = "torch"
         attn_kwargs.pop("window_size", None)
+        self.attn_type = attn_type
         dense_kwargs = dict(dense_kwargs or {})
 
+        def attn(part: str):
+            return build_keras_attention(
+                dim, attn_type=attn_type, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_{part}", **attn_kwargs
+            )
+
         residual = partial(Residual, dim=dim)
-        self.q_ca = residual(KerasAttention(dim, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_q_ca", **attn_kwargs), norm=attn_norm)
-        self.q_sa = residual(KerasAttention(dim, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_q_sa", **attn_kwargs), norm=attn_norm)
+        self.q_ca = residual(attn("q_ca"), norm=attn_norm)
+        self.q_sa = residual(attn("q_sa"), norm=attn_norm)
         self.q_dense = residual(KerasDense(dim, factory=factory, name=f"{name}_q_ffn", **dense_kwargs), norm=norm, post_norm=dense_post_norm)
 
         if self.bidirectional_ca:
-            self.kv_ca = residual(
-                KerasAttention(dim, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_kv_ca", **attn_kwargs), norm=attn_norm
-            )
+            self.kv_ca = residual(attn("kv_ca"), norm=attn_norm)
             self.kv_dense = residual(KerasDense(dim, factory=factory, name=f"{name}_kv_ffn", **dense_kwargs), norm=norm, post_norm=dense_post_norm)
 
 

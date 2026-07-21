@@ -184,3 +184,19 @@ class KerasAttention(nn.Module):
 
         out = self.recombine_heads(out)
         return self.out_proj(out, training=self.training)
+
+
+def build_keras_attention(dim: int, attn_type: str = "torch", *, factory: "LayerFactory | None" = None, name: str | None = None, **attn_kwargs):
+    """Dispatch to the keras attention module for the requested backend.
+
+    torch/flash/flash-varlen -> KerasAttention (dense-SDPA semantics);
+    linformer -> KerasLinformerAttention (low-rank). Backend-specific kwargs
+    (linformer_seq_len/linformer_proj_dim) are consumed here.
+    """
+    if attn_type == "linformer":
+        from hepattn.keras.linformer import KerasLinformerAttention  # noqa: PLC0415  (avoids an import cycle)
+
+        seq_len = attn_kwargs.pop("linformer_seq_len", 256)
+        k = attn_kwargs.pop("linformer_proj_dim", 256)
+        return KerasLinformerAttention(dim, seq_len=seq_len, k=k, factory=factory, name=name, **attn_kwargs)
+    return KerasAttention(dim, attn_type=attn_type, factory=factory, name=name, **attn_kwargs)

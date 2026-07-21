@@ -30,6 +30,7 @@ __all__ = [
     "port_encoder_layer",
     "port_keras_to_keras",
     "port_linear",
+    "port_linformer",
     "port_maskformer",
     "port_residual",
     "port_swapped_module",
@@ -124,6 +125,20 @@ def port_decoder(decoder, kdecoder) -> None:
         if layer.bidirectional_ca:
             port_residual(layer.kv_ca, klayer.kv_ca, port_attention)
             port_residual(layer.kv_dense, klayer.kv_dense, port_dense)
+
+
+@torch.no_grad()
+def port_linformer(lin, klin) -> None:
+    """Port a torch LinformerAttention into a KerasLinformerAttention."""
+    from hepattn.models.linformer import LinformerAttention  # noqa: PLC0415
+
+    assert isinstance(lin, LinformerAttention), "expected a torch LinformerAttention"
+    assign_dense(klin.to_q, lin.to_q.weight, None)
+    assign_dense(klin.to_k, lin.to_k.weight, None)
+    assign_dense(klin.to_v, lin.to_v.weight, None)
+    port_linear(lin.to_out, klin.to_out)
+    klin.proj_k.copy_(lin.proj_k)
+    klin.proj_v.copy_(lin.proj_v if not lin.share_kv else lin.proj_k)
 
 
 @torch.no_grad()
