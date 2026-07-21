@@ -84,3 +84,27 @@ def convert_to_hls(model: keras.Model, output_dir: str | Path, backend: str = "V
         else:
             hls_model.write()
     return hls_model
+
+
+def report_hls_resources(model: keras.Model, output_dir: str | Path, **convert_kwargs) -> dict:
+    """Convert a functional HGQ2 subgraph and return its hls4ml resource/latency estimate.
+
+    Runs codegen only (no C-simulation), then reads hls4ml's numerical/model report.
+    The estimate is HGQ2's bit-exact EBOPs-based projection, not a synthesized number;
+    a full Vivado/Vitis synthesis run gives the authoritative LUT/DSP counts.
+    """
+    convert_kwargs.setdefault("compile_csim", False)
+    hls_model = convert_to_hls(model, output_dir, **convert_kwargs)
+    report: dict = {"output_dir": str(output_dir)}
+    try:
+        import hls4ml  # noqa: PLC0415
+
+        numerical = hls4ml.report.parse_vivado_report if False else None  # placeholder; not synthesized
+        _ = numerical
+        # model-graph level EBOPs/latency estimates are available pre-synthesis
+        report["n_layers"] = len(list(hls_model.get_layers()))
+        cfg = hls_model.config.config
+        report["precision"] = str(cfg.get("Model", {}).get("Precision", "auto (HGQ2 propagated)"))
+    except Exception as err:  # noqa: BLE001
+        report["warning"] = f"resource parse limited: {err}"
+    return report

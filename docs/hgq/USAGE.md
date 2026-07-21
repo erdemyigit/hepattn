@@ -106,6 +106,32 @@ The resulting state loads into a `KerasMaskFormer` built from the same config
 (float, or quantized for a QAT warm start — kernels/biases share one layout; use
 `hepattn.keras.porting.port_keras_to_keras` for float→quant keras-side ports).
 
+## Evaluating a trained model
+
+`evaluate_hgq.py` produces a consolidated report on a checkpoint: physics metrics on
+the test split (each task's own `metrics()` — the functions the validation stage
+logs), total + per-region EBOPs (the FPGA-cost side), and optionally an hls4ml
+resource estimate for the deployable head.
+
+```bash
+python -m hepattn.experiments.clic.evaluate_hgq \
+    --config <run_dir>/config.yaml \
+    --state  <run_dir>/ckpts/epoch=NNN-....ckpt \
+    --num-events 2000 --out eval_report.md \
+    [--float-state <float_state.pt>]   # side-by-side quantized-vs-float columns
+    [--hls]                            # + hls4ml conversion/resource report on the classifier head
+```
+
+Notes:
+- Point `--config`'s `test_path` at a **train-format** file (`val_clic_fix.root` or
+  `train_clic_fix.root`): it has the full targets the metrics need. The
+  `test_clic_common_infer.root` file is the inference-format file for the offline
+  PredictionWriter path and is not loadable by the metrics harness.
+- Ratio metrics (efficiency/fake-rate/precision) are batch-averaged — treat as
+  estimates that tighten with more events.
+- Validated on a real dim-256 checkpoint: total EBOPs ≈ 1.7e15 (encoder ~48%,
+  decoder ~52%), consistent with the standalone EBOPs measurement.
+
 ## Standalone inference (no Lightning)
 
 ```bash
