@@ -2,6 +2,14 @@
 # Differences from base.yaml: KerasMaskFormer model, torch-SDPA attention semantics,
 # fp32 precision, single device, no Compile callback, EBOPs monitoring, HGQ2 quantization + beta schedule.
 # Run with: python -m hepattn.experiments.clic.main_hgq fit --config <this file>
+#
+# Matched to Helen's config: linformer attention (encoder + decoder), batch_size 128,
+# bf16-mixed precision, AdamW, LR max 5e-5, 50 epochs, grad-clip norm.
+# Linformer here is our quantized KerasLinformerAttention (a QAT port of Helen's custom
+# backend). NOTE: at CLIC's N~168 the low-rank projection (k=256) gives NO sequence
+# compression (k > N); the batch-128 throughput win comes from bf16-mixed, validated
+# finite+grad-flowing against the HGQ2 quantizers (job 26777). k=256 is Helen's value and
+# is required by the projected-space masking (k >= kv_len).
 name: CLIC_pflow_HGQ
 seed_everything: 42
 data:
@@ -29,16 +37,17 @@ data:
   num_train: -1
   num_test: -1
   num_val: 5000
-  batch_size: 512
+  batch_size: 128  # matched to Helen (enabled by bf16-mixed; needs full A100 / heavy QOS)
   incidence_cutval: 0.01
   scale_dict_path: configs/clic_var_transform.yaml
 trainer:
-  max_epochs: 200
+  max_epochs: 50  # matched to Helen
   accelerator: gpu
   devices: 1
-  precision: 32
+  precision: bf16-mixed  # matched to Helen (validated finite+grad-flowing vs HGQ2, job 26777)
   gradient_clip_val: 0.1
-  log_every_n_steps: 50
+  gradient_clip_algorithm: norm  # matched to Helen
+  log_every_n_steps: 1000  # matched to Helen
   default_root_dir: logs
   enable_progress_bar: true
   logger:
@@ -65,10 +74,10 @@ trainer:
       beta_end: 1.0e-12
       warmup_steps: 5000
 model:
-  optimizer: Lion
+  optimizer: AdamW  # matched to Helen (was Lion)
   lrs_config:
     initial: 1e-6
-    max: 8e-5
+    max: 5e-5  # matched to Helen (was 8e-5)
     end: 1e-6
     pct_start: 0.05
     weight_decay: 1e-4
@@ -103,12 +112,14 @@ model:
                   scale: 0.1
       encoder:
         num_layers: 6
-        attn_type: torch
+        attn_type: linformer  # matched to Helen (KerasLinformerAttention; k=256 >= N=168)
         hybrid_norm: true
         value_residual: true
         num_register_tokens: 8
         attn_kwargs:
           num_heads: 16
+          linformer_seq_len: 256
+          linformer_proj_dim: 256
       decoder:
         num_decoder_layers: 4
         num_queries: 150
@@ -119,6 +130,9 @@ model:
           hybrid_norm: true
           attn_kwargs:
             num_heads: 16
+            attn_type: linformer  # matched to Helen (encoder + decoder linformer)
+            linformer_seq_len: 256
+            linformer_proj_dim: 256
       matcher:
         class_path: hepattn.models.matcher.Matcher
         init_args:
