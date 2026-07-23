@@ -56,9 +56,13 @@ python -m hepattn.experiments.clic.main_hgq test --config <run_dir>/config.yaml
 ```
 
 The configs read the exact same ROOT files as `base.yaml` (uproot, tree `EventTree`).
-Constraints baked into the generated configs: `precision: 32` (bf16-autocast ×
-quantizers is unvalidated), `devices: 1` (DDP over keras-torch modules not yet
-validated), no `Compile` callback.
+Constraints baked into the generated configs: `devices: 1` (DDP over keras-torch
+modules not yet validated), no `Compile` callback (measured net-slower on the
+quantized stack). `precision: bf16-mixed` is validated on CUDA (finite loss,
+quantizer bitwidth gradients flow); the quantizers keep fp32 internal state, so
+expect higher activation memory than the float twin (dim-256 model: micro-batch
+~32 per 40 GB — use gradient accumulation for larger effective batches, rescaling
+LR and grad-clip with the accumulation factor since the losses are mean-reduced).
 
 ## The `quant:` section
 
