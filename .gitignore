@@ -128,3 +128,7 @@ src/hepattn/experiments/cld/eval/
 src/hepattn/experiments/trackml/eval/
 tests/keras/.parity_ledger.jsonl
 data/clic/
+
+# Polaris kit: site-specific settings (never commit)
+polaris/env.sh
+polaris_hgq.yaml

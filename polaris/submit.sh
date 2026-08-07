@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Submit a job script with -A / -l filesystems= / -q filled in from polaris/env.sh,
+# so those site-specific values live in exactly one place.
+#
+#   bash polaris/submit.sh 04_smoke.pbs
+#   bash polaris/submit.sh 05_sweep.pbs
+#   bash polaris/submit.sh 05_sweep.pbs --depend afterany:1234567.polaris
+#
+# Prints the job id. Use `qstat -u $USER` to watch, `qdel <id>` to cancel.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$HERE/env.sh" ] || { echo "ERROR: create $HERE/env.sh from env.sh.example first"; exit 1; }
+source "$HERE/env.sh"
+
+[ "${PBS_PROJECT}" = "CHANGEME" ] && { echo "ERROR: set PBS_PROJECT in polaris/env.sh (see 00_discover.sh)"; exit 1; }
+
+SCRIPT="${1:?usage: submit.sh <script.pbs> [--depend <dep>]}"
+[ -f "$HERE/$SCRIPT" ] || [ -f "$SCRIPT" ] || { echo "ERROR: no such script: $SCRIPT"; exit 1; }
+[ -f "$HERE/$SCRIPT" ] && SCRIPT="$HERE/$SCRIPT"
+shift || true
+
+DEPEND=""
+QUEUE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --depend) DEPEND="$2"; shift 2 ;;
+    --queue)  QUEUE="$2";  shift 2 ;;
+    *) echo "unknown arg: $1"; exit 1 ;;
+  esac
+done
+
+ARGS=(-A "$PBS_PROJECT" -l "filesystems=$PBS_FILESYSTEMS")
+[ -n "$QUEUE" ]  && ARGS+=(-q "$QUEUE")
+[ -n "$DEPEND" ] && ARGS+=(-W "depend=$DEPEND")
+
+mkdir -p "$(dirname "$HERE")/logs"
+echo "qsub ${ARGS[*]} $SCRIPT"
+qsub "${ARGS[@]}" "$SCRIPT"

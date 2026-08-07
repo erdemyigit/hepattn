@@ -1,0 +1,99 @@
+#!/bin/bash -l
+#PBS -N hgq_sweep
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=24:00:00
+#PBS -q preemptable
+#PBS -j oe
+#PBS -o logs/hgq_sweep.log
+#
+# Submit with:  bash polaris/submit.sh 05_sweep.pbs
+# (-A and -l filesystems= come from polaris/env.sh)
+#
+# ============================================================================
+# MAXIMUM PARALLELISM, ZERO NEW RISK
+# ============================================================================
+# Every GPU on the node runs an INDEPENDENT single-GPU training at a different
+# beta_end (the EBOPs resource-penalty weight). No inter-GPU communication, so
+# all 4 GPUs sit at ~100% with no DDP overhead and no DDP risk — DDP over the
+# Keras-torch/HGQ2 stack is NOT validated (see polaris/README.md).
+#
+# This is also the experiment actually worth running: on the previous cluster we
+# measured that EBOPs did not move at all at beta_end=4e-15 (0.03% change while
+# beta nearly doubled), i.e. the resource pressure was too weak to compress the
+# learned bitwidths. One pass here maps the accuracy-vs-resources trade-off.
+#
+# Scale out by submitting this script N times — each job is one node / 4 more
+# GPUs. Set BETA_VALUES in env.sh (or export before submitting) to change points.
+# ============================================================================
+set -uo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+source polaris/env.sh
+export PYTHONNOUSERSITE=1 KERAS_BACKEND=torch TORCHDYNAMO_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+REPO="$WORK_ROOT/hepattn"; cd "$REPO"
+PY="$REPO/.venv/bin/python"
+mkdir -p logs
+
+NGPU=$(nvidia-smi -L | wc -l)
+read -r -a BETAS <<< "$BETA_VALUES"
+echo "=== node $(hostname): $NGPU GPUs, ${#BETAS[@]} beta points ==="
+nvidia-smi --query-gpu=index,name,memory.total --format=csv
+
+# --- chain a successor before running: walltime kills never reach the end of a script
+MARKER="$WORK_ROOT/SWEEP_COMPLETE"
+if [ -f "$MARKER" ]; then echo "sweep already complete"; exit 0; fi
+bash polaris/submit.sh 05_sweep.pbs --depend "afterany:$PBS_JOBID" >/dev/null 2>&1 \
+  && echo "queued successor for walltime continuation" \
+  || echo "WARNING: could not queue successor — resume manually if this job is cut"
+
+pids=()
+for i in "${!BETAS[@]}"; do
+  [ "$i" -ge "$NGPU" ] && { echo "more betas than GPUs; ${BETAS[$i]} deferred"; continue; }
+  B="${BETAS[$i]}"
+  TAG="beta${B}"
+  RUNDIR="$WORK_ROOT/sweep/$TAG"
+  CKPT="$RUNDIR/ckpts"
+  mkdir -p "$RUNDIR"
+
+  # one config per beta point
+  PYTHONPATH="$REPO/src" DATA_DIR="$DATA_ROOT" CKPT_DIR="$CKPT" HGQ_BETA_END="$B" \
+    "$PY" polaris/03_make_config.py > "$RUNDIR/config_gen.log" 2>&1
+  cp polaris_hgq.yaml "$RUNDIR/config.yaml"
+
+  # resume automatically if this beta point already has progress
+  RESUME=""
+  [ -f "$CKPT/last.ckpt" ] && RESUME="--ckpt_path $CKPT/last.ckpt" \
+    && echo "  GPU $i: resuming $TAG from $(basename "$CKPT/last.ckpt")"
+
+  echo "  GPU $i -> beta_end=$B  logs/$TAG.log"
+  CUDA_VISIBLE_DEVICES="$i" PYTHONPATH="$REPO/src" \
+    "$PY" -m hepattn.experiments.clic.main_hgq fit \
+      --config "$RUNDIR/config.yaml" \
+      --trainer.default_root_dir "$RUNDIR" \
+      $RESUME \
+      > "logs/$TAG.log" 2>&1 &
+  pids+=($!)
+done
+
+echo "=== ${#pids[@]} trainings running in parallel; waiting ==="
+fail=0
+for p in "${pids[@]}"; do wait "$p" || fail=$((fail+1)); done
+echo "=== finished: $((${#pids[@]}-fail)) ok, $fail failed ==="
+
+# mark complete only if every point reached the end of its schedule
+done_n=$(grep -l "max_epochs=${HGQ_EPOCHS}. reached" logs/beta*.log 2>/dev/null | wc -l)
+if [ "$done_n" -ge "${#pids[@]}" ]; then
+  touch "$MARKER"; echo "SWEEP-COMPLETE"
+else
+  echo "SWEEP-PARTIAL ($done_n/${#pids[@]} converged) — the queued successor resumes from last.ckpt"
+fi
+
+echo
+echo "Progress per point:"
+for f in logs/beta*.log; do
+  [ -e "$f" ] || continue
+  last=$(tr '\r' '\n' < "$f" | grep -aoE "Epoch [0-9]+" | tail -1)
+  echo "  $(basename "$f" .log): ${last:-starting}"
+done

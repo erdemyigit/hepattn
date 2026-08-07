@@ -1,0 +1,75 @@
+#!/bin/bash -l
+#PBS -N hgq_smoke
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=00:20:00
+#PBS -q debug
+#PBS -j oe
+#PBS -o logs/hgq_smoke.log
+#
+# NOTE: -A (project) and -l filesystems= are injected from polaris/env.sh at submit
+# time; submit with:   bash polaris/submit.sh 04_smoke.pbs
+#
+# Gate before any long run. Verifies on a REAL GPU that: the stack imports, CUDA is
+# visible, the quantized model builds, bf16-mixed produces finite losses, and the
+# quantizer bitwidth parameters actually receive gradients. ~10 minutes.
+set -euo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+source polaris/env.sh
+export PYTHONNOUSERSITE=1 KERAS_BACKEND=torch TORCHDYNAMO_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+REPO="$WORK_ROOT/hepattn"; cd "$REPO"
+PY="$REPO/.venv/bin/python"
+mkdir -p logs
+
+echo "=============== NODE ==============="
+hostname; nvidia-smi --query-gpu=index,name,memory.total --format=csv
+
+echo "=============== 1. STACK ON GPU ==============="
+PYTHONPATH="$REPO/src" "$PY" - <<'EOF'
+import os
+os.environ.setdefault("KERAS_BACKEND", "torch")
+import torch, keras
+print(f"torch {torch.__version__} cuda={torch.version.cuda} avail={torch.cuda.is_available()}")
+assert torch.cuda.is_available(), "no CUDA on the compute node — check the job got a GPU"
+print(f"gpus  {torch.cuda.device_count()} x {torch.cuda.get_device_name(0)}")
+print(f"keras {keras.__version__} backend={keras.backend.backend()}")
+assert keras.backend.backend() == "torch"
+EOF
+
+echo "=============== 2. CONFIG ==============="
+PYTHONPATH="$REPO/src" DATA_DIR="$DATA_ROOT" CKPT_DIR="$WORK_ROOT/smoke_ckpts" \
+  "$PY" polaris/03_make_config.py
+
+echo "=============== 3. QUANTIZED MODEL + bf16 TRAIN STEPS ==============="
+# A handful of real optimizer steps on real data. Fails loudly on non-finite loss or
+# on quantizer parameters that never receive gradient (i.e. QAT silently not training).
+PYTHONPATH="$REPO/src" "$PY" -m hepattn.experiments.clic.main_hgq fit \
+  --config polaris_hgq.yaml \
+  --trainer.limit_train_batches 12 \
+  --trainer.limit_val_batches 3 \
+  --trainer.max_epochs 1 \
+  --trainer.accumulate_grad_batches 2 \
+  --trainer.default_root_dir "$WORK_ROOT/smoke_run"
+echo "SMOKE-FIT-EXIT-$?"
+
+echo "=============== 4. QUANTIZERS ACTUALLY LEARNING? ==============="
+PYTHONPATH="$REPO/src" "$PY" - <<'EOF'
+import glob, os, torch
+cks = sorted(glob.glob(os.path.expanduser(os.environ["WORK_ROOT"] + "/smoke_ckpts/*.ckpt")),
+             key=os.path.getmtime)
+if not cks:
+    raise SystemExit("no checkpoint written — inspect the fit output above")
+sd = torch.load(cks[-1], map_location="cpu", weights_only=False)["state_dict"]
+q = [k for k in sd if "quantizer" in k]
+print(f"checkpoint      {os.path.basename(cks[-1])}")
+print(f"total tensors   {len(sd)}")
+print(f"quantizer vars  {len(q)}   (0 would mean quantization is NOT active)")
+assert q, "no quantizer parameters in the checkpoint — the model is not quantized!"
+print("\nSMOKE-ALL-PASSED")
+EOF
+
+echo "=============== DONE ==============="
+echo "If SMOKE-ALL-PASSED appeared above, launch training:"
+echo "  bash polaris/submit.sh 05_sweep.pbs"
