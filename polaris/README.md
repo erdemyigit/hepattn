@@ -65,6 +65,21 @@ accuracy-vs-resources curve, which is the open question.
 | Test data | `test_clic_common_infer.root` has `-9999` sentinel indices that crash the loader. Configs evaluate on `val_clic_fix.root`. |
 | QAT cost | ~2.3× the float per-step time on an A100. Budget accordingly. |
 
+## Queue reality on Polaris (measured from `00_discover.sh`)
+
+`prod`, `small`, and `medium` all have **`resources_min.nodect` >= 10** — they cannot
+run a 1-node job. For this work only two queues apply:
+
+| queue | nodes | max walltime | use |
+|---|---|---|---|
+| `debug` | 1-2 | 1 h | `04_smoke.pbs`, `06_ddp_validate.pbs` |
+| `preemptable` | 1-10 | **72 h** | `05_sweep.pbs` (production) |
+
+**`preemptable` jobs can be killed at any moment** to make room for higher-priority
+work. That is fine here and is why the sweep checkpoints every 1000 steps, chains a
+successor *before* starting, and auto-resumes each beta point from its own
+`last.ckpt`. Expect restarts; they cost at most ~1000 steps of progress each.
+
 ## Files
 
 | file | what it does |
