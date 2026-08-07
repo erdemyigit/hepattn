@@ -43,6 +43,15 @@ fi
 cd "$REPO"
 echo "==> at commit $(git log --oneline -1)"
 
+# Carry env.sh into the work-space clone so there is exactly one configured copy and
+# every later command can run from $REPO (where the 10 TB project space lives).
+if [ "$HERE/env.sh" -ef "$REPO/polaris/env.sh" ]; then
+  echo "==> env.sh already in the work-space clone"
+else
+  cp "$HERE/env.sh" "$REPO/polaris/env.sh"
+  echo "==> copied env.sh into $REPO/polaris/"
+fi
+
 # ---------------------------------------------------------------- venv + deps
 # --no-install-project: the optional lap1015 matcher extension is not needed
 # (scipy is the default solver) and its build is fragile on HPC toolchains.
@@ -77,10 +86,15 @@ EOF
 cat <<EOF
 
 ==================== NEXT ====================
-  Data:   bash polaris/02_stage_data.sh
-  Smoke:  qsub polaris/04_smoke.pbs        # ~10 min on 1 GPU, gates everything
-  Train:  qsub polaris/05_sweep.pbs        # 4 GPUs, 4 beta values in parallel
+  RUN EVERYTHING FROM THE WORK-SPACE CLONE (project space, 10 TB):
+
+      cd $REPO
+
+  Data:   bash polaris/02_stage_data.sh    # SKIP if DATA_ROOT already has the files
+  Smoke:  bash polaris/submit.sh 04_smoke.pbs     # ~10 min, gates everything
+  Train:  bash polaris/submit.sh 05_sweep.pbs     # every GPU, one beta each
 
   Repo:   $REPO
   Venv:   $REPO/.venv
+  Data:   $DATA_ROOT
 EOF
