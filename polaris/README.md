@@ -100,6 +100,12 @@ successor *before* starting, and auto-resumes each beta point from its own
 `~/.local/lib/python3.12/site-packages` is shadowing the venv. The scripts export
 `PYTHONNOUSERSITE=1`; if it persists, `mv ~/.local/lib ~/.local/lib.disabled`.
 
+**`resolved Python interpreter ... is incompatible with the project's Python
+requirement: == 3.12`** — `pyproject.toml` pins `== 3.12`, which in PEP 440 means
+exactly **3.12.0**, so a system 3.12.x interpreter is rejected. `01_setup_env.sh` now
+fetches a uv-managed 3.12.0. To fix an existing broken venv by hand:
+`rm -rf .venv && uv python install 3.12.0 && uv venv --python 3.12.0 .venv && uv sync --group hgq --no-install-project`
+
 **`no pip` inside the environment** — `python -m ensurepip` then always call
 `python -m pip` (never bare `pip`, which may resolve to the system one).
 

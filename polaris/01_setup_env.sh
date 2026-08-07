@@ -55,10 +55,17 @@ fi
 # ---------------------------------------------------------------- venv + deps
 # --no-install-project: the optional lap1015 matcher extension is not needed
 # (scipy is the default solver) and its build is fragile on HPC toolchains.
-echo "==> creating venv (python 3.12)"
-uv venv --python 3.12 .venv
+# pyproject pins requires-python = "== 3.12", which under PEP 440 means EXACTLY
+# 3.12.0 — not 3.12.x. A system interpreter like 3.12.13 is rejected by uv. Have uv
+# fetch a managed 3.12.0 so this does not depend on what the host happens to ship.
+PYVER="3.12.0"
+echo "==> ensuring CPython $PYVER is available (uv-managed)"
+uv python install "$PYVER"
+echo "==> creating venv (python $PYVER)"
+rm -rf .venv
+uv venv --python "$PYVER" .venv
 echo "==> installing base + hgq dependency group (this takes a few minutes)"
-uv sync --group hgq --no-install-project
+uv sync --group hgq --no-install-project --python .venv/bin/python
 
 PY="$REPO/.venv/bin/python"
 
