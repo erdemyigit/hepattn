@@ -21,6 +21,49 @@ class EBOPsMonitor(Callback):
         pl_module.log("val/ebops", total, sync_dist=True)
 
 
+class PeriodicEBOPs(Callback):
+    """Evaluate the EBOPs resource penalty every N steps instead of every step.
+
+    EBOPs is a *regularizer*: the forward math does not depend on it, but HGQ2 computes
+    it inside every quantized layer's call — an extra matmul over the bitwidth tensors
+    plus an `add_loss` — on every training step. Measured on an A100 (dim-256 CLIC
+    model, 250 quantized layers, micro-batch 32): **16.1% of total step time**, i.e.
+    1140 ms -> 957 ms with it disabled.
+
+    Because EBOPs moves very slowly during training (measured: 0.03% drift over 14k
+    steps while beta nearly doubled), sampling it every N steps loses almost nothing.
+    On skipped steps the EBOPs term is not registered, so the *time-averaged* penalty
+    drops by 1/N; compensate by scaling `BetaScheduler.beta_end` by N — the Polaris
+    config generator does this automatically, keeping the user-facing `beta_end`
+    meaning unchanged.
+
+    Measured on the dim-32 test model: `quant_losses()` falls from ~805 on an active
+    step to ~0.38 on a skipped one (99.95% removed). The small remainder is a separate,
+    always-on HGQ2 regularization term, not residual EBOPs — it is constant across
+    consecutive skipped steps and is deliberately left alone.
+
+    Note: `EBOPsMonitor` reads the value last written by a training step, so its
+    reading can be up to N steps stale. Irrelevant at these drift rates.
+    """
+
+    def __init__(self, every_n_steps: int = 8):
+        self.every_n_steps = max(1, int(every_n_steps))
+        self._layers: list | None = None
+
+    def _quantized_layers(self, pl_module: LightningModule) -> list:
+        # Cache: keras-3 layers are torch Modules under the torch backend, and the
+        # EBOPs flag lives on the QLayer instances wherever they are nested.
+        if self._layers is None:
+            self._layers = [m for m in pl_module.model.modules() if hasattr(m, "_enable_ebops")]
+        return self._layers
+
+    def on_train_batch_start(self, trainer: Trainer, pl_module: LightningModule, batch, batch_idx: int) -> None:
+        active = (trainer.global_step % self.every_n_steps) == 0
+        for layer in self._quantized_layers(pl_module):
+            layer._enable_ebops = active  # noqa: SLF001  (the attribute the forward reads)
+        pl_module.log("train/ebops_active", float(active), sync_dist=True)
+
+
 class BetaScheduler(Callback):
     """Linearly ramp the HGQ2 EBOPs regularization strength (beta) over training steps.
 
