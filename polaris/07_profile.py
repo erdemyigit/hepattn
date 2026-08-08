@@ -204,8 +204,16 @@ def main():
 
     print("\n================ C. LAUNCH-BOUND CHECK ================")
     ka = prof.key_averages()
-    launches = sum(e.count for e in ka if e.self_cuda_time_total > 0)
-    cuda_us = sum(e.self_cuda_time_total for e in ka)
+
+    def dev_us(e):  # torch >= 2.9 renamed self_cuda_time_total -> self_device_time_total
+        return getattr(e, "self_device_time_total", None) or getattr(e, "self_cuda_time_total", 0)
+
+    launches = sum(e.count for e in ka if dev_us(e) > 0)
+    cuda_us = sum(dev_us(e) for e in ka)
+    cpu_us = sum(e.self_cpu_time_total for e in ka)
+    print(f"  CPU self time  : {cpu_us / 1e3:>10.1f} ms over 3 steps")
+    print(f"  GPU self time  : {cuda_us / 1e3:>10.1f} ms over 3 steps")
+    print("  (CPU > GPU means the step is launch/dispatch bound, not compute bound)")
     print(f"  distinct CUDA-active op invocations : {launches:>10,} over 3 steps"
           f"  ({launches // 3:,}/step)")
     print(f"  total CUDA self time                : {cuda_us / 1e3:>10.1f} ms over 3 steps")
@@ -213,7 +221,7 @@ def main():
     print("  (a few us per op => launch-bound, not FLOP-bound)")
 
     print("\n================ D. HOST-SYNC OPS IN THE STEP ================")
-    suspects = ("nonzero", "item", "_local_scalar_dense", "copy_", "to", "sync")
+    suspects = ("nonzero", "item", "_local_scalar_dense", "sync")
     hits = [e for e in ka if any(s in e.key.lower() for s in suspects)]
     hits.sort(key=lambda e: -e.self_cpu_time_total)
     if hits:
