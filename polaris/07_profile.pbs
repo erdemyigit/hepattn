@@ -1,0 +1,29 @@
+#!/bin/bash -l
+#PBS -N hgq_prof
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=00:30:00
+#PBS -q debug
+#PBS -j oe
+#PBS -o logs/hgq_profile.log
+#
+# Submit with:  bash polaris/submit.sh 07_profile.pbs
+#
+# Answers "why is QAT slow, and is any of it avoidable" with measurements taken on a
+# DEDICATED A100 rather than a shared GPU or MPS. Safe to run alongside the sweep:
+# it uses one GPU on a separate debug-queue node for ~10 minutes.
+set -uo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+source polaris/env.sh
+export PYTHONNOUSERSITE=1 KERAS_BACKEND=torch TORCHDYNAMO_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+REPO="$WORK_ROOT/hepattn"; cd "$REPO"
+mkdir -p logs
+
+nvidia-smi --query-gpu=index,name,memory.total --format=csv | head -2
+
+# one GPU only: this measures single-device step cost, not scaling
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$REPO/src" PROF_EVENTS=32 DATA_ROOT="$DATA_ROOT" \
+  "$REPO/.venv/bin/python" polaris/07_profile.py
+echo "PROFILE-EXIT-$?"
