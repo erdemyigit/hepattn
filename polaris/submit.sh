@@ -13,7 +13,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "$HERE/env.sh" ] || { echo "ERROR: create $HERE/env.sh from env.sh.example first"; exit 1; }
 source "$HERE/env.sh"
 
-[ "${PBS_PROJECT}" = "CHANGEME" ] && { echo "ERROR: set PBS_PROJECT in polaris/env.sh (see 00_discover.sh)"; exit 1; }
+# Required. Checked explicitly rather than relying on `set -u`, which would abort with a
+# bare "unbound variable" and no hint about which file to edit.
+for required in PBS_PROJECT PBS_FILESYSTEMS; do
+  [ -n "${!required:-}" ] || { echo "ERROR: set $required in $HERE/env.sh (see 00_discover.sh)"; exit 1; }
+done
+[ "$PBS_PROJECT" = "CHANGEME" ] && { echo "ERROR: set PBS_PROJECT in polaris/env.sh (see 00_discover.sh)"; exit 1; }
 
 SCRIPT="${1:?usage: submit.sh <script.pbs> [--depend <dep>]}"
 [ -f "$HERE/$SCRIPT" ] || [ -f "$SCRIPT" ] || { echo "ERROR: no such script: $SCRIPT"; exit 1; }
@@ -35,10 +40,12 @@ done
 # --queue was given explicitly, so the hardcoded #PBS -q in each header always won and
 # editing env.sh had no effect. Command-line options override in-script directives, so
 # the headers remain as standalone-qsub fallbacks.
+# Defaulted, NOT required: an env.sh written before these knobs existed must keep working.
+# Under `set -u` a bare reference would abort the submission outright.
 BASE="$(basename "$SCRIPT")"
 case "$BASE" in
-  05_sweep.pbs) DEF_QUEUE="$QUEUE_PROD";  DEF_WALL="$WALLTIME_PROD"  ;;
-  *)            DEF_QUEUE="$QUEUE_DEBUG"; DEF_WALL="$WALLTIME_SMOKE" ;;
+  05_sweep.pbs) DEF_QUEUE="${QUEUE_PROD:-preemptable}"; DEF_WALL="${WALLTIME_PROD:-72:00:00}"  ;;
+  *)            DEF_QUEUE="${QUEUE_DEBUG:-debug}";      DEF_WALL="${WALLTIME_SMOKE:-00:20:00}" ;;
 esac
 QUEUE="${QUEUE:-$DEF_QUEUE}"
 
