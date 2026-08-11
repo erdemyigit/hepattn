@@ -21,6 +21,37 @@ class EBOPsMonitor(Callback):
         pl_module.log("val/ebops", total, sync_dist=True)
 
 
+class BitwidthMonitor(Callback):
+    """Log statistics of the *learned bitwidths* — the actual output variable of QAT.
+
+    Nothing else logs this. `EBOPsMonitor` reports the resource estimate and
+    `BetaScheduler` reports the penalty strength, but neither answers the only question
+    QAT exists to answer: are the bitwidths moving?
+
+    This matters because the reported EBOPs total is NOT the quantity the loss minimizes
+    (see `hepattn.keras.evaluate.effective_ebops`). A beta sweep can therefore look
+    plausible on every logged metric while being completely inert. Measured on Polaris:
+    four decades of beta moved the mean bitwidth from 8.0000 to 7.981 — a 0.01% spread
+    across the whole sweep — and it took reading tensors out of checkpoints to notice,
+    because no metric on disk carried the number.
+
+    Bitwidths live in the quantizer variables whose parameter names end in `/b`.
+    """
+
+    def _bit_params(self, pl_module: LightningModule) -> list[torch.Tensor]:
+        return [p.detach() for name, p in pl_module.model.named_parameters() if name.endswith("/b")]
+
+    def on_validation_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        bits = self._bit_params(pl_module)
+        if not bits:
+            return
+        per_layer_means = torch.stack([b.float().mean() for b in bits])
+        pl_module.log("val/bits_mean", per_layer_means.mean(), sync_dist=True)
+        pl_module.log("val/bits_min", torch.stack([b.float().min() for b in bits]).min(), sync_dist=True)
+        pl_module.log("val/bits_max", torch.stack([b.float().max() for b in bits]).max(), sync_dist=True)
+        pl_module.log("val/bits_n_layers", float(len(bits)), sync_dist=True)
+
+
 class PeriodicEBOPs(Callback):
     """Evaluate the EBOPs resource penalty every N steps instead of every step.
 

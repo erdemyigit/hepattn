@@ -95,8 +95,26 @@ cbs.append({
     },
 })
 t["callbacks"] = cbs
+
+# Logging. The repo default is Comet; compute nodes have no outbound network, so it is
+# forced offline. Offline Comet writes an opaque archive, which meant a 4-day sweep ran
+# with NO readable metrics on disk — the beta/EBOPs trend could only be reconstructed
+# afterwards from checkpoint tensors. Always attach a CSVLogger so `metrics.csv` lands
+# next to the checkpoints, whatever the primary logger does.
+loggers = []
 if isinstance(t.get("logger"), dict):
-    t["logger"].setdefault("init_args", {})["online"] = False  # no outbound net on compute nodes
+    t["logger"].setdefault("init_args", {})["online"] = False
+    loggers.append(t["logger"])
+elif isinstance(t.get("logger"), list):
+    for lg in t["logger"]:
+        if isinstance(lg, dict) and "Comet" in lg.get("class_path", ""):
+            lg.setdefault("init_args", {})["online"] = False
+    loggers.extend(t["logger"])
+loggers.append({
+    "class_path": "lightning.pytorch.loggers.CSVLogger",
+    "init_args": {"save_dir": CKPT_DIR, "name": "csv", "flush_logs_every_n_steps": 200},
+})
+t["logger"] = loggers
 
 m = cfg["model"]
 m["optimizer"] = "AdamW"
@@ -142,6 +160,10 @@ else:
     })
 if not any("EBOPsMonitor" in c.get("class_path", "") for c in t["callbacks"]):
     t["callbacks"].append({"class_path": "hepattn.keras.callbacks.EBOPsMonitor"})
+# The learned bitwidths are the only direct readout of whether QAT is doing anything.
+# Without this, an inert beta sweep looks healthy on every other metric.
+if not any("BitwidthMonitor" in c.get("class_path", "") for c in t["callbacks"]):
+    t["callbacks"].append({"class_path": "hepattn.keras.callbacks.BitwidthMonitor"})
 if EBOPS_EVERY > 1 and not any("PeriodicEBOPs" in c.get("class_path", "") for c in t["callbacks"]):
     t["callbacks"].append({
         "class_path": "hepattn.keras.callbacks.PeriodicEBOPs",
@@ -164,5 +186,7 @@ print(f"  precision  {PRECISION}")
 print(f"  lr max     {LR_MAX:.3e}   clip {CLIP}   (invariant to accum)")
 print(f"  beta_end   {BETA_END:.2e}   epochs {EPOCHS}")
 if EBOPS_EVERY > 1:
-    print(f"  EBOPs      every {EBOPS_EVERY} steps (beta_end scaled to {BETA_END_EFFECTIVE:.2e}"
-          f" so time-averaged pressure is unchanged); ~16% faster steps")
+    print(
+        f"  EBOPs      every {EBOPS_EVERY} steps (beta_end scaled to {BETA_END_EFFECTIVE:.2e}"
+        f" so time-averaged pressure is unchanged); ~16% faster steps"
+    )

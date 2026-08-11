@@ -41,12 +41,35 @@ and there are two concrete hazards: quantized layers **build lazily at first for
 silent failure here produces wrong science, not a crash. See `06_ddp_validate.pbs` if
 you want to unlock it.
 
-**2. The sweep is the experiment worth running.** On the previous cluster we measured
-that **EBOPs did not move** — 1.676e15 at step 15k vs 1.6755e15 at step 29k (0.03%)
-while beta nearly doubled. Even at full ramp `beta*EBOPs ≈ 6.7` against a task loss of
-~25, so the resource gradient is too weak to compress the learned bitwidths. Repeating
-one long run at that beta would re-measure nothing. Sweeping it maps the
-accuracy-vs-resources curve, which is the open question.
+**2. The sweep maps the accuracy-vs-resources curve** — but **`BETA_VALUES` must be
+calibrated first, and the obvious way to do it is wrong.** See the warning below.
+
+> ### ⚠️ Do not calibrate beta from `total_ebops`
+>
+> The first Polaris sweep (`BETA_VALUES="4.0e-15 … 4.0e-12"`, 4 GPUs, 4 days) was
+> **inert**. Measured from the checkpoints, mean learned bitwidth after 4 epochs:
+>
+> | beta | 4.0e-15 | 4.0e-14 | 4.0e-13 | 4.0e-12 |
+> |---|---|---|---|---|
+> | mean bits (from 8.0000) | 7.9815 | 7.9815 | 7.9813 | 7.9807 |
+>
+> **Four decades of beta produced a 0.0008-bit spread (0.01%)**, and all four runs had
+> near-identical val-loss curves. Cause: that range was derived from `total_ebops`
+> (~1.7e15), but `quant_losses()` is affine in beta —
+> `quant_loss = floor + beta * E_eff` — and **`E_eff` is ~5 orders of magnitude smaller
+> than `total_ebops`**, because ~94% of the reported total comes from `QSoftmax` layers
+> whose cost never enters the regularization loss. So `beta*E_eff` was ~1e-1 against a
+> task loss of ~30, not the ~6.8 the arithmetic predicted.
+>
+> **Calibrate against `E_eff`:**
+> ```python
+> from hepattn.keras.evaluate import effective_ebops
+> e_eff, floor = effective_ebops(model, batch)   # measures the slope, restores beta
+> beta = target_fraction * task_loss / e_eff     # e.g. 0.25 * 30 / e_eff
+> ```
+> Covered by `tests/keras/test_effective_ebops.py` (7 tests; 3 fail if `E_eff` is
+> aliased back to `total_ebops`). `BitwidthMonitor` now logs `val/bits_mean` so an inert
+> sweep is visible on day one instead of day four.
 
 **More parallelism:** submit `05_sweep.pbs` again — each submission is another node
 (4 more GPUs). Add points by editing `BETA_VALUES` in `env.sh`.
