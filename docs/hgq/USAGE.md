@@ -3,11 +3,52 @@
 ## Environment
 
 The keras/HGQ2 stack lives in the `hgq` dependency group (keras ≥3.8, hgq2, hls4ml
-≥1.2, da4ml). With uv (works on macOS and linux):
+≥1.2, da4ml). There are two supported paths, and **they resolve `torch` differently**.
+That difference is the most common setup trap, so choose deliberately.
+
+### uv — recommended; macOS and linux, GPU works with no extra flags
 
 ```bash
 uv sync --group hgq
 ```
+
+`torch` is **not** a direct dependency of hepattn (it arrives transitively via
+lightning / torchjd / lion-pytorch) and the `hgq` group does not pin it, so uv installs
+the default PyPI wheel — which on linux-x86_64 bundles CUDA. Nothing further is needed
+for GPU training. This is the path the falcon and Polaris runs actually used.
+
+### pixi — linux only; the `hgq` environment is CPU-only BY DESIGN
+
+pixi overrides torch per feature (`cpu` → `.../whl/cpu`, `gpu` → `.../whl/cu128`), and
+`pyproject.toml` defines the environment as:
+
+```toml
+hgq = { features = ["cpu", "hgq"] }
+```
+
+So `pixi install -e hgq` yields a CPU-only torch, and `torch.cuda.is_available()` is
+False **even on a GPU node**. That is intentional: this environment serves CI and
+hls4ml C-simulation, neither of which needs CUDA.
+
+For GPU training under pixi, add a *separate* environment rather than flipping this
+one (the CPU build is still wanted):
+
+```toml
+hgq-gpu = { features = ["gpu", "hgq"] }
+```
+
+then regenerate the lock **on a linux host** (`pixi lock`) — cross-locking from macOS
+fails, because the editable hepattn build and some group sdists cannot be built for
+foreign platforms. `[tool.pixi.system-requirements] cuda` is checked at install time,
+so install from a compute node, or export `CONDA_OVERRIDE_CUDA=12.8` on a login node
+without a driver.
+
+### ALCF Polaris
+
+Do not set this up by hand — `polaris/01_setup_env.sh` is turnkey. It builds a uv venv
+on a uv-managed CPython **3.12.0** (`requires-python = "== 3.12"` means *exactly*
+3.12.0 under PEP 440, so a system 3.12.x is rejected), exports `PYTHONNOUSERSITE=1`,
+skips flash-attn, and verifies the result. See `polaris/README.md`.
 
 Notes:
 - `KERAS_BACKEND` must be `torch` (or unset — `hepattn.keras` pins it on import and
@@ -15,10 +56,11 @@ Notes:
 - The keras torch backend auto-selects cuda/mps for new tensors independently of
   where your torch code runs; drivers pin it (`set_keras_default_device`). The
   Lightning integration handles this for you.
-- pixi: the `hgq` group is not yet wired into a pixi environment — regenerating
-  pixi.lock requires a linux host (cross-locking fails from macOS). To add it, on a
-  linux machine append an `hgq = { features = ["cpu", "hgq"] }` environment in
-  pyproject.toml and run `pixi lock`.
+- `torch.cuda.is_available()` is False on any **login node** regardless of how the
+  environment was built — always confirm GPU visibility from a compute node.
+- flash-attn is **not** required: the keras/HGQ2 path never imports it, `flash` and
+  `flash-varlen` are coerced to torch SDPA, and the CLIC config uses the in-repo
+  linformer.
 - da4ml has no linux-aarch64 wheels (marker-gated; only needed for FPGA conversion).
 
 ## Local training on Apple Silicon (M2/M3, MPS)
