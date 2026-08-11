@@ -1,7 +1,64 @@
 """Lightning callbacks for HGQ2 housekeeping (ports of the keras-native utilities)."""
 
+import csv
+from pathlib import Path
+
 import torch
 from lightning import Callback, LightningModule, Trainer
+
+
+class MetricsCsvWriter(Callback):
+    """Append every logged metric to a plain CSV, one row per validation epoch.
+
+    Exists because on a compute node the repo's Comet logger is forced offline and
+    writes an opaque archive, so a 4-day beta sweep produced NO readable metrics on
+    disk — the trend could only be reconstructed afterwards by loading checkpoint
+    tensors.
+
+    Why a callback rather than Lightning's `CSVLogger`: the repo's CLI hardcodes
+    `trainer.logger.init_args.offline_directory` and links `name` into
+    `trainer.logger.init_args.name`, both of which assume `trainer.logger` is a single
+    entry. Passing a *list* of loggers makes jsonargparse replace the list with a bare
+    Namespace carrying no `class_path`, and the run dies at instantiation — measured on
+    Polaris, the smoke test failed exactly this way. A callback never touches the logger
+    machinery, so it works whatever the primary logger is.
+
+    Captures the latest value of every metric in `trainer.callback_metrics`, so train
+    metrics are end-of-epoch snapshots rather than per-step curves. That is the cadence
+    the resource/accuracy question needs (is `val/bits_mean` moving between epochs?).
+
+    Register this AFTER any callback whose metrics it should capture — Lightning runs
+    callbacks in list order, so `BitwidthMonitor` must log before this writes.
+    """
+
+    def __init__(self, path: str):
+        self.path = Path(path)
+        self._header: list[str] | None = None
+
+    def on_validation_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        if trainer.sanity_checking:  # a sanity-check row would carry meaningless values
+            return
+        row: dict[str, float] = {"epoch": float(trainer.current_epoch), "step": float(trainer.global_step)}
+        for key, value in trainer.callback_metrics.items():
+            try:
+                row[key] = float(value)
+            except (TypeError, ValueError):
+                continue  # non-scalar metrics (e.g. confusion matrices) are not CSV-able
+        self._append(row)
+
+    def _append(self, row: dict[str, float]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self._header is None:
+            if self.path.exists() and self.path.stat().st_size > 0:
+                # Resuming: keep the existing schema so the file stays parseable as one table.
+                with self.path.open(newline="") as f:
+                    self._header = next(csv.reader(f))
+            else:
+                self._header = ["epoch", "step", *sorted(k for k in row if k not in {"epoch", "step"})]
+                with self.path.open("w", newline="") as f:
+                    csv.writer(f).writerow(self._header)
+        with self.path.open("a", newline="") as f:
+            csv.DictWriter(f, fieldnames=self._header, extrasaction="ignore").writerow({k: row.get(k, "") for k in self._header})
 
 
 class EBOPsMonitor(Callback):

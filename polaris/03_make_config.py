@@ -108,25 +108,14 @@ cbs.append({
 })
 t["callbacks"] = cbs
 
-# Logging. The repo default is Comet; compute nodes have no outbound network, so it is
-# forced offline. Offline Comet writes an opaque archive, which meant a 4-day sweep ran
-# with NO readable metrics on disk — the beta/EBOPs trend could only be reconstructed
-# afterwards from checkpoint tensors. Always attach a CSVLogger so `metrics.csv` lands
-# next to the checkpoints, whatever the primary logger does.
-loggers = []
+# Comet is the repo default; compute nodes have no outbound network, so force it offline.
+# NOTE: trainer.logger must stay a SINGLE entry. The repo's CLI hardcodes
+# `trainer.logger.init_args.offline_directory` and links `name` into
+# `trainer.logger.init_args.name`; a list of loggers makes jsonargparse replace the list
+# with a bare Namespace and the run dies at instantiation. Readable on-disk metrics come
+# from the MetricsCsvWriter callback below instead.
 if isinstance(t.get("logger"), dict):
     t["logger"].setdefault("init_args", {})["online"] = False
-    loggers.append(t["logger"])
-elif isinstance(t.get("logger"), list):
-    for lg in t["logger"]:
-        if isinstance(lg, dict) and "Comet" in lg.get("class_path", ""):
-            lg.setdefault("init_args", {})["online"] = False
-    loggers.extend(t["logger"])
-loggers.append({
-    "class_path": "lightning.pytorch.loggers.CSVLogger",
-    "init_args": {"save_dir": CKPT_DIR, "name": "csv", "flush_logs_every_n_steps": 200},
-})
-t["logger"] = loggers
 
 m = cfg["model"]
 m["optimizer"] = "AdamW"
@@ -176,6 +165,13 @@ if not any("EBOPsMonitor" in c.get("class_path", "") for c in t["callbacks"]):
 # Without this, an inert beta sweep looks healthy on every other metric.
 if not any("BitwidthMonitor" in c.get("class_path", "") for c in t["callbacks"]):
     t["callbacks"].append({"class_path": "hepattn.keras.callbacks.BitwidthMonitor"})
+# Must come after BitwidthMonitor: Lightning runs callbacks in order, and this writes
+# whatever is in callback_metrics at that moment.
+if not any("MetricsCsvWriter" in c.get("class_path", "") for c in t["callbacks"]):
+    t["callbacks"].append({
+        "class_path": "hepattn.keras.callbacks.MetricsCsvWriter",
+        "init_args": {"path": f"{CKPT_DIR}/metrics.csv"},
+    })
 if EBOPS_EVERY > 1 and not any("PeriodicEBOPs" in c.get("class_path", "") for c in t["callbacks"]):
     t["callbacks"].append({
         "class_path": "hepattn.keras.callbacks.PeriodicEBOPs",
