@@ -12,11 +12,13 @@ Env overrides:
     HGQ_ACCUM      gradient accumulation steps    (default 4  -> effective 128)
     HGQ_PRECISION  bf16-mixed | 32                (default bf16-mixed)
     HGQ_BETA_END   final EBOPs penalty weight     (default 4.0e-15)
-    HGQ_EPOCHS     max epochs                     (default 50)
+    HGQ_EPOCHS     max epochs                     (default 20)
+    HGQ_WARMUP_EPOCHS  beta ramp length, in epochs (default 1.0)
     DATA_DIR       CLIC ROOT directory            (default $HGQ_DATA or ./data/clic)
     CKPT_DIR       checkpoint output directory    (default ./hgq_ckpts)
 """
 
+import math
 import os
 import pathlib
 
@@ -45,6 +47,16 @@ EBOPS_EVERY = int(os.environ.get("HGQ_EBOPS_EVERY", "8"))
 # Skipped steps contribute no penalty, so the time-averaged pressure would drop by
 # 1/N. Scale beta_end by N so the user-facing beta_end keeps its meaning.
 BETA_END_EFFECTIVE = BETA_END * EBOPS_EVERY
+
+# Beta ramp length. This was hardcoded at 42000 optimizer steps, which at 7769
+# steps/epoch meant beta only reached full strength at epoch 5.4 — a diagnostic sweep
+# had to run for days before it could show anything. Scale it to epochs instead.
+# TRAIN_EVENTS is measured: 31075 micro-batches x 32 at batch 32, i.e. after the
+# loader drops the ~1% of events exceeding the node/particle caps.
+TRAIN_EVENTS = 994_400
+STEPS_PER_EPOCH = math.ceil(TRAIN_EVENTS / (BATCH * ACCUM))
+WARMUP_EPOCHS = float(os.environ.get("HGQ_WARMUP_EPOCHS", "1.0"))
+WARMUP_STEPS = max(1, round(WARMUP_EPOCHS * STEPS_PER_EPOCH))
 
 # Losses are mean-reduced, so Lightning SUMS the accumulated micro-batch gradients.
 # Keep each optimizer step invariant to ACCUM: divide LR, multiply the clip threshold.
@@ -151,12 +163,12 @@ net["quant"] = {
 # Ramp the EBOPs penalty in only after the task loss settles.
 for c in t["callbacks"]:
     if c.get("class_path", "").endswith("BetaScheduler"):
-        c["init_args"].update({"beta_start": 0.0, "beta_end": BETA_END_EFFECTIVE, "warmup_steps": 42000})
+        c["init_args"].update({"beta_start": 0.0, "beta_end": BETA_END_EFFECTIVE, "warmup_steps": WARMUP_STEPS})
         break
 else:
     t["callbacks"].append({
         "class_path": "hepattn.keras.callbacks.BetaScheduler",
-        "init_args": {"beta_start": 0.0, "beta_end": BETA_END_EFFECTIVE, "warmup_steps": 42000},
+        "init_args": {"beta_start": 0.0, "beta_end": BETA_END_EFFECTIVE, "warmup_steps": WARMUP_STEPS},
     })
 if not any("EBOPsMonitor" in c.get("class_path", "") for c in t["callbacks"]):
     t["callbacks"].append({"class_path": "hepattn.keras.callbacks.EBOPsMonitor"})
@@ -185,6 +197,7 @@ print(f"  batch      {BATCH} x accum {ACCUM} = effective {BATCH * ACCUM}")
 print(f"  precision  {PRECISION}")
 print(f"  lr max     {LR_MAX:.3e}   clip {CLIP}   (invariant to accum)")
 print(f"  beta_end   {BETA_END:.2e}   epochs {EPOCHS}")
+print(f"  beta ramp  {WARMUP_STEPS} steps = {WARMUP_EPOCHS:g} epoch(s) at {STEPS_PER_EPOCH} steps/epoch")
 if EBOPS_EVERY > 1:
     print(
         f"  EBOPs      every {EBOPS_EVERY} steps (beta_end scaled to {BETA_END_EFFECTIVE:.2e}"

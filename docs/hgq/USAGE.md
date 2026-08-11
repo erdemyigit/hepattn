@@ -175,8 +175,23 @@ Notes:
   PredictionWriter path and is not loadable by the metrics harness.
 - Ratio metrics (efficiency/fake-rate/precision) are batch-averaged — treat as
   estimates that tighten with more events.
-- Validated on a real dim-256 checkpoint: total EBOPs ≈ 1.7e15 (encoder ~48%,
-  decoder ~52%), consistent with the standalone EBOPs measurement.
+- Total EBOPs on a real dim-256 checkpoint ≈ 1.7e15, consistent with the standalone
+  measurement. **The encoder/decoder split is strongly config-dependent** — measure it,
+  don't quote it:
+
+  | config | encoder | decoder |
+  |---|---|---|
+  | `pflow_hgq_local.yaml` (torch attention) | 8.94e14 (~47%) | 1.01e15 (~53%) |
+  | `polaris_hgq.yaml` (linformer both stages) | 8.95e10 (~0.005%) | 1.68e15 (**>99.99%**) |
+
+  Most of the reported total comes from `QSoftmax` layers, so anything that changes the
+  attention implementation moves the split by orders of magnitude.
+- `total_ebops` is a resource *estimate* and is **not** what the training objective
+  minimizes. `quant_losses()` is affine in beta — `floor + beta * E_eff` — and on the
+  Polaris config `E_eff = 2.88e11` against a reported total of 1.68e15, a ratio of ~5800.
+  Calibrate beta with `evaluate.effective_ebops` (or `polaris/09_measure_beta.py`);
+  calibrating from `total_ebops` produced a sweep in which four decades of beta moved the
+  mean learned bitwidth by 0.01%.
 
 ## Standalone inference (no Lightning)
 
