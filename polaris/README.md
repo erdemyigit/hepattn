@@ -91,17 +91,27 @@ calibrated first, and the obvious way to do it is wrong.** See the warning below
 ## Queue reality on Polaris (measured from `00_discover.sh`)
 
 `prod`, `small`, and `medium` all have **`resources_min.nodect` >= 10** — they cannot
-run a 1-node job. For this work only two queues apply:
+run a 1-node job. Three queues can:
 
 | queue | nodes | max walltime | use |
 |---|---|---|---|
-| `debug` | 1-2 | 1 h | `04_smoke.pbs`, `06_ddp_validate.pbs` |
-| `preemptable` | 1-10 | **72 h** | `05_sweep.pbs` (production) |
+| `debug` | 1-2 | 1 h | `04_smoke.pbs`, `06_ddp_validate.pbs`, `07_profile.pbs` |
+| `preemptable` | 1-10 | **72 h** | `05_sweep.pbs` while iterating (the default) |
+| `capacity` | 1-4 | **168 h** | `05_sweep.pbs` for a settled long run — **see the caveat** |
+
+Set the queue in `env.sh` (`QUEUE_PROD`), not in the `.pbs` headers: `submit.sh` passes
+`-q` and `-l walltime=` from there, and the sweep's self-chained successors inherit it.
 
 **`preemptable` jobs can be killed at any moment** to make room for higher-priority
 work. That is fine here and is why the sweep checkpoints every 1000 steps, chains a
 successor *before* starting, and auto-resumes each beta point from its own
 `last.ckpt`. Expect restarts; they cost at most ~1000 steps of progress each.
+
+**`capacity` is not preemptable and allows 168 h**, so a ~10-day sweep needs 2 chained
+links instead of 4 and never gets interrupted. The caveat is a hard limit of **1 running
++ 2 queued per project** — taking it blocks your collaborators' long jobs. Use
+`preemptable` while the configuration is still moving, and switch only once you want an
+uninterrupted production run. Coordinate before you do.
 
 ## Files
 

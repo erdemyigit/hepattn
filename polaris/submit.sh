@@ -30,10 +30,27 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-ARGS=(-A "$PBS_PROJECT" -l "filesystems=$PBS_FILESYSTEMS")
-[ -n "$QUEUE" ]  && ARGS+=(-q "$QUEUE")
+# Queue and walltime come from env.sh, picked by script class. Until this existed the
+# QUEUE_*/WALLTIME_* variables in env.sh were dead: -q was only ever passed when
+# --queue was given explicitly, so the hardcoded #PBS -q in each header always won and
+# editing env.sh had no effect. Command-line options override in-script directives, so
+# the headers remain as standalone-qsub fallbacks.
+BASE="$(basename "$SCRIPT")"
+case "$BASE" in
+  05_sweep.pbs) DEF_QUEUE="$QUEUE_PROD";  DEF_WALL="$WALLTIME_PROD"  ;;
+  *)            DEF_QUEUE="$QUEUE_DEBUG"; DEF_WALL="$WALLTIME_SMOKE" ;;
+esac
+QUEUE="${QUEUE:-$DEF_QUEUE}"
+
+# -o must be ABSOLUTE. A relative path in a #PBS directive is resolved against $HOME,
+# not the submission directory, and an unwritable -o makes PBS fail the job, retry it,
+# and eventually auto-hold it. (`~` does not expand in directives at all.)
+LOGDIR="$(dirname "$HERE")/logs"
+mkdir -p "$LOGDIR"
+
+ARGS=(-A "$PBS_PROJECT" -l "filesystems=$PBS_FILESYSTEMS" -q "$QUEUE"
+      -l "walltime=$DEF_WALL" -o "$LOGDIR/${BASE%.pbs}.log")
 [ -n "$DEPEND" ] && ARGS+=(-W "depend=$DEPEND")
 
-mkdir -p "$(dirname "$HERE")/logs"
 echo "qsub ${ARGS[*]} $SCRIPT"
 qsub "${ARGS[@]}" "$SCRIPT"
