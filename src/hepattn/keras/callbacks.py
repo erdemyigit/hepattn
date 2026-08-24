@@ -79,34 +79,41 @@ class EBOPsMonitor(Callback):
 
 
 class BitwidthMonitor(Callback):
-    """Log statistics of the *learned bitwidths* — the actual output variable of QAT.
+    """Log the learned quantizer bitwidths — the actual output variable of QAT.
 
-    Nothing else logs this. `EBOPsMonitor` reports the resource estimate and
-    `BetaScheduler` reports the penalty strength, but neither answers the only question
-    QAT exists to answer: are the bitwidths moving?
+    Three DIFFERENT trainable parameters exist and they are not interchangeable.
+    Measured on the dim-32 test model, effect of reducing each by 1 bit:
 
-    This matters because the reported EBOPs total is NOT the quantity the loss minimizes
-    (see `hepattn.keras.evaluate.effective_ebops`). A beta sweep can therefore look
-    plausible on every logged metric while being completely inert. Measured on Polaris:
-    four decades of beta moved the mean bitwidth from 8.0000 to 7.981 — a 0.01% spread
-    across the whole sweep — and it took reading tensors out of checkpoints to notice,
-    because no metric on disk carried the number.
+        param                       total_ebops    loss slope (E_eff)
+        /b  weight bits (kbi)          -0.00%          -9.32%
+        /f  activation frac (kif)     -54.17%          -9.95%
+        /i  activation int  (kif)      -8.33%          -0.49%
 
-    Bitwidths live in the quantizer variables whose parameter names end in `/b`.
+    So the reported hardware cost is driven almost entirely by the ACTIVATION
+    quantizers, while the regularizer's gradient is split roughly evenly between /b and
+    /f. Logging only /b — as this callback originally did — reports a number that can
+    move a long way while EBOPs does not budge, which is exactly what happened on the
+    first calibrated Polaris sweep: /b went 8.0000 -> 7.8900 (min 7.30, max 8.70) while
+    val/ebops stayed at 1.6755e15 to five significant figures across all four beta runs.
+
+    Log all three separately, and never summarise them into one "bitwidth".
     """
 
-    def _bit_params(self, pl_module: LightningModule) -> list[torch.Tensor]:
-        return [p.detach() for name, p in pl_module.model.named_parameters() if name.endswith("/b")]
+    SUFFIXES = ("b", "f", "i")
 
     def on_validation_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        bits = self._bit_params(pl_module)
-        if not bits:
-            return
-        per_layer_means = torch.stack([b.float().mean() for b in bits])
-        pl_module.log("val/bits_mean", per_layer_means.mean(), sync_dist=True)
-        pl_module.log("val/bits_min", torch.stack([b.float().min() for b in bits]).min(), sync_dist=True)
-        pl_module.log("val/bits_max", torch.stack([b.float().max() for b in bits]).max(), sync_dist=True)
-        pl_module.log("val/bits_n_layers", float(len(bits)), sync_dist=True)
+        groups: dict[str, list[torch.Tensor]] = {s: [] for s in self.SUFFIXES}
+        for name, param in pl_module.model.named_parameters():
+            suffix = name.rsplit("/", 1)[-1]
+            if suffix in groups:
+                groups[suffix].append(param.detach().float())
+        for suffix, params in groups.items():
+            if not params:
+                continue
+            pl_module.log(f"val/bits_{suffix}_mean", torch.stack([p.mean() for p in params]).mean(), sync_dist=True)
+            pl_module.log(f"val/bits_{suffix}_min", torch.stack([p.min() for p in params]).min(), sync_dist=True)
+            pl_module.log(f"val/bits_{suffix}_max", torch.stack([p.max() for p in params]).max(), sync_dist=True)
+            pl_module.log(f"val/bits_{suffix}_n", float(len(params)), sync_dist=True)
 
 
 class PeriodicEBOPs(Callback):

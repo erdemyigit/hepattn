@@ -129,29 +129,40 @@ class _StubModule:
         self.logged[name] = float(value)
 
 
-def test_bitwidth_monitor_reports_real_layer_count(built):
-    """A monitor that finds zero bitwidth params would log nothing and look 'fine'."""
+def test_bitwidth_monitor_reports_all_three_families(built):
+    """Logging only /b hides the parameter EBOPs actually depends on.
+
+    Measured: -1 bit on /f moves total_ebops -54%, on /i -8%, on /b -0.00%. The first
+    Polaris sweep watched /b move 8.00 -> 7.89 while val/ebops never budged, because /b
+    is not what the reported cost is a function of.
+    """
     model, _ = built
     pl = _StubModule(model)
     BitwidthMonitor().on_validation_epoch_end(None, pl)
-    assert pl.logged, "BitwidthMonitor logged nothing — it found no '/b' parameters"
-    assert pl.logged["val/bits_n_layers"] > 0
-    assert pl.logged["val/bits_min"] <= pl.logged["val/bits_mean"] <= pl.logged["val/bits_max"]
+
+    for suffix in ("b", "f", "i"):
+        assert f"val/bits_{suffix}_mean" in pl.logged, f"/{suffix} family not logged — EBOPs depends on /f and /i"
+        assert pl.logged[f"val/bits_{suffix}_n"] > 0
+        assert pl.logged[f"val/bits_{suffix}_min"] <= pl.logged[f"val/bits_{suffix}_mean"] <= pl.logged[f"val/bits_{suffix}_max"]
 
 
-def test_bitwidth_monitor_tracks_a_change(built):
-    """Catches a monitor that reports a constant (e.g. reads b0 config, not the variable)."""
+def test_bitwidth_monitor_tracks_each_family_independently(built):
+    """Perturbing one family must move only that family's readout."""
     model, _ = built
     pl = _StubModule(model)
     BitwidthMonitor().on_validation_epoch_end(None, pl)
-    before = pl.logged["val/bits_mean"]
+    before = {s: pl.logged[f"val/bits_{s}_mean"] for s in ("b", "f", "i")}
 
-    params = [p for name, p in model.named_parameters() if name.endswith("/b")]
+    params = [p for n, p in model.named_parameters() if "quantizer" in n and p.requires_grad and n.endswith("/f")]
     with torch.no_grad():
-        params[0].sub_(1.0)
+        for p in params:
+            p.sub_(1.0)
     try:
         BitwidthMonitor().on_validation_epoch_end(None, pl)
-        assert pl.logged["val/bits_mean"] < before, "mean bitwidth did not follow a real change"
+        assert pl.logged["val/bits_f_mean"] < before["f"], "/f readout did not follow a real change"
+        assert pl.logged["val/bits_b_mean"] == pytest.approx(before["b"]), "/b moved when only /f was perturbed"
+        assert pl.logged["val/bits_i_mean"] == pytest.approx(before["i"]), "/i moved when only /f was perturbed"
     finally:
         with torch.no_grad():
-            params[0].add_(1.0)
+            for p in params:
+                p.add_(1.0)
