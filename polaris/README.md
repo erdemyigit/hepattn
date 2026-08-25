@@ -86,7 +86,7 @@ calibrated first, and the obvious way to do it is wrong.** See the warning below
 | Grad accumulation | Losses are mean-reduced → Lightning **sums** accumulated grads. `03_make_config.py` sets LR ÷ accum and clip × accum so an optimizer step is invariant. |
 | Checkpointing | The repo's `Checkpoint` monitors `val/loss`, which never fires mid-epoch — a walltime kill would lose the whole epoch. A plain `ModelCheckpoint` (`every_n_train_steps=1000`, `save_last`) is added, and `05_sweep.pbs` auto-resumes from `last.ckpt`. |
 | Test data | `test_clic_common_infer.root` has `-9999` sentinel indices that crash the loader. Configs evaluate on `val_clic_fix.root`. |
-| QAT cost | ~2.3× the float per-step time on an A100. Budget accordingly. |
+| QAT cost | Measured: **0.68 it/s** at micro-batch 32 on one A100-40GB = **12.7 h/epoch** (31,075 steps). A float-vs-quantized per-step ratio has *not* been measured under matched conditions — the earlier "~2.3×" figure was not reproducible and has been removed rather than repaired. |
 
 ## Queue reality on Polaris (measured from `00_discover.sh`)
 

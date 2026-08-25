@@ -81,16 +81,10 @@ class MPflowHGQ(MPflow):
         else:
             raise ValueError(f"Unknown optimizer: {self.optimizer}")
 
-        decay_params, quantizer_params = [], []
-        for name, param in self.model.named_parameters():
-            if not param.requires_grad or name.endswith("/beta"):
-                # beta is the regularization strength read by HGQ2's add_loss — it must
-                # never be optimized (its 'gradient' is just the EBOPs magnitude)
-                continue
-            if "quantizer" in name:
-                quantizer_params.append(param)
-            else:
-                decay_params.append(param)
+        # NOT self.model.named_parameters(): keras layer weights are not registered on
+        # the nn.Module, so that list omits every Dense kernel in the model. See
+        # KerasMaskFormer.trainable_parameter_groups.
+        decay_params, quantizer_params = self.model.trainable_parameter_groups()
 
         param_groups = [{"params": decay_params}, {"params": quantizer_params, "weight_decay": 0.0}]
         opt = optimizer(param_groups, lr=self.lrs_config["initial"], weight_decay=self.lrs_config["weight_decay"])

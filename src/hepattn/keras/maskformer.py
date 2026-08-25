@@ -104,3 +104,41 @@ class KerasMaskFormer(MaskFormer):
         if not terms:
             return torch.zeros((), device=next(self.parameters()).device)
         return torch.stack([torch.as_tensor(t) for t in terms]).sum()
+
+    def trainable_parameter_groups(self) -> tuple[list, list]:
+        """Every trainable tensor, split into (non-quantizer, quantizer) groups.
+
+        MUST be used instead of `named_parameters()` to build an optimizer.
+
+        Keras 3 on the torch backend keeps layer weights as keras `Variable`s. Each
+        `.value` IS an `nn.Parameter` with `requires_grad=True`, and gradients do reach
+        them -- but they are never registered on the `nn.Module`, so `named_parameters()`
+        does not list them. An optimizer built from that list therefore contains **none**
+        of the model's Dense kernels: measured on the CLIC config, 282 kernel/bias
+        tensors totalling 11.6M elements, all receiving gradients, none optimized. What
+        remained was 35.3M quantizer parameters plus 77k of LayerNorm/register/query
+        tensors -- which is why the loss stalled around 29-30 instead of approaching the
+        float reference's 3.79.
+
+        `/beta` is excluded: it is the regularization strength HGQ2's add_loss reads, and
+        its 'gradient' is just the EBOPs magnitude. Deduplicated by object identity,
+        since `keras_layers()` aggregates sublayer weights and can yield the same
+        variable more than once.
+        """
+        decay: list = []
+        quant: list = []
+        seen: set[int] = set()
+
+        def add(param, path: str) -> None:
+            if id(param) in seen or not getattr(param, "requires_grad", False) or path.endswith("/beta"):
+                return
+            seen.add(id(param))
+            (quant if "quantizer" in path else decay).append(param)
+
+        for name, param in self.named_parameters():
+            add(param, name)
+        for layer in self.keras_layers():
+            for var in layer.weights:
+                if getattr(var, "trainable", True):
+                    add(var.value, var.path)
+        return decay, quant
