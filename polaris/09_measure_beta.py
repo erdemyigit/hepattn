@@ -39,6 +39,11 @@ p.add_argument("--ckpt", default=None, help="optional checkpoint, to measure the
 p.add_argument("--batch", type=int, default=2, help="batch size for the probe forward (E_eff is batch-independent)")
 p.add_argument("--task-loss", type=float, default=30.0, help="observed task loss, for the calibration table")
 p.add_argument("--fractions", default="0.05,0.1,0.25,0.5", help="target resource-term fractions of the task loss")
+p.add_argument("--step-scan", action="store_true", help="also sweep one bitwidth family downward and record hard vs soft cost")
+p.add_argument("--scan-family", default="f", choices=["b", "f", "i"], help="which quantizer family to sweep (default f: EBOPs depends on it)")
+p.add_argument("--scan-range", type=float, default=2.0, help="how many bits to sweep down")
+p.add_argument("--scan-step", type=float, default=0.1, help="sweep resolution in bits")
+p.add_argument("--scan-out", default="stepscan.json", help="where to write the scan")
 args = p.parse_args()
 # LightningCLI also reads sys.argv; clear it so our flags are not parsed twice.
 sys.argv = [sys.argv[0]]
@@ -137,3 +142,57 @@ for frac_str in args.fractions.split(","):
     print(f"  {frac * args.task_loss:>16.3g}  {frac:>9.2f}  {frac * args.task_loss / e_eff:>12.4g}")
 print("\n  Put the chosen value(s) in BETA_VALUES in polaris/env.sh (unscaled -- the")
 print("  config generator multiplies by HGQ_EBOPS_EVERY itself).")
+
+
+# ----------------------------------------------------------------- step scan
+if args.step_scan:
+    # Hardware bitwidths are integers, so the REPORTED cost is piecewise constant in
+    # them while the differentiable surrogate the optimizer sees is not. Sweeping one
+    # family downward and recording both makes the gap explicit: sub-bit progress is
+    # worth exactly zero until a tread is crossed. Measured on the dim-32 test model,
+    # the first tread is at 0.6 bits while 9 epochs of training moved /f by 0.20.
+    import json
+
+    scan_params = [q for n, q in model.named_parameters() if "quantizer" in n and q.requires_grad and n.endswith("/" + args.scan_family)]
+    if not scan_params:
+        raise SystemExit(f"no trainable /{args.scan_family} parameters found — nothing to scan")
+
+    original = [q.detach().clone() for q in scan_params]
+    n_points = round(args.scan_range / args.scan_step) + 1
+    print(f"\n=========== step scan: /{args.scan_family}, {n_points} points ===========")
+    print("  (3 forwards per point; expect a few minutes on the dim-256 model)")
+    print(f"  {'shift':>7} {'mean':>8} {'hard %':>9} {'soft %':>9}")
+
+    shifts, hard, soft = [], [], []
+    try:
+        for k in range(n_points):
+            shift = round(k * args.scan_step, 4)
+            with torch.no_grad():
+                for q, o in zip(scan_params, original, strict=True):
+                    q.copy_(o - shift)
+            h = total_ebops(model, batch)
+            s_slope, _ = effective_ebops(model, batch)
+            mean_bits = float(torch.stack([q.detach().float().mean() for q in scan_params]).mean())
+            shifts.append(shift)
+            hard.append(h / reported)
+            soft.append(s_slope / e_eff)
+            print(f"  {-shift:>7.2f} {mean_bits:>8.4f} {100 * h / reported:>8.2f}% {100 * s_slope / e_eff:>8.2f}%", flush=True)
+    finally:
+        with torch.no_grad():
+            for q, o in zip(scan_params, original, strict=True):
+                q.copy_(o)
+
+    out = {
+        "family": args.scan_family,
+        "shift": shifts,
+        "hard": hard,
+        "soft": soft,
+        "base_ebops": reported,
+        "base_eeff": e_eff,
+        "config": args.config,
+        "ckpt": args.ckpt,
+    }
+    pathlib.Path(args.scan_out).write_text(json.dumps(out, indent=1))
+    first = next((sh for sh, hv in zip(shifts, hard, strict=True) if hv < 0.999), None)
+    print(f"\n  first tread at {first if first is not None else 'beyond the scan range'} bits")
+    print(f"  wrote {args.scan_out}")
