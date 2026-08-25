@@ -44,6 +44,13 @@ dependencies = [
 [dependency-groups]
 clic = ["pathos", "vector", "fastjet", "energyflow"] # has problems on isambard
 tide = ["numba>=0.61.2"] # has problems on isambard
+hgq = [
+    "keras>=3.8,<4",
+    "hgq2>=0.1.9,<0.2",
+    "hls4ml>=1.2.0,<2",
+    # no linux-aarch64 wheels; only needed for the hls4ml/FPGA conversion step
+    "da4ml>=0.6; platform_machine != 'aarch64'",
+]
 fa2 = ["flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.4.17/flash_attn-2.8.3%2Bcu128torch2.9-cp312-cp312-linux_x86_64.whl"]
 
 [build-system]
@@ -73,13 +80,23 @@ torch = { version = "==2.9.1", index = "https://download.pytorch.org/whl/cu128"}
 [tool.pixi.feature.cpu.pypi-dependencies]
 torch = { version = "==2.9.1", index = "https://download.pytorch.org/whl/cpu" }
 
+# da4ml ships no linux-aarch64 wheels and pixi solves dependency groups for every
+# workspace platform regardless of PEP 508 markers, so the hgq feature (and any
+# environment including it) is limited to linux-64
+[tool.pixi.feature.hgq]
+platforms = ["linux-64"]
+
 [tool.pixi.environments]
 default = { features = ["gpu", "fa2"] }
 isambard = { features = ["gpu"] }
 cpu = { features = ["cpu"] }
 clic = { features = ["clic"] }
 tide = { features = ["tide"] }
-ci = { features = ["cpu", "clic", "tide"]}
+hgq = { features = ["cpu", "hgq"] }
+# NOTE: pixi.lock must be regenerated on linux after manifest changes —
+# cross-locking from macOS fails because the editable hepattn build and some
+# group sdists cannot be built for foreign platforms.
+ci = { features = ["cpu", "clic", "tide", "hgq"]}
 
 [tool.pixi.system-requirements]
 libc = "2.28"
