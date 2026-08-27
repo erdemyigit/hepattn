@@ -1,0 +1,55 @@
+#!/bin/bash -l
+#PBS -N clic-linformer
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=48:00:00
+#PBS -j oe
+#
+# Submit with submit_linformer.sh, which injects -A / -q / -l filesystems from env.sh.
+# One Polaris node = 4x A100-40GB. Lightning spawns the 4 DDP ranks itself
+# (trainer.devices: 4), so this launches ONE python process, not mpiexec.
+
+set -euo pipefail
+
+cd "${REPO_DIR:?REPO_DIR not set}"
+source polaris/env.sh
+
+# A venv disables user-site by default, but be explicit: a stale ~/.local can shadow
+# the venv's torch and produce a CUDA-version mismatch.
+export PYTHONNOUSERSITE=1
+source .venv/bin/activate
+
+export OMP_NUM_THREADS=8            # 32 cores / 4 ranks
+export COMET_OFFLINE_DIRECTORY="${WORK_ROOT}/comet-offline"
+mkdir -p "$COMET_OFFLINE_DIRECTORY"
+
+CFG=src/hepattn/experiments/clic/configs/linformer_polaris.yaml
+
+# SMOKE: prove the config runs on real GPUs and real data before burning 30 h.
+SMOKE_ARGS=""
+if [ "${SMOKE:-0}" = "1" ]; then
+  SMOKE_ARGS="--trainer.max_epochs 1 --trainer.limit_train_batches 20 --trainer.limit_val_batches 5"
+  echo "==> SMOKE MODE: 20 train / 5 val batches, 1 epoch"
+fi
+
+RESUME_ARG=""
+if [ -n "${RESUME_CKPT:-}" ]; then
+  RESUME_ARG="--ckpt_path ${RESUME_CKPT}"
+  echo "==> resuming from ${RESUME_CKPT}"
+fi
+
+echo "==> host $(hostname)"
+nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
+echo "==> starting $(date -Is)"
+
+cd src/hepattn/experiments/clic
+python main.py fit \
+  --config "${REPO_DIR}/${CFG}" \
+  --data.train_path "${DATA_ROOT}/train_clic_fix.root" \
+  --data.valid_path "${DATA_ROOT}/val_clic_fix.root" \
+  --data.test_path  "${DATA_ROOT}/val_clic_fix.root" \
+  --trainer.devices 4 \
+  --trainer.num_nodes 1 \
+  ${SMOKE_ARGS} ${RESUME_ARG}
+
+echo "==> finished $(date -Is)"

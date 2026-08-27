@@ -126,3 +126,7 @@ tmp/
 src/hepattn/experiments/cld/plots/
 src/hepattn/experiments/cld/eval/
 src/hepattn/experiments/trackml/eval/
+
+# Site-specific Polaris values (project, queues, paths) — never commit
+polaris/env.sh
+polaris/logs/
