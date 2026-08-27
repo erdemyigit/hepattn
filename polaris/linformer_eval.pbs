@@ -1,0 +1,41 @@
+#!/bin/bash -l
+#PBS -N clic-linformer-eval
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#
+# Inference from a trained checkpoint -> <ckpt>__test.{h5,root} next to the ckpt.
+# Submit with polaris/submit_linformer_eval.sh (injects -A / -q / filesystems).
+
+set -euo pipefail
+
+export REPO_DIR="${REPO_DIR:?REPO_DIR not set}"
+cd "${REPO_DIR}"
+source polaris/env.sh
+
+export PYTHONNOUSERSITE=1
+VENV_DIR="${VENV_DIR:-${WORK_ROOT}/hepattn/.venv}"
+source "${VENV_DIR}/bin/activate"
+export PYTHONPATH="${REPO_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
+export CC="${CC_OVERRIDE:-$(command -v gcc || true)}"   # Triton needs gcc, not nvc
+export CXX="${CXX_OVERRIDE:-$(command -v g++ || true)}"
+
+CKPT="${CKPT:?set CKPT=/abs/path/to/checkpoint.ckpt}"
+RUN_DIR="$(dirname "$(dirname "${CKPT}")")"
+echo "==> ckpt    ${CKPT}"
+echo "==> run dir ${RUN_DIR}"
+nvidia-smi --query-gpu=index,name --format=csv,noheader
+
+cd src/hepattn/experiments/clic
+python main.py test \
+  --config "${RUN_DIR}/config.yaml" \
+  --config configs/eval.yaml \
+  --data.test_path "${DATA_ROOT}/test_clic_common_infer.root" \
+  --model.model.encoder.attn_type=linformer \
+  --trainer.devices=1 \
+  --trainer.num_nodes=1 \
+  --ckpt_path "${CKPT}"
+
+echo "==> outputs:"
+ls -la "${RUN_DIR}/ckpts/" | grep -E "__test\.(h5|root)" || echo "  NONE WRITTEN"
