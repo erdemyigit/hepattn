@@ -11,13 +11,36 @@
 
 set -euo pipefail
 
-cd "${REPO_DIR:?REPO_DIR not set}"
+export REPO_DIR="${REPO_DIR:?REPO_DIR not set}"
+cd "${REPO_DIR}"
 source polaris/env.sh
 
 # A venv disables user-site by default, but be explicit: a stale ~/.local can shadow
 # the venv's torch and produce a CUDA-version mismatch.
 export PYTHONNOUSERSITE=1
-source .venv/bin/activate
+
+# The venv and the repo live in DIFFERENT places on Polaris: deps were installed under
+# WORK_ROOT (/eagle), while this branch is checked out in $HOME. hepattn itself is NOT
+# installed into the venv (uv sync --no-install-project), so PYTHONPATH alone decides
+# which clone runs -- and the /eagle clone sits on keras-hgq2. Get this wrong and the job
+# trains the WRONG code and still looks healthy.
+VENV_DIR="${VENV_DIR:-${WORK_ROOT}/hepattn/.venv}"
+if [ ! -f "${VENV_DIR}/bin/activate" ]; then
+  echo "FATAL: no venv at ${VENV_DIR} (override with VENV_DIR=...)" >&2
+  exit 1
+fi
+source "${VENV_DIR}/bin/activate"
+export PYTHONPATH="${REPO_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+# Preflight: prove we are about to train THIS checkout, with linformer available.
+python - <<PYCHK || exit 1
+import os, sys, hepattn
+repo = os.environ["REPO_DIR"]
+if not hepattn.__file__.startswith(os.path.join(repo, "src")):
+    sys.exit(f"FATAL: hepattn resolves to {hepattn.__file__}, not {repo}/src")
+from hepattn.models.linformer import LinformerAttention  # noqa: F401
+print(f"preflight OK: hepattn -> {hepattn.__file__}")
+PYCHK
 
 export OMP_NUM_THREADS=8            # 32 cores / 4 ranks
 export COMET_OFFLINE_DIRECTORY="${WORK_ROOT}/comet-offline"
