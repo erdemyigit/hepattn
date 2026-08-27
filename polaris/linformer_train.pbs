@@ -51,8 +51,11 @@ CFG=src/hepattn/experiments/clic/configs/linformer_polaris.yaml
 # SMOKE: prove the config runs on real GPUs and real data before burning 30 h.
 SMOKE_ARGS=""
 if [ "${SMOKE:-0}" = "1" ]; then
-  SMOKE_ARGS="--trainer.max_epochs 1 --trainer.limit_train_batches 20 --trainer.limit_val_batches 5"
-  echo "==> SMOKE MODE: 20 train / 5 val batches, 1 epoch"
+  # >=40 steps required: OneCycleLR phase 1 spans (pct_start*total_steps - 1) steps, so
+  # pct_start=0.05 with 20 steps gives a span of 0 and get_lr() divides by zero.
+  # 100 also yields a usable it/s to extrapolate the 200-epoch wall time.
+  SMOKE_ARGS="--trainer.max_epochs 1 --trainer.limit_train_batches 100 --trainer.limit_val_batches 10"
+  echo "==> SMOKE MODE: 100 train / 10 val batches, 1 epoch"
 fi
 
 RESUME_ARG=""

@@ -20,6 +20,8 @@ else
 fi
 
 mkdir -p "${REPO_DIR}/polaris/logs"
+# Truncate: PBS appends, so successive runs would otherwise blend into one file.
+: > "${REPO_DIR}/polaris/logs/${NAME}.log"
 set -x
 qsub -A "${PBS_PROJECT}" \
      -q "${QUEUE}" \
