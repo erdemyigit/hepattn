@@ -150,7 +150,29 @@ schedule shape. Verified through the real CLI: 12,471,587 params, all 24 attenti
 modules linformer, AdamW instantiated with wd 0.03 / max_lr 1e-4 and **all** trainable
 params in the optimizer.
 
-### Confounds to state on any plot (ranked)
+#### Polaris bring-up: three failures, all environmental
+
+1. **`.venv/bin/activate` not found.** venv lives under `WORK_ROOT` on /eagle; the branch
+   is checked out in $HOME. hepattn is NOT installed into the venv, so PYTHONPATH decides
+   which clone runs -- and the /eagle clone is on keras-hgq2. A preflight now asserts
+   `hepattn.__file__` is inside `$REPO_DIR/src`.
+2. **`nvc-Error: Unknown switch -Wno-psabi`.** Polaris puts NVHPC's `nvc` on PATH; Triton
+   builds its CUDA helper with `$CC` and passes GCC-only flags. Fixed by exporting
+   `CC=gcc` (7.5.0 on Polaris works). Not avoidable by config -- loss.py:352-359 wraps
+   every cost function in torch.compile at import.
+3. **`RuntimeError: shape '[1344, 256]' is invalid for input of size 64`** in the compiled
+   BACKWARD. torch.compile (via the `Compile` callback, `dynamic=True`) generates broken
+   inductor code for the linformer path on torch 2.10: the kernel allocates a 64-element
+   workspace then views it as `[64 + 8*s27, 256]`. Forward and the validation sanity check
+   pass; it dies on the first backward. **Dropped the `Compile` callback.** This is a
+   deviation from the v6 baseline, which trained WITH it -- speed only, not numerics, but
+   worth stating. loss.py's compiled cost functions are unaffected and still work.
+
+Also a smoke-harness artifact worth remembering: OneCycleLR's first phase spans
+`pct_start*total_steps - 1` steps, so a short `limit_train_batches` (<40 at pct_start
+0.05) makes `get_lr()` divide by zero. Not a config fault.
+
+## Confounds to state on any plot (ranked)
 
 1. **Optimizer**: ours AdamW, the v6 baseline Lion. Unavoidable if Lion truly fails with
    Linformer, but it means the curve is not a pure attention ablation. Closing it needs an
