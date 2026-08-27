@@ -74,14 +74,14 @@ trainer:
         refresh_rate: 50
 
 model:
-  optimizer: Lion
+  optimizer: AdamW
 
   lrs_config:
     initial: 1e-6
-    max: 8e-5
+    max: 1e-4
     end: 1e-6
     pct_start: 0.05
-    weight_decay: 1e-4
+    weight_decay: 0.03
     skip_scheduler: false
 
   mtl: false

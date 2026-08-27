@@ -129,6 +129,40 @@ curves will be misread as a parameter-matched comparison.
 > Override it back with `--model.model.encoder.attn_type=linformer` (the decoder is not
 > touched by eval.yaml and stays linformer either way).
 
+## The run: configs/linformer_polaris.yaml
+
+Generated from v6 `base.yaml` (the config behind the 10.1M reference curves) by
+`mkcfg` — regenerate rather than hand-edit, so provenance stays checkable.
+
+| change | v6 | ours | why |
+|---|---|---|---|
+| encoder `attn_type` | flash-varlen | **linformer** | the thing under test |
+| decoder `attn_type` | (absent → torch) | **linformer** | the thing under test |
+| `optimizer` | Lion | **AdamW** | Lion reportedly does not converge with Linformer (Erdem, measured) |
+| `lrs_config.max` | 8e-5 | **1e-4** | Lion is sign-based; its LR does not transfer. 1e-4/0.03 is THIS repo's last validated AdamW recipe for the CLIC MaskFormer (`base.yaml` @ 22bb033, 2025-07-28, immediately before the Lion switch) |
+| `weight_decay` | 1e-4 | **0.03** | pairs with the AdamW LR above; Lion's 1e-4 would be near-zero regularisation for AdamW |
+| `batch_size` | 2048 | **256** | v6's 2048/GPU was tuned for a 192 GB B200. Maria's 24 GB L4 ran 256/GPU; 256 x 4 A100-40GB = global 1024, same family as the PLOTTED baseline (global 768) |
+| `num_workers` | 16 | 8 | 32 cores / 4 ranks |
+| paths | cmsuf | `/eagle/<project>/clic` | Polaris; `test_path` -> val file (the infer file has -9999 sentinels) |
+
+Unchanged: architecture, 200 epochs, bf16-mixed, devices 4, scaling dict, OneCycle
+schedule shape. Verified through the real CLI: 12,471,587 params, all 24 attention
+modules linformer, AdamW instantiated with wd 0.03 / max_lr 1e-4 and **all** trainable
+params in the optimizer.
+
+### Confounds to state on any plot (ranked)
+
+1. **Optimizer**: ours AdamW, the v6 baseline Lion. Unavoidable if Lion truly fails with
+   Linformer, but it means the curve is not a pure attention ablation. Closing it needs an
+   AdamW *quadratic* baseline — a second 200-epoch run.
+2. **`value_residual` is silently inactive under Linformer.** v6 sets
+   `value_residual: true` on the encoder, but the linformer branch skips `_prepare_qkv`,
+   where the value residual is applied. So Linformer trains without it while the baseline
+   has it. Fixing properly = implementing value-residual for Linformer.
+3. **Parameters**: 12.47M vs 10.13M (+23%), entirely the E/F matrices — see §1b. Do not
+   present this as parameter-matched, and do not let 12.47M be confused with the paper's
+   12.1M.
+
 ## Corrections to earlier assumptions
 
 - The neutral-pT `predictionwriter.py` no-op **is a real bug but is immaterial here**:
