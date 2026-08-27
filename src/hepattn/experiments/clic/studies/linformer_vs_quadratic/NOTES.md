@@ -177,10 +177,19 @@ Also a smoke-harness artifact worth remembering: OneCycleLR's first phase spans
 1. **Optimizer**: ours AdamW, the v6 baseline Lion. Unavoidable if Lion truly fails with
    Linformer, but it means the curve is not a pure attention ablation. Closing it needs an
    AdamW *quadratic* baseline — a second 200-epoch run.
-2. **`value_residual` is silently inactive under Linformer.** v6 sets
-   `value_residual: true` on the encoder, but the linformer branch skips `_prepare_qkv`,
-   where the value residual is applied. So Linformer trains without it while the baseline
-   has it. Fixing properly = implementing value-residual for Linformer.
+2. **`value_residual` AND `qkv_norm` are both silently inactive under Linformer.** The
+   linformer branch skips `_prepare_qkv`, where both are applied. v6 sets
+   `value_residual: true` on the encoder, and `hybrid_norm: true` forces qkv_norm on for
+   every attention module (`qkv_norm = qkv_norm or hybrid_norm`, norm.py). Measured on the
+   real model: **48,208 parameters receive no gradient** — `value_residual_mix` on 5
+   encoder layers (layer 0 is `is_first_layer`) plus `q/k/v_norm` on all 18 modules.
+
+   This is not cosmetic: DDP aborts with *"parameters that were not used in producing the
+   loss"*. Worked around with `strategy: ddp_find_unused_parameters_true`. It cannot be
+   fixed by disabling `hybrid_norm`, which also drives `attn_norm`/`dense_post_norm` and
+   would change the real architecture. **So the Linformer model is missing qkv-norm and
+   the value residual relative to the quadratic baseline** — the largest architectural
+   confound in this comparison. Proper fix: apply both inside `LinformerAttention`.
 3. **Parameters**: 12.47M vs 10.13M (+23%), entirely the E/F matrices — see §1b. Do not
    present this as parameter-matched, and do not let 12.47M be confused with the paper's
    12.1M.

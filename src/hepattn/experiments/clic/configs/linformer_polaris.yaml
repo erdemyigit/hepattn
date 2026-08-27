@@ -37,6 +37,7 @@ data:
   scale_dict_path: &scale_dict_path configs/clic_var_transform.yaml
 
 trainer:
+  strategy: ddp_find_unused_parameters_true
   max_epochs: 200
   accelerator: gpu
   devices: 4
