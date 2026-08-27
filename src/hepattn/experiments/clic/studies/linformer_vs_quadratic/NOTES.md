@@ -55,6 +55,55 @@ is configured — an unmasked encoder *could* take k < n.
 larger attention inner dimension. Any FastML claim must be about *accuracy at fixed
 mechanism*, or the mask handling must be fixed first.
 
+### 1b. Linformer is parameter-ADDITIVE, and at n=168 it cannot save compute either
+
+Measured parameter buckets (both configs built through the real CLI):
+
+| bucket | quadratic | Linformer | delta |
+|---|---|---|---|
+| attn Q/K/V/O projections | 4,737,024 | 4,723,200 | -13,824 (bias only) |
+| attn E/F projection | 0 | 2,359,296 | **+2,359,296** |
+| MLP / Dense | 5,291,219 | 5,291,219 | **0** |
+| norms | 36,864 | 36,864 | 0 |
+| other | 61,008 | 61,008 | 0 |
+| total | 10,126,115 | 12,471,587 | +2,345,472 |
+
+W^Q/W^K/W^V/W^O are `dim x dim` — their size does not depend on sequence length, so
+compressing n cannot shrink them. Linformer shrinks the n x n attention matrix, which is an
+*activation*, not a parameter. E/F are extra weights on top:
+
+    params(Linformer) = params(standard) + 2 * seq_len * k   per attention module
+
+Measured: 2*256*256 = 131,072 x **18** modules (6 encoder + 12 decoder) = 2,359,296 = the
+entire delta. **It is not the MLPs** (byte-identical) and **not a small head_dim** (the
+Q/K/V/O block is unchanged).
+
+FLOPs at n=168, d=256, B=8 (analytic and measured agree exactly):
+
+```
+attention core (n^2) : 0.231 GFLOP = 4*B*n^2*d    <- only 25%
+Q/K/V/O proj (d^2)   : 0.705 GFLOP = 8*B*n*d^2    <- 75%
+```
+
+| k | GFLOP | vs quadratic |
+|---|---|---|
+| 32 | 0.793 | 0.85x (best case) |
+| 84 | 0.936 | **1.00x — break-even at k = n/2** |
+| 168 | 1.167 | 1.25x (minimum the masked path allows) |
+| 256 | 1.409 | **1.51x (our config)** |
+
+Core fraction is `n/(2d+n)`; with d=256 you need **n >~ 512** before the quadratic term is
+even half the cost. **Break-even k=84 is below the minimum k=168 the mask requires, so on
+this model Linformer can never be cheaper than quadratic attention.**
+
+> Measurement trap: `torch.utils.flop_counter.FlopCounterMode` does NOT count SDPA's
+> attention core, but DOES count Linformer's explicit einsums. Comparing them naively
+> understates quadratic by 25%. Force the core to explicit matmuls before comparing.
+
+**Framing consequence:** an efficiency claim is unsupported at CLIC's n=168. The honest
+claim is accuracy at fixed mechanism; the efficiency argument belongs at large n
+(HL-LHC-scale hit multiplicities), which is where Linformer was designed to pay off.
+
 ### 2. Linformer's 12.47M is dangerously close to the paper's 12.1M
 
 Akum's reference plot has "Paper MaskFormer 12.1M" and "Maskformer 10.1M". Our Linformer
