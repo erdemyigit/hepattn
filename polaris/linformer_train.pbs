@@ -42,6 +42,19 @@ from hepattn.models.linformer import LinformerAttention  # noqa: F401
 print(f"preflight OK: hepattn -> {hepattn.__file__}")
 PYCHK
 
+# Polaris puts NVHPC's `nvc` on PATH as the default C compiler. Triton builds its CUDA
+# helper with $CC and passes GCC-only flags, which nvc rejects:
+#   nvc-Error-Unknown switch: -Wno-psabi
+# This is NOT avoidable by dropping the Compile callback -- loss.py wraps every cost
+# function in torch.compile at import time, so Triton is always exercised.
+export CC="${CC_OVERRIDE:-$(command -v gcc || true)}"
+export CXX="${CXX_OVERRIDE:-$(command -v g++ || true)}"
+if [ -z "${CC}" ]; then
+  echo "FATAL: no gcc on PATH; Triton cannot build (set CC_OVERRIDE=/path/to/gcc)" >&2
+  exit 1
+fi
+echo "==> Triton C compiler: ${CC} ($(${CC} --version 2>/dev/null | head -1))"
+
 export OMP_NUM_THREADS=8            # 32 cores / 4 ranks
 export COMET_OFFLINE_DIRECTORY="${WORK_ROOT}/comet-offline"
 mkdir -p "$COMET_OFFLINE_DIRECTORY"
