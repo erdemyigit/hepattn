@@ -21,8 +21,13 @@ export PYTHONPATH="${REPO_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export CC="${CC_OVERRIDE:-$(command -v gcc || true)}"   # Triton needs gcc, not nvc
 export CXX="${CXX_OVERRIDE:-$(command -v g++ || true)}"
 
-CKPT="${CKPT:?set CKPT=/abs/path/to/checkpoint.ckpt}"
-RUN_DIR="$(dirname "$(dirname "${CKPT}")")"
+CKPT="${CKPT:?set CKPT=path/to/checkpoint.ckpt}"
+# Resolve to absolute BEFORE the cd below: a path from `ls -t` is relative to REPO_DIR,
+# and both --config ${RUN_DIR}/config.yaml and --ckpt_path would then miss.
+case "${CKPT}" in /*) ;; *) CKPT="${REPO_DIR}/${CKPT}" ;; esac
+[ -f "${CKPT}" ] || { echo "FATAL: no checkpoint at ${CKPT}" >&2; exit 1; }
+RUN_DIR="$(cd "$(dirname "$(dirname "${CKPT}")")" && pwd)"
+[ -f "${RUN_DIR}/config.yaml" ] || { echo "FATAL: no config.yaml in ${RUN_DIR}" >&2; exit 1; }
 echo "==> ckpt    ${CKPT}"
 echo "==> run dir ${RUN_DIR}"
 nvidia-smi --query-gpu=index,name --format=csv,noheader
