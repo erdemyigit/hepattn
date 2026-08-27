@@ -428,8 +428,16 @@ class Attention(nn.Module):
         elif self.attn_type == "flash":
             out = self.attn(q, k, v, window_size=self.window_size)
         elif self.attn_type == "linformer":
-            out = self.attn(q, k, v, attn_mask=attn_mask)
-            return out  # linformer is a little special
+            # linformer is listed in VARLEN_ATTN_TYPES, so the assert above lets kv_mask
+            # through -- but the LinformerAttention call only takes attn_mask. Fold the
+            # padding masks in here, exactly as the torch branch does, or padded slots are
+            # attended to as if they were real hits (measured leak: 1.3e+01 on a toy batch).
+            # kv_mask CANNOT be folded into attn_mask here: linformer projects K/V along the
+            # sequence axis first, so padded rows are already blended into every projected
+            # column before any score-space mask can act. It has to be zeroed pre-projection,
+            # which LinformerAttention does itself.
+            out = self.attn(q, k, v, attn_mask=attn_mask, kv_mask=kv_mask)
+            return out  # linformer returns model-dim output; no head recombine / out_proj
         else:
             raise ValueError(f"Invalid attention type: {self.attn_type}")
 

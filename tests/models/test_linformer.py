@@ -83,3 +83,41 @@ def test_wired_through_the_attention_layer_without_stray_parameters():
     x = torch.randn(2, N, DIM)
     assert a(x, x, x).shape == (2, N, DIM)
     assert not hasattr(a, "in_proj_weight"), "linformer allocated the standard in_proj it never uses"
+
+
+def test_padding_does_not_leak_into_real_tokens():
+    """Padded key/value slots must not influence real tokens.
+
+    `linformer` is in VARLEN_ATTN_TYPES, so Attention.forward accepts kv_mask -- but the
+    Linformer call originally ignored it, and padded hits were attended to as real ones
+    (measured leak 1.3e+01 where torch gives exactly 0). Score-space masking cannot fix
+    this: K/V are projected along the SEQUENCE axis first, so every projected column is
+    already a mixture of the padded rows. They must be zeroed pre-projection.
+    """
+    B, n, real = 2, 24, 16
+    kv_mask = torch.zeros(B, n, dtype=torch.bool)
+    kv_mask[:, :real] = True
+
+    torch.manual_seed(0)
+    a = Attention(dim=DIM, num_heads=HEADS, attn_type="linformer", linformer_seq_len=n, linformer_proj_dim=n).eval()
+    torch.manual_seed(1)
+    x = torch.randn(B, n, DIM)
+    y = x.clone()
+    y[:, real:] = torch.randn(B, n - real, DIM) * 50  # garbage in PAD slots only
+
+    with torch.no_grad():
+        o1 = a(x, x, x, kv_mask=kv_mask)[:, :real]
+        o2 = a(y, y, y, kv_mask=kv_mask)[:, :real]
+    assert torch.allclose(o1, o2, atol=1e-6), f"padding leaked into real tokens (max diff {(o1 - o2).abs().max():.3e})"
+
+
+def test_cross_attention_with_padding_runs():
+    """Decoder shape: fewer queries than keys, with a padded key axis."""
+    B, nq, nkv, real = 2, 20, 24, 16
+    kv_mask = torch.zeros(B, nkv, dtype=torch.bool)
+    kv_mask[:, :real] = True
+    a = Attention(dim=DIM, num_heads=HEADS, attn_type="linformer", linformer_seq_len=nkv, linformer_proj_dim=nkv).eval()
+    with torch.no_grad():
+        out = a(torch.randn(B, nq, DIM), torch.randn(B, nkv, DIM), torch.randn(B, nkv, DIM), kv_mask=kv_mask)
+    assert out.shape == (B, nq, DIM)
+    assert torch.isfinite(out).all()

@@ -45,7 +45,7 @@ class LinformerAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.to_out = nn.Linear(dim_head * heads, dim)
 
-    def forward(self, q, k=None, v=None, attn_mask=None, **kwargs):
+    def forward(self, q, k=None, v=None, attn_mask=None, kv_mask=None, **kwargs):
         # print("q.shape", q.shape)
         b, n, d, d_h, h, k_num = *q.shape, self.dim_head, self.heads, self.k
 
@@ -61,6 +61,15 @@ class LinformerAttention(nn.Module):
 
         keys = self.to_k(k) if k is not None else self.to_k(q)
         values = self.to_v(v) if v is not None else self.to_v(q)
+
+        # Padded positions must be removed BEFORE the sequence projection: each projected
+        # column is a mixture of every original position, so masking afterwards cannot undo
+        # their contribution. to_k/to_v are bias-free, so zeroing the rows here is exactly
+        # equivalent to those positions not existing.
+        if kv_mask is not None:
+            keep = kv_mask[..., None].to(keys.dtype)
+            keys = keys * keep
+            values = values * keep
 
         kv_projs = (self.proj_k, self.proj_v if not self.share_kv else self.proj_k)
 
