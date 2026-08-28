@@ -71,6 +71,15 @@ if [ "${SMOKE:-0}" = "1" ]; then
   echo "==> SMOKE MODE: 100 train / 10 val batches, 1 epoch"
 fi
 
+# EPOCHS lets a submission shorten the run without editing the config. OneCycleLR sizes
+# itself from total steps, so a 50-epoch run is a FULLY ANNEALED schedule, not a truncated
+# 200-epoch one -- the confound is "trained 50 vs 200 epochs", nothing subtler.
+EPOCH_ARG=""
+if [ -n "${EPOCHS:-}" ]; then
+  EPOCH_ARG="--trainer.max_epochs ${EPOCHS}"
+  echo "==> epochs overridden to ${EPOCHS}"
+fi
+
 RESUME_ARG=""
 if [ -n "${RESUME_CKPT:-}" ]; then
   RESUME_ARG="--ckpt_path ${RESUME_CKPT}"
@@ -89,6 +98,6 @@ python main.py fit \
   --data.test_path  "${DATA_ROOT}/val_clic_fix.root" \
   --trainer.devices 4 \
   --trainer.num_nodes 1 \
-  ${SMOKE_ARGS} ${RESUME_ARG}
+  ${SMOKE_ARGS} ${EPOCH_ARG} ${RESUME_ARG}
 
 echo "==> finished $(date -Is)"

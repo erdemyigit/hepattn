@@ -16,7 +16,7 @@ if [ "${SMOKE:-0}" = "1" ]; then
   EXTRA="-v REPO_DIR=${REPO_DIR},SMOKE=1"
 else
   QUEUE="${QUEUE_PROD:-preemptable}"; WALL="${WALLTIME:-48:00:00}"; NAME="clic-linformer"
-  EXTRA="-v REPO_DIR=${REPO_DIR}${RESUME_CKPT:+,RESUME_CKPT=${RESUME_CKPT}}"
+  EXTRA="-v REPO_DIR=${REPO_DIR}${RESUME_CKPT:+,RESUME_CKPT=${RESUME_CKPT}}${EPOCHS:+,EPOCHS=${EPOCHS}}"
 fi
 
 mkdir -p "${REPO_DIR}/polaris/logs"
