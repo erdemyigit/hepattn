@@ -121,3 +121,45 @@ def test_cross_attention_with_padding_runs():
         out = a(torch.randn(B, nq, DIM), torch.randn(B, nkv, DIM), torch.randn(B, nkv, DIM), kv_mask=kv_mask)
     assert out.shape == (B, nq, DIM)
     assert torch.isfinite(out).all()
+
+
+def test_qkv_norm_is_applied_and_trained():
+    """qkv-norm must reach the Linformer path.
+
+    The branch skips `_prepare_qkv`, where q/k/v_norm are applied in the standard path.
+    Before the fix these 27,648 parameters (3 norms x 2 x dim x 18 modules on the CLIC
+    model) received no gradient at all: the Linformer trained without a normalization both
+    baselines have, and DDP aborted on the unused parameters.
+    """
+    a = Attention(dim=DIM, num_heads=HEADS, attn_type="linformer", linformer_seq_len=N, linformer_proj_dim=N, qkv_norm=True, norm="LayerNorm")
+    x = torch.randn(2, N, DIM)
+    a(x, x, x).sum().backward()
+
+    for which in ("q_norm", "k_norm", "v_norm"):
+        for pname, p in getattr(a, which).named_parameters():
+            assert p.grad is not None and p.grad.abs().sum() > 0, f"{which}.{pname} got no gradient"
+
+
+def test_no_dead_parameters_in_the_shipped_configuration():
+    """value_residual=False + qkv_norm=True must leave nothing unused.
+
+    Dead parameters are not cosmetic here: DDP raises on them, which is why the config
+    needed ddp_find_unused_parameters_true. value_residual stays off because its blend is
+    per-input-position while v has been compressed to length k -- the tensors do not
+    broadcast, so it cannot be applied to a Linformer without a redesign.
+    """
+    a = Attention(
+        dim=DIM,
+        num_heads=HEADS,
+        attn_type="linformer",
+        linformer_seq_len=N,
+        linformer_proj_dim=N,
+        qkv_norm=True,
+        norm="LayerNorm",
+        value_residual=False,
+        is_first_layer=False,
+    )
+    x = torch.randn(2, N, DIM)
+    a(x, x, x).sum().backward()
+    dead = [n for n, p in a.named_parameters() if p.grad is None or p.grad.abs().sum() == 0]
+    assert not dead, f"unused parameters would abort DDP: {dead}"

@@ -45,7 +45,7 @@ class LinformerAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.to_out = nn.Linear(dim_head * heads, dim)
 
-    def forward(self, q, k=None, v=None, attn_mask=None, kv_mask=None, **kwargs):
+    def forward(self, q, k=None, v=None, attn_mask=None, kv_mask=None, qkv_norms=None, **kwargs):
         # print("q.shape", q.shape)
         b, n, d, d_h, h, k_num = *q.shape, self.dim_head, self.heads, self.k
 
@@ -61,6 +61,16 @@ class LinformerAttention(nn.Module):
 
         keys = self.to_k(k) if k is not None else self.to_k(q)
         values = self.to_v(v) if v is not None else self.to_v(q)
+
+        # qkv-norm. to_q/to_k/to_v play the role in_proj plays in the standard path, so the
+        # norms belong here -- and BEFORE the padding is zeroed, since LayerNorm of a zero
+        # row is not zero. The modules stay owned by Attention so state_dict keys are
+        # unchanged; without this they receive no gradient at all.
+        if qkv_norms is not None:
+            q_norm, k_norm, v_norm = qkv_norms
+            queries = q_norm(queries)
+            keys = k_norm(keys)
+            values = v_norm(values)
 
         # Padded positions must be removed BEFORE the sequence projection: each projected
         # column is a mixture of every original position, so masking afterwards cannot undo

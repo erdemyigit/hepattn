@@ -436,7 +436,8 @@ class Attention(nn.Module):
             # sequence axis first, so padded rows are already blended into every projected
             # column before any score-space mask can act. It has to be zeroed pre-projection,
             # which LinformerAttention does itself.
-            out = self.attn(q, k, v, attn_mask=attn_mask, kv_mask=kv_mask)
+            qkv_norms = (self.q_norm, self.k_norm, self.v_norm) if self.qkv_norm else None
+            out = self.attn(q, k, v, attn_mask=attn_mask, kv_mask=kv_mask, qkv_norms=qkv_norms)
             return out  # linformer returns model-dim output; no head recombine / out_proj
         else:
             raise ValueError(f"Invalid attention type: {self.attn_type}")

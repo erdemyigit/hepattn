@@ -120,7 +120,7 @@ model:
           dim: *dim
           attn_type: linformer
           hybrid_norm: true
-          value_residual: true
+          value_residual: false
           num_register_tokens: 8
           attn_kwargs:
             num_heads: 16
