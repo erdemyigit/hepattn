@@ -68,11 +68,20 @@ trainer:
     init_args:
       refresh_rate: 50
   - class_path: hepattn.keras.callbacks.EBOPsMonitor
-  - class_path: hepattn.keras.callbacks.BetaScheduler
+  # Closed-loop control of beta against a fixed EBOPs setpoint, following
+  # Laatu, Sun et al. (arXiv:2510.24784). Replaces BetaScheduler -- the two cannot
+  # coexist (BetaScheduler writes _beta every batch and would erase the controller;
+  # BetaPID.setup raises if both are registered).
+  - class_path: hepattn.keras.callbacks.BetaPID
     init_args:
-      beta_start: 0.0
-      beta_end: 1.0e-12
-      warmup_steps: 5000
+      # Measured total is 1.6755e15; this asks for a 40% cut. NOT the hardware budget
+      # (an XCVU13P holds ~2.15e6 EBOPs) -- a setpoint that far off saturates the
+      # controller immediately and is indistinguishable from training at max_beta.
+      target_ebops: 1.0e+15  # YAML 1.1 needs the exponent sign, else this is a str
+      init_beta: 2.6e-10
+      i: 0.5
+      warmup_epochs: 2
+      max_beta: 1.0e-7
 model:
   optimizer: AdamW  # matched to Helen (was Lion)
   lrs_config:

@@ -55,11 +55,15 @@ trainer:
     init_args:
       refresh_rate: 50
   - class_path: hepattn.keras.callbacks.EBOPsMonitor
-  - class_path: hepattn.keras.callbacks.BetaScheduler
+  # See pflow_hgq.yaml for the rationale. Warmup 0 so a short smoke run exercises
+  # the controller rather than only its warmup branch.
+  - class_path: hepattn.keras.callbacks.BetaPID
     init_args:
-      beta_start: 0.0
-      beta_end: 4.0e-15
-      warmup_steps: 12500
+      target_ebops: 1.0e+15  # YAML 1.1 needs the exponent sign, else this is a str
+      init_beta: 2.6e-10
+      i: 0.5
+      warmup_epochs: 0
+      max_beta: 1.0e-7
 model:
   optimizer: Lion
   lrs_config:

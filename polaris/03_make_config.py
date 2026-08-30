@@ -11,7 +11,13 @@ Env overrides:
     HGQ_BATCH      micro-batch per GPU            (default 32)
     HGQ_ACCUM      gradient accumulation steps    (default 4  -> effective 128)
     HGQ_PRECISION  bf16-mixed | 32                (default bf16-mixed)
-    HGQ_BETA_END   final EBOPs penalty weight     (default 4.0e-15)
+    HGQ_BETA_MODE  pid | schedule                 (default pid)
+    HGQ_BETA_END   final EBOPs penalty weight     (default 4.0e-15, schedule mode only)
+    HGQ_TARGET_EBOPS   EBOPs setpoint for pid mode    (default 1.0e15)
+    HGQ_INIT_BETA      starting beta for pid mode     (default 2.6e-10)
+    HGQ_MAX_BETA       pid beta ceiling               (default 1.0e-7)
+    HGQ_PID_I          pid integral gain              (default 0.5)
+    HGQ_PID_WARMUP_EPOCHS  epochs before pid engages  (default 2)
     HGQ_EPOCHS     max epochs                     (default 20)
     HGQ_WARMUP_EPOCHS  beta ramp length, in epochs (default 1.0)
     DATA_DIR       CLIC ROOT directory            (default $HGQ_DATA or ./data/clic)
@@ -37,7 +43,36 @@ SCALE = str(REPO / "src/hepattn/experiments/clic/configs/clic_var_transform.yaml
 BATCH = int(os.environ.get("HGQ_BATCH", "32"))
 ACCUM = int(os.environ.get("HGQ_ACCUM", "4"))
 PRECISION = os.environ.get("HGQ_PRECISION", "bf16-mixed")
+BETA_MODE = os.environ.get("HGQ_BETA_MODE", "pid").lower()
+if BETA_MODE not in {"pid", "schedule"}:
+    raise SystemExit(f"HGQ_BETA_MODE must be 'pid' or 'schedule', got {BETA_MODE!r}")
 BETA_END = float(os.environ.get("HGQ_BETA_END", "4.0e-15"))
+
+# --- pid mode -------------------------------------------------------------------
+# Closed-loop control of beta against a fixed EBOPs setpoint, as in Laatu, Sun et al.
+# (arXiv:2510.24784), which trains every model to 350k EBOPs. Open-loop scheduling
+# needs the right beta known in advance; we do not have it, and calibrating it from
+# the reported total_ebops overstated the loss slope by 10,410x.
+#
+# Setpoint: the measured total is 1.6755e15, so 1.0e15 asks for a 40% cut. This is
+# deliberately NOT the hardware budget -- an XCVU13P holds ~2.15e6 EBOPs under
+# LUTs ~ exp(0.985*log(EBOPs)) against its 1.728M LUTs, i.e. 8e8x below where we are.
+# A setpoint that far away saturates the controller on its first epoch and degenerates
+# into training at max_beta. 1.0e15 is the setpoint that asks a question we can answer
+# in one run: does closed-loop pressure move the reported cost AT ALL?
+TARGET_EBOPS = float(os.environ.get("HGQ_TARGET_EBOPS", "1.0e15"))
+# Top of the recalibrated sweep -- the beta that moved /f furthest (0.165 bits off its
+# 8-bit init) without destabilising the task loss.
+INIT_BETA = float(os.environ.get("HGQ_INIT_BETA", "2.6e-10"))
+# Safety valve. total_ebops is a step function here (~0.6 bits of headroom before it
+# moves), so an unresponsive process variable WILL wind the integral up indefinitely.
+# Saturating this ceiling is an expected and informative outcome, not a failure.
+MAX_BETA = float(os.environ.get("HGQ_MAX_BETA", "1.0e-7"))
+# HGQ2's default integral gain of 2e-3 is tuned for hundred-epoch runs: at an error of
+# log10(1.6755) = 0.224 it moves beta by a factor of 1.001 per epoch. QAT costs 12.7
+# h/epoch here, so gain for roughly one decade per ten epochs instead.
+PID_I = float(os.environ.get("HGQ_PID_I", "0.5"))
+PID_WARMUP_EPOCHS = int(os.environ.get("HGQ_PID_WARMUP_EPOCHS", "2"))
 EPOCHS = int(os.environ.get("HGQ_EPOCHS", "20"))
 
 # Evaluate the EBOPs resource penalty every N steps rather than every step. Measured
@@ -47,6 +82,11 @@ EBOPS_EVERY = int(os.environ.get("HGQ_EBOPS_EVERY", "8"))
 # Skipped steps contribute no penalty, so the time-averaged pressure would drop by
 # 1/N. Scale beta_end by N so the user-facing beta_end keeps its meaning.
 BETA_END_EFFECTIVE = BETA_END * EBOPS_EVERY
+# Same 1/N argument applies to the controller's beta: it would find the right value on
+# its own, but starting and bounding it in the same units keeps every beta in this file
+# comparable to the BetaScheduler runs.
+INIT_BETA_EFFECTIVE = INIT_BETA * EBOPS_EVERY
+MAX_BETA_EFFECTIVE = MAX_BETA * EBOPS_EVERY
 
 # Beta ramp length. This was hardcoded at 42000 optimizer steps, which at 7769
 # steps/epoch meant beta only reached full strength at epoch 5.4 — a diagnostic sweep
@@ -149,12 +189,24 @@ net["quant"] = {
     "ebops": {"beta0": 0.0},
 }
 
-# Ramp the EBOPs penalty in only after the task loss settles.
-for c in t["callbacks"]:
-    if c.get("class_path", "").endswith("BetaScheduler"):
-        c["init_args"].update({"beta_start": 0.0, "beta_end": BETA_END_EFFECTIVE, "warmup_steps": WARMUP_STEPS})
-        break
+# BetaPID and BetaScheduler both write every quantized layer's _beta, and BetaScheduler
+# writes per batch -- i.e. after BetaPID's epoch-start write -- so exactly one of them
+# may be registered. BetaPID.setup() raises if both are; drop the other here so the
+# config is never generated in that state.
+t["callbacks"] = [c for c in t["callbacks"] if not c.get("class_path", "").endswith(("BetaScheduler", "BetaPID"))]
+if BETA_MODE == "pid":
+    t["callbacks"].append({
+        "class_path": "hepattn.keras.callbacks.BetaPID",
+        "init_args": {
+            "target_ebops": TARGET_EBOPS,
+            "init_beta": INIT_BETA_EFFECTIVE,
+            "i": PID_I,
+            "warmup_epochs": PID_WARMUP_EPOCHS,
+            "max_beta": MAX_BETA_EFFECTIVE,
+        },
+    })
 else:
+    # Open-loop ramp: kept for reproducing the earlier sweeps.
     t["callbacks"].append({
         "class_path": "hepattn.keras.callbacks.BetaScheduler",
         "init_args": {"beta_start": 0.0, "beta_end": BETA_END_EFFECTIVE, "warmup_steps": WARMUP_STEPS},
@@ -192,10 +244,21 @@ print(f"  ckpts      {CKPT_DIR}")
 print(f"  batch      {BATCH} x accum {ACCUM} = effective {BATCH * ACCUM}")
 print(f"  precision  {PRECISION}")
 print(f"  lr max     {LR_MAX:.3e}   clip {CLIP}   (invariant to accum)")
-print(f"  beta_end   {BETA_END:.2e}   epochs {EPOCHS}")
-print(f"  beta ramp  {WARMUP_STEPS} steps = {WARMUP_EPOCHS:g} epoch(s) at {STEPS_PER_EPOCH} steps/epoch")
+print(f"  epochs     {EPOCHS}")
+if BETA_MODE == "pid":
+    print(f"  beta       PID -> target {TARGET_EBOPS:.3e} EBOPs (measured now: 1.6755e15)")
+    print(f"             init {INIT_BETA_EFFECTIVE:.2e}  ceiling {MAX_BETA_EFFECTIVE:.2e}"
+          f"  i={PID_I}  warmup {PID_WARMUP_EPOCHS} epoch(s)")
+    headroom = math.log10(MAX_BETA_EFFECTIVE / INIT_BETA_EFFECTIVE)
+    err = math.log10(1.6755e15 / TARGET_EBOPS)
+    print(f"             {headroom:.2f} decades of headroom; at a constant error of {err:.3f}"
+          f" the ceiling is reached in ~{headroom / (PID_I * err):.0f} epochs")
+else:
+    print(f"  beta_end   {BETA_END:.2e}  (open-loop schedule)")
+    print(f"  beta ramp  {WARMUP_STEPS} steps = {WARMUP_EPOCHS:g} epoch(s) at {STEPS_PER_EPOCH} steps/epoch")
 if EBOPS_EVERY > 1:
+    scaled = f"beta_end scaled to {BETA_END_EFFECTIVE:.2e}" if BETA_MODE != "pid" else "pid betas scaled by 8"
     print(
-        f"  EBOPs      every {EBOPS_EVERY} steps (beta_end scaled to {BETA_END_EFFECTIVE:.2e}"
+        f"  EBOPs      every {EBOPS_EVERY} steps ({scaled}"
         f" so time-averaged pressure is unchanged); ~16% faster steps"
     )

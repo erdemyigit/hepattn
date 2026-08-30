@@ -1,6 +1,7 @@
 """Lightning callbacks for HGQ2 housekeeping (ports of the keras-native utilities)."""
 
 import csv
+import math
 from pathlib import Path
 
 import torch
@@ -180,3 +181,170 @@ class BetaScheduler(Callback):
             if beta_var is not None:
                 beta_var.assign(beta)
         pl_module.log("train/quant_beta", beta, sync_dist=True)
+
+
+class BetaPID(Callback):
+    """Drive beta with a PID controller so total EBOPs converges on a target.
+
+    Lightning port of ``hgq.utils.sugar.BetaPID``, and the method used by the only
+    published transformer-on-FPGA result that shares our stack (Laatu, Sun et al.,
+    arXiv:2510.24784, which trains every model to a fixed target of 350k EBOPs --
+    roughly one Super Logic Region of an XCU250). The control law here is
+    arithmetically identical to HGQ2's; only the framework hooks differ, because
+    this repo trains through Lightning rather than ``keras.Model.fit``.
+
+    Why this replaces `BetaScheduler`: an open-loop ramp requires knowing the right
+    beta in advance. We do not. Calibrating it from the *reported* ``total_ebops``
+    overstated the true loss slope by 10,410x, and four decades of beta then moved
+    the mean learned bitwidth by 0.01%. A controller does not need the calibration --
+    it measures the cost each epoch and corrects.
+
+    The control law works in log space (the default, and the only mode ported):
+
+        err       = log10(ebops / target)      > 0 when the model is too expensive
+        integral += err
+        beta      = 10 ** (p*err + i*integral + d*(err - prev_err))
+
+    At ``epoch == warmup_epochs`` the integral is seeded so the controller's first
+    output is exactly ``init_beta``; the ramp therefore starts from a known point
+    rather than a discontinuity.
+
+    KNOWN RISK, measured on this model: ``total_ebops`` is 99.98% QSoftmax and behaves
+    as a step function -- every activation quantizer must lose ~0.6 bits before the
+    reported total changes at all. Across nine epochs and four beta values spanning
+    50x, it held at 1.6755e15 to 0.0002%. A controller facing a process variable that
+    does not respond will keep integrating, so `max_beta` is a required safety valve
+    rather than a formality. Saturating it is itself an informative outcome: it is
+    closed-loop evidence that the blocker is the metric's granularity and not the
+    choice of beta.
+
+    Interaction with `PeriodicEBOPs`: when EBOPs is evaluated every N steps the
+    time-averaged penalty is 1/N of nominal, so the beta the controller settles on is
+    ~N times the value an every-step run would need. This needs no compensation --
+    the controller finds it -- but `init_beta` is in the same (config) units, so scale
+    it by N when carrying a value over from a `BetaScheduler` run.
+
+    Args:
+        target_ebops: Reported total EBOPs to hold. For orientation: an XCVU13P holds
+            ~2.15e6 EBOPs under ``LUTs ~ exp(0.985 * log(EBOPs))`` against its 1.728M
+            LUTs. Set a target the run can plausibly reach -- an unreachable one
+            saturates the controller on the first post-warmup epoch and degenerates
+            into training at ``max_beta``.
+        init_beta: Beta held during warmup and reproduced exactly by the controller's
+            first output.
+        p: Proportional gain.
+        i: Integral gain. HGQ2's default of 2e-3 is tuned for hundred-epoch runs; at
+            an err of ~0.2 it moves beta by a factor of 1.001 per epoch. QAT here costs
+            12.7 h/epoch, so the default below is set for a ~1 decade/10 epoch ramp.
+        d: Derivative gain. EBOPs is noisy; leave at 0.
+        warmup_epochs: Epochs to hold `init_beta` before the controller engages.
+        max_beta: Hard ceiling. Bounds how far an unresponsive metric can drive beta.
+        min_beta: Hard floor.
+        damp_beta_on_target: When under target, beta *= (1 - this). Mitigates overshoot.
+
+    Raises:
+        ValueError: If `target_ebops` or `i` is non-positive, or if a `BetaScheduler`
+            is also registered -- it writes `_beta` every batch, i.e. after this
+            callback's epoch-start write, and would silently erase the controller.
+    """
+
+    def __init__(
+        self,
+        target_ebops: float,
+        init_beta: float,
+        p: float = 1.0,
+        i: float = 0.5,
+        d: float = 0.0,
+        warmup_epochs: int = 2,
+        max_beta: float = 1e-7,
+        min_beta: float = 0.0,
+        damp_beta_on_target: float = 0.0,
+    ):
+        # Coerce BEFORE comparing. YAML 1.1 requires a sign in the exponent, so a config
+        # writing `target_ebops: 1.0e15` yields the *string* "1.0e15" and every numeric
+        # comparison below would raise TypeError instead of validating. Configs here use
+        # `1.0e+15`, but accepting the other spelling costs nothing and the failure mode
+        # is otherwise a TypeError several hours into a run.
+        target_ebops, init_beta = float(target_ebops), float(init_beta)
+        p, i, d = float(p), float(i), float(d)
+        if target_ebops <= 0:
+            raise ValueError(f"target_ebops must be > 0, got {target_ebops}")
+        if i <= 0:
+            raise ValueError(f"integral gain must be > 0 (the integral seeding divides by it), got {i}")
+        if init_beta <= 0:
+            raise ValueError(f"init_beta must be > 0 (the controller works in log space), got {init_beta}")
+        self.target_ebops = target_ebops
+        self.init_beta = init_beta
+        self.p, self.i, self.d = p, i, d
+        self.warmup_epochs = int(warmup_epochs)
+        self.max_beta, self.min_beta = float(max_beta), float(min_beta)
+        self.damp_beta_on_target = float(damp_beta_on_target)
+        self.integral = 0.0
+        self.prev_error = 0.0
+        self.beta = float(init_beta)
+        self._seeded = False
+
+    def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
+        clashing = [c for c in trainer.callbacks if isinstance(c, BetaScheduler)]
+        if clashing:
+            raise ValueError(
+                "BetaPID and BetaScheduler both write every quantized layer's _beta. "
+                "BetaScheduler writes on_train_batch_start, which runs after this "
+                "callback's on_train_epoch_start, so the controller would have no "
+                "effect at all. Remove BetaScheduler from the config."
+            )
+
+    def read_ebops(self, pl_module: LightningModule) -> float:
+        total = 0.0
+        for layer in pl_module.model.keras_layers():
+            ebops = getattr(layer, "ebops", None)
+            if ebops is not None:
+                total += float(torch.as_tensor(ebops))
+        return total
+
+    def write_beta(self, pl_module: LightningModule, beta: float) -> None:
+        for layer in pl_module.model.keras_layers():
+            beta_var = getattr(layer, "_beta", None)
+            if beta_var is not None:
+                beta_var.assign(beta)
+
+    def step(self, ebops: float) -> float:
+        """Advance the controller one epoch and return the new beta.
+
+        Split out from the Lightning hook so the control law can be tested against
+        HGQ2's implementation without constructing a model.
+        """
+        if not self._seeded:
+            # Seed the integral so this first call reproduces init_beta exactly:
+            # the call below does integral += err, after which
+            #   p*err + i*integral == log10(init_beta).
+            err = math.log10(ebops / self.target_ebops + 1e-9)
+            self.integral = (math.log10(self.beta) - self.p * err) / self.i - err
+            self._seeded = True
+
+        error = math.log10(ebops / self.target_ebops)
+        self.integral += error
+        derivative = error - self.prev_error
+        self.prev_error = error
+
+        beta = 10.0 ** (self.p * error + self.i * self.integral + self.d * derivative)
+        if ebops < self.target_ebops:
+            beta *= 1.0 - self.damp_beta_on_target
+        self.beta = max(min(beta, self.max_beta), self.min_beta)
+        return self.beta
+
+    def on_train_epoch_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        ebops = self.read_ebops(pl_module)
+
+        if trainer.current_epoch < self.warmup_epochs:
+            self.write_beta(pl_module, self.init_beta)
+        elif ebops <= 0.0:
+            # No training-mode forward has populated the trackers yet (or EBOPs is
+            # switched off). log10 would blow up; hold and try again next epoch.
+            self.write_beta(pl_module, self.beta)
+        else:
+            self.write_beta(pl_module, self.step(ebops))
+
+        pl_module.log("train/quant_beta", self.beta, sync_dist=True)
+        pl_module.log("train/pid_ebops", ebops, sync_dist=True)
+        pl_module.log("train/pid_saturated", float(self.beta >= self.max_beta), sync_dist=True)
