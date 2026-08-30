@@ -209,3 +209,84 @@ Also a smoke-harness artifact worth remembering: OneCycleLR's first phase spans
 
 Which repo/commit and which branch (`mpflow_proxy` vs regression) produced his latest
 plot. If it predates Maria's eval tooling the baselines need regenerating.
+
+## 3. Where the `k >= n` constraint actually comes from (2026-08-29)
+
+Measured with `Attention(attn_type="linformer")` at n=168, d=256, H=16.
+
+### 3a. Only the DECODER is constrained. The encoder can take any k.
+
+| k | encoder self-attn (`kv_mask` only) | decoder cross-attn (`attn_mask`) |
+|---|---|---|
+| 2, 8, 32, 84, 128, 167 | OK | **RuntimeError** (expand 2/8/.../167 vs 168) |
+| 168, 256 | OK | OK |
+
+The encoder never passes an `attn_mask` — its only mask is `kv_mask` (padding), which
+`linformer.py` now handles by zeroing rows *before* the sequence projection. That path
+has no k constraint at all. So **an encoder-only Linformer at k << n is available today**,
+no code change required; the config just never sets `linformer_proj_dim`, so it inherits
+the lucidrains default of 256.
+
+### 3b. The mask that forces `k >= n` does not implement mask-attention
+
+`linformer.py` builds the mask in the *projected* space and fills it from an
+original-sequence mask:
+
+```python
+mask[..., :kv_len] = original_mask   # <- treats projected column j as token j
+mask[..., kv_len:] = True
+```
+
+Projected column j is a learned mixture of every original position, so there is no
+correspondence to token j. Two measured consequences:
+
+**(i) Masked hits still leak.** Forbid query 0 from seeing hit 5, then perturb only hit
+5 and measure the change in query 0's output (contract: must be exactly 0):
+
+| | query 0 (hit 5 masked) | query 1 (unmasked control) |
+|---|---|---|
+| standard attention | **0.000e+00** | 3.105e+00 |
+| linformer k=168 | 7.934e-02 | 7.346e-02 |
+| linformer k=256 | 2.298e-02 | 1.659e-02 |
+
+The "masked" query moves as much as the unmasked one.
+
+**(ii) k > n is actively harmful, not merely wasteful.** Columns `kv_len:` are masked
+unconditionally, so whenever *any* attn_mask is present, 88 of the 256 projected columns
+(34%) are discarded — for every query, including unmasked ones. Restricting query 0 while
+leaving query 1 free changes query 1's output by:
+
+| | k=168 | k=256 |
+|---|---|---|
+| seed 0 | 0.0% | 19.9% |
+| seed 1 | 0.0% | 29.8% |
+| seed 2 | 0.0% | 29.5% |
+
+At k=168 there are no surplus columns and query 1 is correctly untouched.
+
+### 3c. Is there a real lower limit on k?
+
+Not from n. Linformer's own bound (Wang et al. 2020) is `k = O(d/eps^2)` — a
+Johnson-Lindenstrauss argument, so it scales with the head dimension, **not** the
+sequence length. Here `d_head = 256/16 = 16`. For comparison, the only published
+transformer-on-FPGA result on this stack (Laatu, Sun et al., arXiv:2510.24784) runs
+**k = 2** at n = 8..64 and still beats full MHA under a fixed EBOPs budget.
+
+The real obstruction is structural and specific to MaskFormer: the decoder's
+`attn_mask` is `(B, num_queries, num_hits)` — a *different* mask per query — while
+Linformer projects K/V once, shared across all queries. A per-query key mask cannot be
+expressed after that projection without a per-query projection, which is the n^2 cost
+being avoided. So it is a genuine incompatibility, not a bug to patch.
+
+**Options, in increasing order of cost:**
+1. Linformer in the encoder only (k free, e.g. 32-84), quadratic in the decoder.
+   Break-even is k = n/2 = 84, so k <= 84 is a real FLOP win. No code change.
+2. Set `mask_attention: false` and use Linformer in both — changes the physics
+   (MaskFormer's iterative mask refinement is a core mechanism), so it needs its own
+   ablation before it can be called a Linformer-vs-quadratic comparison.
+3. Fix the decoder mask properly (project the mask, or mask before projection per
+   query). Only (3) preserves both mechanisms, and it is not obviously cheap.
+
+**Correction to the poster's defect 3.** It says k=256 > n=168 "expanded the sequence
+instead of compressing it". True, but incomplete: the surplus columns are then thrown
+away by (ii), and the mask they were protecting does not work anyway.
