@@ -19,7 +19,6 @@ import time
 
 os.environ.setdefault("KERAS_BACKEND", "torch")
 
-import numpy as np
 import torch
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -48,6 +47,16 @@ def slice_batch(inp, tgt, n):
     return ({k: v[:n] for k, v in inp.items()}, {k: v[:n] for k, v in tgt.items()})
 
 
+def free():
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
+
+def peak_gb():
+    return torch.cuda.max_memory_allocated() / 2**30 if DEVICE == "cuda" else 0.0
+
+
 def timed(model, inp, tgt, iters=None, warmup=None):
     iters = ITERS if iters is None else iters
     warmup = max(1, ITERS // 3) if warmup is None else warmup
@@ -62,7 +71,9 @@ def timed(model, inp, tgt, iters=None, warmup=None):
         step(model, inp, tgt)
     if DEVICE == "cuda":
         torch.cuda.synchronize()
-    return (time.perf_counter() - t0) / iters * 1e3
+    ms = (time.perf_counter() - t0) / iters * 1e3
+    model.zero_grad(set_to_none=True)
+    return ms
 
 
 def epoch_hours(ms_per_step, batch):
@@ -80,14 +91,18 @@ def phase_breakdown(model, inp, tgt, iters=None):
 
     for _ in range(iters):
         model.zero_grad(set_to_none=True)
-        sync(); t0 = time.perf_counter()
+        sync()
+        t0 = time.perf_counter()
         with torch.autocast(device_type=DEVICE, dtype=torch.bfloat16, enabled=DEVICE == "cuda"):
             out = model(inp)
-            sync(); t1 = time.perf_counter()
+            sync()
+            t1 = time.perf_counter()
             out, _, losses = model.loss(out, dict(tgt))
-            sync(); t2 = time.perf_counter()
+            sync()
+            t2 = time.perf_counter()
         p7.total_loss(losses).backward()
-        sync(); t3 = time.perf_counter()
+        sync()
+        t3 = time.perf_counter()
         acc["forward"] += t1 - t0
         acc["loss+matcher"] += t2 - t1
         acc["backward"] += t3 - t2
@@ -100,13 +115,16 @@ def main():
     print(f"torch    {torch.__version__}\n")
 
     if DUMMY:
-        from hepattn.experiments.clic.pflow_data import CLICDataset
+        from hepattn.experiments.clic.pflow_data import CLICDataset  # noqa: PLC0415
         ds = CLICDataset(filepath="", inputs={"node": ["features"]},
                          targets={"particle": ["e", "pt", "eta", "sinphi", "cosphi"]},
                          scale_dict_path=p7.SCALE, num_events=max(BATCHES),
                          num_objects=p7.NQ, max_nodes=p7.MAX_NODES, dummy_data=True)
         ev = [ds[i] for i in range(max(BATCHES))]
-        stack = lambda j: {k: torch.stack([e[j][k] for e in ev]).to(DEVICE) for k in ev[0][j]}
+
+        def stack(j):
+            return {k: torch.stack([e[j][k] for e in ev]).to(DEVICE) for k in ev[0][j]}
+
         inp, tgt = stack(0), stack(1)
     else:
         inp, tgt = p7.get_batch()
@@ -117,60 +135,82 @@ def main():
     model.train()
 
     print("================ E. BATCH SCALING (is the step launch-bound?) ================")
-    print(f"{'batch':>6s} {'ms/step':>10s} {'ms/event':>10s} {'epoch h':>9s}")
+    print(f"{'batch':>6s} {'ms/step':>10s} {'ms/event':>10s} {'epoch h':>9s} {'peak GB':>9s}")
     base_per_event = None
     for b in BATCHES:
         if b > have:
             print(f"{b:>6d}  (only {have} events staged — raise PROF_EVENTS)")
             continue
         bi, bt = slice_batch(inp, tgt, b)
+        free()
         try:
             ms = timed(model, bi, bt)
         except torch.OutOfMemoryError:
             print(f"{b:>6d}  OOM")
+            free()
             break
         per_ev = ms / b
         base_per_event = base_per_event or per_ev
-        print(f"{b:>6d} {ms:10.1f} {per_ev:10.2f} {epoch_hours(ms, b):9.2f}")
+        print(f"{b:>6d} {ms:10.1f} {per_ev:10.2f} {epoch_hours(ms, b):9.2f} {peak_gb():9.2f}")
+    free()
     print("\n  Flat ms/step across batch => launch/dispatch bound: the GPU is idling")
     print("  between kernels and a bigger micro-batch is free throughput.")
     print("  ms/event falling with batch => same conclusion, stated as throughput.")
 
-    b = min(32, have)
+    b = min(int(os.environ.get("PROF_MAIN_BATCH", "32")), have)
     bi, bt = slice_batch(inp, tgt, b)
 
+    def section(name, fn):
+        """Run one section; an OOM here must not kill the sections after it."""
+        free()
+        try:
+            fn()
+        except torch.OutOfMemoryError:
+            print(f"  section {name}: OOM at batch {b} -- rerun with PROF_MAIN_BATCH smaller")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  section {name} failed: {type(exc).__name__}: {exc}")
+        free()
+
     print(f"\n================ F. PHASE BREAKDOWN (batch {b}) ================")
-    ph = phase_breakdown(model, bi, bt)
-    tot = sum(ph.values())
-    for k, v in ph.items():
-        print(f"  {k:16s} {v:8.1f} ms  {100 * v / tot:5.1f}%")
-    print(f"  {'total':16s} {tot:8.1f} ms")
+
+    def _f():
+        ph = phase_breakdown(model, bi, bt)
+        tot = sum(ph.values())
+        for k, v in ph.items():
+            print(f"  {k:16s} {v:8.1f} ms  {100 * v / tot:5.1f}%")
+        print(f"  {'total':16s} {tot:8.1f} ms")
+
+    section("F", _f)
 
     print(f"\n================ G. HUNGARIAN MATCHER ABLATION (batch {b}) ================")
-    ms_on = timed(model, bi, bt)
-    real_matcher = p7.Matcher.forward
 
-    def identity_match(self, costs, target_valid, query_valid):
-        n_pred = costs.shape[-1]
-        idx = torch.arange(n_pred, device=costs.device)
-        return idx.unsqueeze(0).expand(costs.shape[0], n_pred).clone()
+    def _g():
+        ms_on = timed(model, bi, bt)
+        real_matcher = p7.Matcher.forward
 
-    p7.Matcher.forward = identity_match
-    try:
-        ms_off = timed(model, bi, bt)
-    finally:
-        p7.Matcher.forward = real_matcher
-    share = 100 * (ms_on - ms_off) / ms_on
-    print(f"  matcher on   {ms_on:8.1f} ms")
-    print(f"  matcher off  {ms_off:8.1f} ms")
-    print(f"  matcher share of step time  {share:5.1f}%")
+        def identity_match(self, costs, target_valid, query_valid):  # noqa: ARG001
+            n_pred = costs.shape[-1]
+            idx = torch.arange(n_pred, device=costs.device)
+            return idx.unsqueeze(0).expand(costs.shape[0], n_pred).clone()
+
+        p7.Matcher.forward = identity_match
+        try:
+            ms_off = timed(model, bi, bt)
+        finally:
+            p7.Matcher.forward = real_matcher
+        share = 100 * (ms_on - ms_off) / ms_on
+        print(f"  matcher on   {ms_on:8.1f} ms")
+        print(f"  matcher off  {ms_off:8.1f} ms")
+        print(f"  matcher share of step time  {share:5.1f}%")
+
+    section("G", _g)
     print("  (scipy linear_sum_assignment runs on CPU per event, every step;")
     print("   if this is large it is a pure-CPU serialisation, not an HGQ2 cost)")
 
     print(f"\n================ H. LIGHTNING A/B (batch {b}) ================")
     try:
-        import lightning as L
-        from torch.utils.data import DataLoader, Dataset
+        import lightning as L  # noqa: PLC0415
+        from torch.utils.data import DataLoader, Dataset  # noqa: PLC0415
 
         class OneBatch(Dataset):
             def __len__(self):
@@ -227,19 +267,27 @@ def main():
         print(f"  lightning overhead {100 * (ms_lightning - ms_bare) / ms_bare:6.1f}%")
         print("  (includes trainer setup amortised over few steps -- treat as an")
         print("   upper bound on Lightning's cost, not a precise figure)")
+    except torch.OutOfMemoryError:
+        print(f"  OOM at batch {b} -- AdamW state plus the graph does not fit; "
+              f"rerun with PROF_MAIN_BATCH smaller")
     except Exception as exc:  # noqa: BLE001
-        print(f"  skipped: {exc}")
+        print(f"  skipped: {type(exc).__name__}: {exc}")
+    free()
 
     print(f"\n================ I. WHERE THE 12.7 h GOES (batch {b}) ================")
-    ms = timed(model, bi, bt)
-    h = epoch_hours(ms, b)
-    print(f"  measured step               {ms:8.1f} ms at batch {b}")
-    print(f"  implied epoch (compute only){h:8.2f} h")
-    print(f"  reported epoch              {REPORTED_HOURS:8.2f} h")
-    print(f"  unexplained by compute      {REPORTED_HOURS - h:8.2f} h"
-          f"  ({100 * (REPORTED_HOURS - h) / REPORTED_HOURS:.0f}%)")
-    print("  The remainder is data loading, optimizer, validation, DDP and Lightning.")
-    print("  If it is small, no framework change can win more than that fraction.")
+
+    def _i():
+        ms = timed(model, bi, bt)
+        h = epoch_hours(ms, b)
+        print(f"  measured step               {ms:8.1f} ms at batch {b}")
+        print(f"  implied epoch (compute only){h:8.2f} h")
+        print(f"  reported epoch              {REPORTED_HOURS:8.2f} h")
+        print(f"  unexplained by compute      {REPORTED_HOURS - h:8.2f} h"
+              f"  ({100 * (REPORTED_HOURS - h) / REPORTED_HOURS:.0f}%)")
+        print("  The remainder is data loading, optimizer, validation, DDP and Lightning.")
+        print("  If it is small, no framework change can win more than that fraction.")
+
+    section("I", _i)
 
     print("\nPROFILE08-DONE", flush=True)
 

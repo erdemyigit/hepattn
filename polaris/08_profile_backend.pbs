@@ -21,6 +21,6 @@ nvidia-smi --query-gpu=index,name,memory.total --format=csv | head -2
 
 # PROF_EVENTS must be >= the largest batch in PROF_BATCHES.
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$REPO/src" \
-  PROF_EVENTS=64 PROF_BATCHES=4,8,16,32,64 PROF_ITERS=12 DATA_ROOT="$DATA_ROOT" \
+  PROF_EVENTS=64 PROF_BATCHES=4,8,16,32 PROF_ITERS=12 PROF_MAIN_BATCH=16 DATA_ROOT="$DATA_ROOT" \
   "$REPO/.venv/bin/python" polaris/08_profile_backend.py
 echo "PROFILE08-EXIT-$?"
