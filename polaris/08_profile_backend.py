@@ -157,7 +157,7 @@ def main():
     print("  between kernels and a bigger micro-batch is free throughput.")
     print("  ms/event falling with batch => same conclusion, stated as throughput.")
 
-    b = min(int(os.environ.get("PROF_MAIN_BATCH", "32")), have)
+    b = min(int(os.environ.get("PROF_MAIN_BATCH", "8")), have)
     bi, bt = slice_batch(inp, tgt, b)
 
     def section(name, fn):
@@ -272,6 +272,10 @@ def main():
               f"rerun with PROF_MAIN_BATCH smaller")
     except Exception as exc:  # noqa: BLE001
         print(f"  skipped: {type(exc).__name__}: {exc}")
+    finally:
+        # Lightning's teardown moves the module back to CPU. Without this every
+        # later section dies with "found at least two devices, cuda:0 and cpu".
+        model.to(DEVICE)
     free()
 
     print(f"\n================ I. WHERE THE 12.7 h GOES (batch {b}) ================")
