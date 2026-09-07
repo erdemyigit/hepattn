@@ -9,14 +9,17 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# CFG selects the arm; the job name follows it so the two runs do not share a log.
+CFG="${CFG:-src/hepattn/experiments/clic/configs/linformer_polaris.yaml}"
+ARM="$(basename "${CFG}" _polaris.yaml)"
 source "${REPO_DIR}/polaris/env.sh"
 
 if [ "${SMOKE:-0}" = "1" ]; then
-  QUEUE="${QUEUE_DEBUG:-debug}"; WALL="00:30:00"; NAME="clic-linformer-smoke"
-  EXTRA="-v REPO_DIR=${REPO_DIR},SMOKE=1"
+  QUEUE="${QUEUE_DEBUG:-debug}"; WALL="00:30:00"; NAME="clic-${ARM}-smoke"
+  EXTRA="-v REPO_DIR=${REPO_DIR},CFG=${CFG},SMOKE=1"
 else
-  QUEUE="${QUEUE_PROD:-preemptable}"; WALL="${WALLTIME:-48:00:00}"; NAME="clic-linformer"
-  EXTRA="-v REPO_DIR=${REPO_DIR}${RESUME_CKPT:+,RESUME_CKPT=${RESUME_CKPT}}${EPOCHS:+,EPOCHS=${EPOCHS}}"
+  QUEUE="${QUEUE_PROD:-preemptable}"; WALL="${WALLTIME:-48:00:00}"; NAME="clic-${ARM}"
+  EXTRA="-v REPO_DIR=${REPO_DIR},CFG=${CFG}${RESUME_CKPT:+,RESUME_CKPT=${RESUME_CKPT}}${EPOCHS:+,EPOCHS=${EPOCHS}}"
 fi
 
 mkdir -p "${REPO_DIR}/polaris/logs"
