@@ -77,14 +77,37 @@ PYTHONPATH="$REPO/src" "$PY" -m hepattn.experiments.clic.main_hgq fit \
   --trainer.limit_val_batches 2 \
   --trainer.max_epochs 1 \
   --trainer.default_root_dir "$WORK_ROOT/ddp_ref" > logs/ddp_ref.log 2>&1
-echo "single-GPU reference val/loss:"; grep -aoE "val_loss=[0-9.]+" logs/ddp_ref.log | tail -1
-echo "DDP val/loss:";                  grep -aoE "val_loss=[0-9.]+" logs/hgq_ddp_validate.log | tail -1
+echo "single-GPU reference fit exit: $?"
+
+# Read val/loss from the CHECKPOINT FILENAME, not the log. The Checkpoint callback names
+# files "epoch=NNN-val_loss=X.XXXXX.ckpt", which is exact. The old code grepped the log
+# for "val_loss=" -- a string the progress bar never prints (it shows v_num=) -- and it
+# grepped logs/hgq_ddp_validate.log, which submit.sh renames to logs/06_ddp_validate.log.
+# So both values came out EMPTY and the decisive comparison silently never ran.
+latest_loss() {  # $1 = default_root_dir
+  find "$1" -name 'epoch=*-val_loss=*.ckpt' -printf '%T@ %p\n' 2>/dev/null \
+    | sort -n | tail -1 | sed -E 's/.*val_loss=([0-9.]+)\.ckpt/\1/'
+}
+REF_LOSS="$(latest_loss "$WORK_ROOT/ddp_ref")"
+DDP_LOSS="$(latest_loss "$WORK_ROOT/ddp_run")"
+echo "single-GPU reference val/loss: ${REF_LOSS:-<none found>}"
+echo "DDP val/loss:                  ${DDP_LOSS:-<none found>}"
+if [ -n "$REF_LOSS" ] && [ -n "$DDP_LOSS" ]; then
+  awk -v a="$REF_LOSS" -v b="$DDP_LOSS" 'BEGIN{
+    d = (a>b ? a-b : b-a); r = (a>0 ? d/a : 0);
+    printf "relative difference: %.4f (%.1f%%)\n", r, r*100;
+    print (r < 0.20 ? "DDP-AGREE-OK: within 20%, DDP is usable"
+                    : "DDP-AGREE-SUSPECT: >20% apart, investigate before using DDP") }'
+else
+  echo "DDP-AGREE-UNKNOWN: could not read one or both checkpoints"
+fi
 
 cat <<'EOF'
 
 === VERDICT ===
-Compare the two val_loss values above. They will not be identical (different data
-sharding), but they should be the same order of magnitude.
+Step 3 now computes the relative difference itself and prints DDP-AGREE-OK or
+DDP-AGREE-SUSPECT. The two values will not be identical (different data sharding),
+so the bar is "same order of magnitude", not equality.
 
   similar   -> DDP is usable. Run one training on all GPUs by adding
                --trainer.devices 4 --trainer.strategy ddp
