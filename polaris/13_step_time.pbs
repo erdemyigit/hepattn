@@ -1,0 +1,47 @@
+#PBS -q debug
+#PBS -j oe
+#PBS -o logs/13_step_time.log
+#
+# Submit with:  bash polaris/submit.sh 13_step_time.pbs
+#
+# Real per-epoch time for devices in {1,4}, and therefore the real DDP speedup.
+#
+# Supersedes 12_ddp_epoch_time, whose two-run slope method was invalid: its devices=1
+# control produced a negative per-batch cost (t20=241s > t120=174s) because startup is
+# NOT constant between runs -- the first cold-loads the ROOT file and compiles the loss
+# functions, the second finds both cached. 13 times the batches inside one run and takes
+# the median after a warmup window, so none of that is in scope.
+set -uo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+source polaris/env.sh
+export PYTHONNOUSERSITE=1 KERAS_BACKEND=torch TORCHDYNAMO_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+REPO="$WORK_ROOT/hepattn"; cd "$REPO"
+PY="$REPO/.venv/bin/python"
+mkdir -p logs
+
+NBATCH="${NBATCH:-140}"
+export STEP_WARMUP="${STEP_WARMUP:-25}"
+BATCH=32
+
+for DEV in 1 4; do
+  echo "########## devices=${DEV} ##########"
+  PYTHONPATH="$REPO/src" DATA_DIR="$DATA_ROOT" CKPT_DIR="$WORK_ROOT/steptime_ckpts" \
+    HGQ_DEVICES="$DEV" HGQ_BATCH="$BATCH" "$PY" polaris/03_make_config.py > /dev/null
+  PYTHONPATH="$REPO/src" "$PY" polaris/13_step_time_fit.py fit \
+    --config polaris_hgq.yaml \
+    --trainer.devices "$DEV" \
+    $( [ "$DEV" -gt 1 ] && echo --trainer.strategy ddp ) \
+    --trainer.limit_train_batches "$NBATCH" \
+    --trainer.limit_val_batches 1 \
+    --trainer.max_epochs 1 \
+    --data.num_train 60000 \
+    --trainer.default_root_dir "$WORK_ROOT/steptime" 2>&1 | grep -aE "STEP-TIME|Error|error"
+  echo "exit=$?"
+done
+
+echo
+echo "Read the [STEP-TIME] devices=... lines. devices=1 is the control and should land"
+echo "near the 12.7 h that started this; if it does not, distrust the devices=4 row too."
+echo "STEPTIME-EXIT-0"
