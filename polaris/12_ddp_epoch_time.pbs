@@ -1,0 +1,71 @@
+#PBS -q debug
+#PBS -j oe
+#PBS -o logs/12_ddp_epoch_time.log
+#
+# Submit with:  bash polaris/submit.sh 12_ddp_epoch_time.pbs
+#
+# What is the REAL per-epoch time now that DDP works, and what is the REAL speedup?
+#
+# 12.7 h/epoch was measured on one GPU, and 08_profile_backend's "79% of the step is
+# fixed dispatch cost" was also single-device. Neither transfers to a 4-rank run, and
+# the 4x I kept quoting was never measured.
+#
+# Method: for devices in {1,4}, fit twice with a different number of batches and take
+# the SLOPE. Startup here is large and fixed -- process spawn, dataset load, inductor
+# compiling the loss functions -- so a single short run measures mostly startup. The
+# difference between a 120-batch and a 20-batch run divides out that constant and
+# leaves the steady-state per-batch cost.
+set -uo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+source polaris/env.sh
+export PYTHONNOUSERSITE=1 KERAS_BACKEND=torch TORCHDYNAMO_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+REPO="$WORK_ROOT/hepattn"; cd "$REPO"
+PY="$REPO/.venv/bin/python"
+mkdir -p logs
+
+# Keep dataset loading short; the epoch projection uses the real event count below.
+TRAIN_EVENTS=994400
+NUM_TRAIN=50000
+BATCH=32
+
+timed_fit() {  # $1 devices, $2 limit_train_batches -> echoes elapsed seconds
+  local dev="$1" nb="$2" t0 t1
+  t0=$(date +%s)
+  PYTHONPATH="$REPO/src" "$PY" -m hepattn.experiments.clic.main_hgq fit \
+    --config polaris_hgq.yaml \
+    --trainer.devices "$dev" \
+    $( [ "$dev" -gt 1 ] && echo --trainer.strategy ddp ) \
+    --trainer.limit_train_batches "$nb" \
+    --trainer.limit_val_batches 1 \
+    --trainer.max_epochs 1 \
+    --data.num_train "$NUM_TRAIN" \
+    --trainer.default_root_dir "$WORK_ROOT/ddp_timing" > "logs/timing_d${dev}_n${nb}.log" 2>&1
+  local rc=$?
+  t1=$(date +%s)
+  [ $rc -ne 0 ] && { echo "FAIL"; return; }
+  echo $((t1 - t0))
+}
+
+echo "=== per-batch cost from the slope of two runs (startup divided out) ==="
+printf "%8s %10s %10s %14s %14s %12s\n" devices t20s t120s "per-batch s" "batches/epoch" "epoch h"
+for DEV in 1 4; do
+  PYTHONPATH="$REPO/src" DATA_DIR="$DATA_ROOT" CKPT_DIR="$WORK_ROOT/ddp_timing_ckpts" \
+    HGQ_DEVICES="$DEV" HGQ_BATCH="$BATCH" "$PY" polaris/03_make_config.py > /dev/null
+  T20=$(timed_fit "$DEV" 20)
+  T120=$(timed_fit "$DEV" 120)
+  if [ "$T20" = "FAIL" ] || [ "$T120" = "FAIL" ]; then
+    printf "%8s %10s %10s   (a fit failed -- see logs/timing_d${DEV}_n*.log)\n" "$DEV" "$T20" "$T120"
+    continue
+  fi
+  awk -v d="$DEV" -v a="$T20" -v b="$T120" -v ev="$TRAIN_EVENTS" -v bs="$BATCH" 'BEGIN{
+    per = (b - a) / 100.0;                 # seconds per micro-batch, startup removed
+    nb  = ev / (d * bs);                   # micro-batches per rank per epoch
+    printf "%8d %10d %10d %14.3f %14.0f %12.2f\n", d, a, b, per, nb, nb*per/3600.0 }'
+done
+echo
+echo "The devices=1 row should reproduce the ~12.7 h that started all this; the devices=4"
+echo "row is the number to quote from now on. Their ratio is the measured DDP speedup --"
+echo "not 4x, whatever it turns out to be."
+echo "TIMING-EXIT-$?"
