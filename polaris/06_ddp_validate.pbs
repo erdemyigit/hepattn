@@ -96,8 +96,8 @@ if [ -n "$REF_LOSS" ] && [ -n "$DDP_LOSS" ]; then
   awk -v a="$REF_LOSS" -v b="$DDP_LOSS" 'BEGIN{
     d = (a>b ? a-b : b-a); r = (a>0 ? d/a : 0);
     printf "relative difference: %.4f (%.1f%%)\n", r, r*100;
-    print (r < 0.20 ? "DDP-AGREE-OK: within 20%, DDP is usable"
-                    : "DDP-AGREE-SUSPECT: >20% apart, investigate before using DDP") }'
+    if (r < 0.20) print "DDP-AGREE-OK: within 20%, DDP is usable";
+    else print "DDP-AGREE-SUSPECT: >20% apart, investigate before using DDP" }'
 else
   echo "DDP-AGREE-UNKNOWN: could not read one or both checkpoints"
 fi

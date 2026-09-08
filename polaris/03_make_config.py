@@ -9,7 +9,8 @@ batch size, precision) is set here so the repo's committed configs stay clean.
 
 Env overrides:
     HGQ_BATCH      micro-batch per GPU            (default 32)
-    HGQ_ACCUM      gradient accumulation steps    (default 4  -> effective 128)
+    HGQ_ACCUM      gradient accumulation steps    (default 4)
+    HGQ_DEVICES    GPUs for one DDP run           (default 4; validated run 7598515)
     HGQ_PRECISION  bf16-mixed | 32                (default bf16-mixed)
     HGQ_BETA_MODE  pid | schedule                 (default pid)
     HGQ_BETA_END   final EBOPs penalty weight     (default 4.0e-15, schedule mode only)
@@ -121,7 +122,23 @@ d["num_workers"] = 8
 d["num_val"] = 5000
 
 t = cfg["trainer"]
-t["devices"] = 1  # DDP over the Keras-torch/HGQ2 stack is NOT validated — see README
+# DDP is now validated on this stack (run 7598515, after the keras-device fix in
+# lightning_module_hgq.setup): two-rank fit completes, checkpoint has 7095 tensors /
+# 6176 quantizer vars / 0 non-finite, and DDP reaches val/loss 40.29 against the
+# single-GPU 39.61 -- a 1.72% difference on 10 batches with different sharding.
+#
+# LR is deliberately NOT rescaled for devices. Lightning's DDP AVERAGES gradients across
+# ranks, so the gradient magnitude at each optimizer step is unchanged; what grows is the
+# number of samples behind it (devices x BATCH x ACCUM), i.e. less gradient noise. That
+# permits a larger LR but does not require one, so raising it is left as a tuning
+# decision rather than smuggled in with a throughput change. Contrast ACCUM below, where
+# Lightning SUMS and the division IS required for correctness.
+DEVICES = int(os.environ.get("HGQ_DEVICES", "4"))
+t["devices"] = DEVICES
+# Pin the strategy. Lightning auto-selects ddp for devices>1, but the validation ran with
+# it explicit, and an implicit choice is one more thing that can change under us.
+if DEVICES > 1:
+    t["strategy"] = "ddp"
 t["accelerator"] = "gpu"
 t["max_epochs"] = EPOCHS
 t["precision"] = PRECISION
@@ -241,7 +258,7 @@ with open(DST, "w") as f:
 print(f"WROTE {DST}")
 print(f"  data       {DATA_DIR}")
 print(f"  ckpts      {CKPT_DIR}")
-print(f"  batch      {BATCH} x accum {ACCUM} = effective {BATCH * ACCUM}")
+print(f"  batch      {BATCH} x accum {ACCUM} x devices {DEVICES} = effective {BATCH * ACCUM * DEVICES}")
 print(f"  precision  {PRECISION}")
 print(f"  lr max     {LR_MAX:.3e}   clip {CLIP}   (invariant to accum)")
 print(f"  epochs     {EPOCHS}")
