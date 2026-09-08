@@ -33,13 +33,20 @@ different `beta_end` (the weight on the EBOPs resource penalty). All GPUs run at
 
 This is deliberate, for two reasons.
 
-**1. DDP over this stack is NOT validated.** Every config ships `devices: 1`. Nobody
-has tested multi-GPU DDP over Keras-3-torch-backend modules carrying HGQ2 quantizers,
-and there are two concrete hazards: quantized layers **build lazily at first forward**
-(ranks can diverge in parameter registration), and quantizer layer names land in
-`state_dict` keys (they must agree **across ranks**, not just across processes). A
-silent failure here produces wrong science, not a crash. See `06_ddp_validate.pbs` if
-you want to unlock it.
+**1. DDP over this stack IS now validated** (run 7598515, 2026-09-07). Configs ship
+`devices: 4` with `strategy: ddp`; `HGQ_DEVICES` overrides. It did not work out of the
+box: `lightning_module_hgq.setup()` created the keras Variables on cpu, and torch's
+`_sync_module_states` walks a **wider** set than `named_parameters() + named_buffers()`,
+so DDP handed NCCL 684 cpu tensors and died with `No backend type associated with device
+type cpu`. `Module.to()` never moved them — measured. They are now built on
+`strategy.root_device`. `06_ddp_validate.pbs` re-checks all three hazards: fit completes,
+checkpoint sane (7095 tensors / 6176 quantizer vars / 0 non-finite), and DDP reaches
+val/loss 40.29 against the single-GPU 39.61 (**1.72%** apart on 10 batches).
+
+LR is deliberately **not** rescaled for `devices`: Lightning's DDP *averages* gradients,
+so the magnitude per optimizer step is unchanged and only the sample count behind it
+grows. That permits a larger LR but does not require one. Contrast `accumulate_grad_batches`,
+where Lightning *sums* and the LR division is required for correctness.
 
 **2. The sweep maps the accuracy-vs-resources curve** — but **`BETA_VALUES` must be
 calibrated first, and the obvious way to do it is wrong.** See the warning below.
@@ -86,7 +93,8 @@ calibrated first, and the obvious way to do it is wrong.** See the warning below
 | Grad accumulation | Losses are mean-reduced → Lightning **sums** accumulated grads. `03_make_config.py` sets LR ÷ accum and clip × accum so an optimizer step is invariant. |
 | Checkpointing | The repo's `Checkpoint` monitors `val/loss`, which never fires mid-epoch — a walltime kill would lose the whole epoch. A plain `ModelCheckpoint` (`every_n_train_steps=1000`, `save_last`) is added, and `05_sweep.pbs` auto-resumes from `last.ckpt`. |
 | Test data | `test_clic_common_infer.root` has `-9999` sentinel indices that crash the loader. Configs evaluate on `val_clic_fix.root`. |
-| QAT cost | Measured: **0.68 it/s** at micro-batch 32 on one A100-40GB = **12.7 h/epoch** (31,075 steps). A float-vs-quantized per-step ratio has *not* been measured under matched conditions — the earlier "~2.3×" figure was not reproducible and has been removed rather than repaired. |
+| QAT cost | Measured in-run (`13_step_time.pbs`, run 7598775), median s per micro-batch after a 25-batch warmup: **1.0083 s on 1 GPU** (31,075 batches/epoch = **8.70 h** of step time) and **1.0873 s on 4 GPUs** (7,769 batches/rank = **2.34 h**). So DDP costs only **7.8% per batch** and buys **3.72×**. Note these are *step* times: the timer spans `batch_start`→`batch_end` and so excludes dataloader stalls, validation and checkpointing — the original 12.7 h wall clock contained ~4.0 h of that, so the real 4-GPU epoch is ~3 h, not 2.34 h. A float-vs-quantized per-step ratio still has *not* been measured under matched conditions; the earlier "~2.3×" was not reproducible and was removed rather than repaired. |
+| Timing method | Use `13_step_time.pbs`. Do **not** use `12_ddp_epoch_time.pbs` — it differenced two whole-process wall times to divide out startup, and its own devices=1 control came back **negative** (t20=241 s > t120=174 s) because the second run finds the ROOT file and the compiled loss functions already cached. Startup is not constant between runs on this stack. |
 
 ## Queue reality on Polaris (measured from `00_discover.sh`)
 
