@@ -29,15 +29,30 @@ class MPflowHGQ(MPflow):
     def setup(self, stage: str) -> None:
         super().setup(stage)
         assert isinstance(self.model, KerasMaskFormer), "MPflowHGQ requires a KerasMaskFormer model"
-        # keras-torch auto-selects cuda/mps for NEW tensors independently of Lightning;
-        # variables are created on cpu here and moved with the module by Lightning
-        set_keras_default_device("cpu")
+        # Create keras variables on the RANK'S device, not cpu.
+        #
+        # The old comment here said variables are "created on cpu and moved with the module
+        # by Lightning". Measured (polaris/10_ddp_device_probe.py): they are NOT. Module.to()
+        # moves all 2027 registered parameters and buffers, and leaves the keras Variables
+        # behind on cpu. Single-device runs survive that because keras reads them wherever
+        # they are; DDP does not, because torch's _sync_module_states walks a wider set than
+        # named_parameters()+named_buffers() and hands NCCL 684 cpu tensors, which fails with
+        # "No backend type associated with device type cpu" (measured, run 7598422).
+        #
+        # self.device is still cpu at setup() -- Lightning has not moved the module yet -- so
+        # take the device from the strategy, which setup_environment() has already resolved.
+        set_keras_default_device(self._target_device())
         self._materialize_keras_layers(stage)
 
+    def _target_device(self) -> str:
+        strategy = getattr(self.trainer, "strategy", None)
+        root = getattr(strategy, "root_device", None)
+        return str(root) if root is not None else str(self.device)
+
     def _sync_keras_device(self) -> None:
-        # setup() ran on cpu (before Lightning moved the module); once training/eval starts
-        # on the real device, keras must create NEW tensors there too — quantizer internals
-        # (STE rounding, LUT domains) otherwise mix cpu constants with cuda activations
+        # setup() now builds on the strategy's root device, so this is normally a no-op.
+        # Kept because self.device is authoritative once Lightning has moved the module, and
+        # because test/predict can run without a fit having gone through setup() first.
         set_keras_default_device(str(self.device))
 
     def on_fit_start(self) -> None:
@@ -60,6 +75,10 @@ class MPflowHGQ(MPflow):
             "validate": datamodule.val_dataloader,
         }.get(stage, datamodule.test_dataloader)
         inputs, _ = next(iter(loader_fn()))
+        # the loader yields cpu tensors; the layers are being built on the target device
+        device = self._target_device()
+        inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
+        self.model.to(device)
         was_training = self.model.training
         self.model.eval()
         with torch.no_grad():
