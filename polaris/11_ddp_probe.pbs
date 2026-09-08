@@ -1,0 +1,31 @@
+#PBS -q debug
+#PBS -j oe
+#PBS -o logs/11_ddp_probe.log
+#
+# Submit with:  bash polaris/submit.sh 11_ddp_probe.pbs
+#
+# Same two-rank fit as 06_ddp_validate, but launched through 11_ddp_probe_fit.py, which
+# patches DDP.__init__ to print every non-cuda parameter/buffer BY NAME before the
+# broadcast that currently fails. The point is to replace a guess with a list of names.
+set -uo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+source polaris/env.sh
+export PYTHONNOUSERSITE=1 KERAS_BACKEND=torch TORCHDYNAMO_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+REPO="$WORK_ROOT/hepattn"; cd "$REPO"
+PY="$REPO/.venv/bin/python"
+mkdir -p logs
+
+PYTHONPATH="$REPO/src" DATA_DIR="$DATA_ROOT" CKPT_DIR="$WORK_ROOT/ddp_ckpts" \
+  "$PY" polaris/03_make_config.py
+
+PYTHONPATH="$REPO/src" "$PY" polaris/11_ddp_probe_fit.py fit \
+  --config polaris_hgq.yaml \
+  --trainer.devices 2 \
+  --trainer.strategy ddp \
+  --trainer.limit_train_batches 4 \
+  --trainer.limit_val_batches 1 \
+  --trainer.max_epochs 1 \
+  --trainer.default_root_dir "$WORK_ROOT/ddp_probe"
+echo "DDP-PROBE-EXIT-$?"
