@@ -19,14 +19,21 @@ Commits are on `keras-jax` (`git log main..keras-jax`).
    A local spike without Lightning shows the same cost (section 1).
 3. **A compiled step is the lever.** On a local CPU, the same HGQ2 graph runs **8.5x faster at batch 4 and
    1.74x faster at batch 32** under JAX `jit` than in a plain torch loop. Without `jit`, JAX is 34x
-   *slower* than with it, so the gain comes from compiling, not from JAX itself.
+   (batch 4) to 9.0x (batch 32) *slower* than with it, so the gain comes from compiling, not from JAX itself.
+   Both arms of the spike ran fp32; the A100 production baselines (1140 ms bare loop, 1.008 s in-run) ran
+   bf16 autocast (`polaris/07_profile.py:134`, `polaris/03_make_config.py:46`).
 4. **Recommendation:** run `polaris/14_backend_spike.pbs` on one A100 first (gate G1, section 5.1).
    - **GO** (JAX at least 2x faster at batch 32, all checks pass): port the CLIC QAT path to a pure
      `keras.ops` model on JAX. Train it with a custom stateless `jax.jit` step. Run Hungarian matching
-     on the host through `jax.pure_callback`. About 4,000 LOC in 8 stages, each with a parity gate.
+     on the host through `jax.pure_callback`. At least 4,100 LOC in 8 stages, each with a parity gate
+     (a lower bound; see section 4).
    - **NO-GO:** do not port. Use Helen's `hgq_train_compile` option (commit `cdc2f3b` on
      `helen/perf/hgq2-train-compile`) on the existing hybrid. It measured 768.6 -> 465.6 ms/step (1.65x)
-     and 21.5 -> 9.4 GB on one A100, as a 274-line diff (216 of them tests).
+     and 21.5 -> 9.4 GB on one A100, as a 274-line diff (216 of them tests). **Caveat:** that measurement
+     is on a "CLIC decoder-scope model" (`cdc2f3b` message), i.e. partial quantization via `quant_scope`
+     (`2641296`), not the all-quantized production model (1140 ms bare loop). Its gain on the full model is
+     not measured. Adopting it also needs the relock `da29f54`, and removing `TORCHDYNAMO_DISABLE=1` from
+     `polaris/05_sweep.pbs:34`, because the option refuses to run under that variable (`cdc2f3b` message).
 
 ## 1. Verdict on the premise
 
@@ -35,7 +42,7 @@ Commits are on `keras-jax` (`git log main..keras-jax`).
 | "Lightning makes HGQ2 training slow" | **Not the main cause. Lightning adds at most about 1.3x.** | Bare torch loop without Lightning: 1140 ms/step at batch 32 (`093757c`, `be28dfa`, `polaris/07_profile.py`). The 12.7 h epoch / (31,075 x 1.14 s = 9.8 h) = 1.30 (`be28dfa`, `polaris/08_profile_backend.py:4-10`). The in-run Lightning step is 1.0083 s per micro-batch on 1 GPU (`polaris/README.md:96`, run 7598775), which is *below* the bare loop's 1140 ms. The conditions differ (EBOPs every 8 steps in production). |
 | The step is mostly a fixed per-op cost | **Supported.** | A100 batch scan of 893.6 / 933.5 / 945.4 / 1141.3 ms at batch 4/8/16/32: "8x the work for 28% more time: ~890 ms of every step is fixed dispatch cost" (`e998873`). In the CPU spike, `torch-loop` costs 680.7 ms fixed + 0.44 ms/event, which is 98% fixed at batch 32 (section 2). |
 | The overhead is Keras-on-torch | **Partly.** It is HGQ2's quantizer ops, not Keras layers. | aten ops per fwd+bwd step (TorchDispatchMode counter, CPU): quantized with EBOPs = 55,590; quantized without EBOPs = 44,266; float = 6,048. The count is the same at batch 2 and batch 8. The float model has the same Keras layer graph and costs 161 ms/step at batch 32 (`093757c`). |
-| Compiling the step removes the overhead | **Supported on CPU. Not measured on GPU.** | CPU spike: the fixed cost falls from 680.7 ms (`torch-loop`) to 34.7 ms (`jax-jit`). Whole-module `torch.compile` measured 0.77x, i.e. slower, because "Keras-torch dispatch breaks the graph at every layer" (`polaris/README.md:90`). Compiling only HGQ2's quantizer functions on torch gave 1.65x (`cdc2f3b`). |
+| Compiling the step removes the overhead | **Supported on CPU. Not measured on GPU.** | CPU spike: the fixed cost falls from 680.7 ms (`torch-loop`) to 34.7 ms (`jax-jit`). Whole-module `torch.compile` measured 0.77x, i.e. slower, because "Keras-torch dispatch breaks the graph at every layer" (`polaris/README.md:90`). Compiling only HGQ2's quantizer functions on torch gave 1.65x on a decoder-scope model (`cdc2f3b`). |
 | "Keras with no backend" | **Not possible.** | See section 0, item 1. On the torch backend, `jit_compile=True` means `torch.compile` and `"auto"` means eager (`SP/keras/src/trainers/trainer.py:130-137, 256-259`). |
 
 Not yet measured, and not needed for the decision:
@@ -47,7 +54,7 @@ Not yet measured, and not needed for the decision:
 
 **Recommended: JAX.** The numbers below are from the local CPU spike (`polaris/14_backend_spike.py`, commit `1a94dfe`).
 It used an M2 Pro, dim 64, 4 encoder + 2 decoder layers, the `pflow_hgq.yaml` quantizer config and the EBOPs
-penalty. Each value is the median ms/step over 20 steps, each run in its own process.
+penalty, all in fp32. Each value is the median ms/step over 20 steps (3 warmup), each run in its own process.
 
 | mode | batch 4 | batch 32 | fixed ms | ms/event | peak RSS GB (b32) | first step s |
 |---|---|---|---|---|---|---|
@@ -58,20 +65,26 @@ penalty. Each value is the median ms/step over 20 steps, each run in its own pro
 | `jax-stateless` (one `jax.jit` step: `stateless_call` + `stateless_apply`) | **75.3** | **403.8** | 28.4 | 11.73 | 2.73 | 13.0 |
 
 With Linformer attention (k=256), the medians at batch 4 / 32 were: `torch-loop` 691.7 / 895.3 ms,
-`jax-jit` 103.3 / 528.3 ms, `jax-stateless` 103.8 / 545.8 ms (`sweep_linformer_dim64.json`).
+`jax-jit` 103.3 / 528.3 ms, `jax-stateless` 103.8 / 545.8 ms (`sweep_linformer_dim64.json`; median of
+10 steps after 2 warmup). With Linformer the batch-32 gain is 1.69x (`jax-jit`) and 1.64x (`jax-stateless`).
 
 Why JAX:
-- **Only a compiled step removes the fixed cost.** `jax-eager` is 34x slower than `jax-jit`.
-- **A hand-written stateless step costs nothing extra.** `jax-stateless` is within 6% of Keras's own
-  jitted `train_on_batch`. So the custom loop we need (host matching, beta updates, EBOPs gating) costs no speed.
+- **Only a compiled step removes the fixed cost.** `jax-eager` is 34x (batch 4) and 9.0x (batch 32) slower than `jax-jit`.
+- **A hand-written stateless step costs nothing extra.** `jax-stateless` is within 7% of Keras's own
+  jitted `train_on_batch` (6.3% faster at batch 4, 0.9% slower at batch 32; 3.3% slower with Linformer at
+  batch 32). So the custom loop we need (host matching, beta updates, EBOPs gating) costs no speed.
 - **HGQ2 trains correctly under `jit`.** In every mode, all 264 bitwidth variables moved and the loss fell.
   The step-0 loss minus the task loss equals sum(beta x EBOPs) to a relative error of at most 2.8e-6
   (`spikeHJpB/final_check.json`). Independent evidence: HGQ2 issue #10 reports
   "bit-identical memory across 400 steps" on JAX with `jit_compile=True`
   (https://github.com/calad0i/HGQ2/issues/10). The maintainer wrote "Try JAX, which solves 99% of
   tf-specific problems" (https://github.com/calad0i/HGQ2/issues/14).
-- **TensorFlow is a worse choice.** It was not measured. Keras turns XLA off on CPU-only machines
-  (`SP/keras/src/trainers/trainer.py:261-267`), so the compiled path could not be tested on our Macs.
+- **TensorFlow is a worse choice.** It was not measured (TensorFlow is not installed in `.venv-jax`).
+  Keras turns XLA off on CPU-only machines only for `jit_compile="auto"`
+  (`SP/keras/src/trainers/trainer.py:256-267`); an explicit `jit_compile=True` is kept unless a layer
+  reports `supports_jit=False` or TF sees an Apple GPU (`trainer.py:245-254,1208-1228`). So a CPU
+  measurement on our Macs was possible; it was not done. The reasons for JAX are the measured JAX numbers
+  and HGQ2 issue #14 below, not a TF limitation.
 - **JAX runs on Polaris.** It is in the ALCF `conda` module (0.11.1 in `conda/2026-10-01`,
   https://github.com/argonne-lcf/user-guides/blob/main/docs/polaris/data-science/frameworks/jax.md),
   and `jax[cuda12]` pip wheels exist (https://docs.jax.dev/en/latest/installation.html).
@@ -116,7 +129,7 @@ not a fallback: it is unmeasured, it compiles through the same XLA, and HGQ2's m
 |---|---|---|
 | Dense / FFN / heads | `KerasDense(nn.Module)`, built lazily at the first forward (`src/hepattn/keras/dense.py:63,174-190`). SwiGLU uses `torch.chunk` + `F.silu` (198-199). | A `Layer` that builds its HGQ2 sublayers in `build(input_shape)` from the static shape. SwiGLU becomes `keras.ops.split` + `keras.activations.silu`. `training` is passed through `call`. |
 | Linformer (CLIC uses it in the encoder and decoder, `pflow_hgq.yaml:142`) | `proj_k`/`proj_v` are `nn.Parameter` (`src/hepattn/keras/linformer.py:70-71`). `keep` is built by an in-place slice write (131-133). | `add_weight` with `keras.initializers.RandomUniform(-1/sqrt(k), 1/sqrt(k))`, and `keep = keras.ops.pad(mask, ...)`. **Keep Helen's semantics:** `kv_mask`, `q_mask` and `qkv_norm` stay ignored (`**_ignored`, lines 34 and 96). |
-| Dense attention (`attn_type: torch`; used by parity tests) | `unflatten`/`transpose`, torch norms, `merge_masks` with `torch.full` (`src/hepattn/models/attention.py:66,68`) | `keras.ops.reshape`/`transpose`; `merge_masks` via `keras.ops.logical_and`; `keras.layers.LayerNormalization(epsilon=1e-5)` (the Keras default is 1e-3). The value residual is returned explicitly instead of written into a dict. |
+| Dense attention (`attn_type: torch`; used by parity tests) | `unflatten`/`transpose`, torch norms, `merge_masks` with `torch.full` (`src/hepattn/models/attention.py:62,64`) | `keras.ops.reshape`/`transpose`; `merge_masks` via `keras.ops.logical_and`; `keras.layers.LayerNormalization(epsilon=1e-5)` (the Keras default is 1e-3). The value residual is returned explicitly instead of written into a dict. |
 | Encoder, Residual, register tokens | torch `Residual`/LayerNorm/LayerScale; `register_tokens = nn.Parameter(torch.randn(1,8,dim))` (`src/hepattn/keras/encoder.py:111`) | A Keras `Residual` (pre/post/hybrid norm). Register tokens use `add_weight(RandomNormal(stddev=1))` + `keras.ops.broadcast_to` + `keras.ops.concatenate`, then a static slice. DropPath stays off (`drop_path=0`). If it is ever enabled, it needs `keras.random.SeedGenerator` state. |
 | Input net + Fourier posenc | in-place `x += posenc` (`src/hepattn/models/input.py:57`). `B` is a `Buffer` (`src/hepattn/models/posenc.py:131`); in-place `xs @= B` (137). | Functional. `B` becomes a **non-trainable** `add_weight`, so it is saved and restored. Its value is ported from torch for parity. |
 | Decoder (4 layers) | Inherited torch forward (`src/hepattn/keras/decoder.py:23,82`). Tasks OR their masks in place (`src/hepattn/models/decoder.py:276`). The boolean-mask scatter at line 291 and the gather at `src/hepattn/utils/model_utils.py:17` have data-dependent shapes. | A static Python loop over layers and tasks; `keras.ops.logical_or`. There is a single input type (`node`, `pflow_hgq.yaml:105,116`), so `key_is_node` is all True: the scatter and the `unmerge_inputs` gather become identity / static slices. Use `keras.ops.stop_gradient` for `.detach()`. **All-False-row restore** (`unmask_all_false`, default True, `decoder.py:40,296`): `keras.ops.where(keras.ops.all(~m, axis=-1, keepdims=True), True, m)`. `initial_queries` becomes `add_weight`. Outputs are a nested dict pytree per layer. |
@@ -204,7 +217,7 @@ def train_step(tv, ntv, ov, batch, ebops_on):
 ```
 
 - Logging, metrics, beta control and checkpointing run on the host between steps, every
-  `log_every_n_steps` (1000, `pflow_hgq.yaml:50`). The `batch_idx` branch (`src/hepattn/models/wrapper.py:94`)
+  `log_every_n_steps` (200 in the Polaris config, `polaris/03_make_config.py:148`; 1000 in `pflow_hgq.yaml:50`). The `batch_idx` branch (`src/hepattn/models/wrapper.py:94`)
   and the `self.log` calls (54-62) leave the traced code.
 - Why not `Model.fit`: the JAX trainer purges variables during an epoch and only re-reads them after a
   callback sync (`SP/keras/src/backend/jax/trainer.py:440-460,486-490,880-904`). Per-batch beta writes
@@ -221,10 +234,19 @@ def train_step(tv, ntv, ov, batch, ebops_on):
   number. **Fix:** compute EBOPs = sum(qlosses) / beta. Each term is `ebops * beta` (`base.py:106`), and
   all layers share one beta. This needs beta > 0, so set `min_beta > 0` (the default is 0.0,
   `callbacks.py:260`) and start the `BetaScheduler` ramp above 0 (`beta_start` defaults to 0.0, line 171).
+  The Polaris config builds the layers with `beta0: 0.0` (`polaris/03_make_config.py:206`); in pid mode
+  BetaPID writes `init_beta` at the start of epoch 0 (`callbacks.py:336-340`), so beta > 0 from the first
+  step, but the schedule mode starts at 0 (`03_make_config.py:229`, `beta_start: 0.0`). The read-out is only
+  valid on EBOPs-active steps. Re-measured for this review: `test_periodic_ebops.py` gives
+  `quant_losses` 804.96 (active) vs 0.381 (skipped), so 0.05% of the sum is not EBOPs x beta.
 - **Beta.** `_beta` is a non-trainable variable (`base.py:217-221`), so it is a leaf of `ntv`. The host
   replaces those leaves (paths ending in `beta`) with a new scalar of the same shape and dtype. A value
-  change does not retrace. `BetaPID.step` (`callbacks.py:311-334`) is reused as is. The per-step
-  `BetaScheduler` ramp becomes a host function of the step.
+  change does not retrace. The control law of `BetaPID.step` (`callbacks.py:311-334`) is reused, but
+  **not by import**: `hepattn/keras/callbacks.py` imports torch and lightning (lines 7-8) and lives in
+  `hepattn.keras`, whose `__init__.py:15-30` raises under `KERAS_BACKEND=jax`. Move the pure-Python
+  controller (`__init__` validation + `step`) into a torch-free module in `keras_native`, and make the
+  Lightning `BetaPID` wrap it, as for `factory.py`. The per-step `BetaScheduler` ramp becomes a host
+  function of the step.
 - **PeriodicEBOPs.** HGQ2 reads the Python bool `enable_ebops` at trace time (`base.py:97,103`). So
   `ebops_on` is a static argument, and the step function sets `layer._enable_ebops` while tracing: two
   cached executables, no retrace afterwards. First measure the EBOPs share of the *compiled* step in S5.
@@ -237,25 +259,42 @@ def train_step(tv, ntv, ov, batch, ebops_on):
 
 - `keras.optimizers.AdamW(weight_decay=1e-4, global_clipnorm=0.1)`. Exclude quantizer variables (paths
   containing `quantizer`, as `src/hepattn/keras/maskformer.py:132-136` does today) with
-  `exclude_from_weight_decay`. Beta is non-trainable, so `stateless_apply` never updates it.
-  `keras.optimizers.Lion` covers the Lion option.
+  `exclude_from_weight_decay(var_list=[v for v in model.trainable_variables if "quantizer" in v.path])`.
+  **Do not use `var_names=["quantizer"]`:** it matches `variable.name`, not the path
+  (`SP/keras/src/optimizers/base_optimizer.py:942-948`), and HGQ2 quantizer variables are named `f`, `i`,
+  `b`. Measured on a `QDense`: `var_names` excluded 0 of 4 quantizer variables, `var_list` excluded 4.
+  Beta is non-trainable, so `stateless_apply` never updates it. `keras.optimizers.Lion` covers the Lion option.
 - OneCycle: a `keras.optimizers.schedules.LearningRateSchedule` subclass that reproduces torch
-  `OneCycleLR(max_lr, total_steps, div_factor, final_div_factor, pct_start)` (`lightning_module_hgq.py:167-175`).
+  `OneCycleLR(max_lr, total_steps, div_factor, final_div_factor, pct_start)` (`lightning_module_hgq.py:167-174`).
   **Known deviation:** torch also cycles Adam beta1 by default (`cycle_momentum=True`, 0.85-0.95; local
-  torch `lr_scheduler.py:2394-2395`). Keras Adam's docstring allows a callable `beta_1` (`SP/keras/src/optimizers/adam.py:25`),
-  but the update casts `self.beta_1` directly (`adam.py:107-120`), so a callable is unverified.
-  Decide: accept a fixed beta1 = 0.9 (recorded as a deviation), or verify a callable in S5.
-- Gradient accumulation: `gradient_accumulation_steps=k` **averages** the gradients
-  (`SP/keras/src/optimizers/base_optimizer.py:1168-1175`). Lightning sums them, so `03_make_config.py`
-  divides LR by `accum` and multiplies the clip by `accum` (`polaris/README.md:93`). **Drop that compensation** in the JAX driver.
+  torch `.venv-torch/.../lr_scheduler.py:2394-2396`). Keras Adam's docstring allows a callable `beta_1`
+  (`SP/keras/src/optimizers/adam.py:25`), but the update casts `self.beta_1` directly (`adam.py:107-120`).
+  **Measured: a callable `beta_1` fails** under `jax.jit(optimizer.stateless_apply)` with
+  `TypeError: float() argument must be ... not 'function'`. So either accept a fixed beta1 = 0.9 (recorded
+  as a deviation), or subclass the optimizer to read beta1 from a schedule of `iterations`.
+- Gradient accumulation: `gradient_accumulation_steps=k` **averages** the gradients and then clips the
+  average (`SP/keras/src/optimizers/base_optimizer.py:563-571,1168-1175`). **Lightning also averages:**
+  in automatic optimization it divides each micro-batch loss by `accumulate_grad_batches`
+  (lightning 2.5.2, `lightning/pytorch/loops/optimization/automatic.py:83,329`), and clips at the optimizer
+  step. The two have the same semantics. The claim in `polaris/README.md:93` and
+  `polaris/03_make_config.py:102-106` that Lightning *sums* is wrong, so the hybrid's LR / accum and
+  clip x accum compensation actually runs production at max LR 1.25e-5 and clip 0.4 (accum 4), not the
+  intended 5e-5 and 0.1. For the JAX driver: use **the same LR and clip values as the hybrid run it is
+  compared with** (G4), and fix the hybrid's compensation as a separate, team-level decision.
 - Precision: **fp32 first** (the spike ran fp32). bf16 under HGQ2 on JAX is unverified. Decide in S8
   with `keras.mixed_precision.set_dtype_policy("mixed_bfloat16")`, gated on the quantized parity and
-  training checks. Production used bf16 to fit batch 128 (`pflow_hgq.yaml:40,47`). Whether XLA needs it
-  depends on G1's `peak_dev_gb`.
+  training checks. The Polaris production config is micro-batch 32 x accum 4 in bf16-mixed
+  (`polaris/03_make_config.py:44-46`); batch 128 OOM'd an 80 GB A100 (`polaris/README.md:92`), so
+  `pflow_hgq.yaml:40,47` (batch 128) is not what Polaris runs. Whether XLA needs bf16 depends on G1's `peak_dev_gb`.
+- The production config is **generated** by `polaris/03_make_config.py` from `base.yaml`, not taken from
+  `pflow_hgq.yaml`. It differs in: batch/accum/precision (above), `log_every_n_steps` 200, `num_workers`
+  8, PeriodicEBOPs every 8 with beta values scaled x8, a step `ModelCheckpoint` every 1000 steps, and
+  `quant.ebops.beta0: 0.0` (`03_make_config.py:44-46,79-90,102-106,121,148,155-166,206,244-248`). The JAX driver
+  and the S6/S8 gates must use that generated `polaris_hgq.yaml`.
 
 ### 3.8 Data
 
-- Keep `CLICDataset` + torch `DataLoader` (16 workers) as a host iterator. Convert each collated batch
+- Keep `CLICDataset` + torch `DataLoader` (8 workers on Polaris, `03_make_config.py:121`; 16 in `pflow_hgq.yaml:36`) as a host iterator. Convert each collated batch
   with `np.asarray`, then `jax.device_put`. Keras's own torch-DataLoader adapter also goes through numpy
   (`SP/keras/src/trainers/data_adapters/torch_data_loader_adapter.py:43-45`). Torch becomes a CPU-only
   data dependency of the JAX env. A numpy `load_event` (~300 lines) is optional (S9).
@@ -303,8 +342,9 @@ def train_step(tv, ntv, ov, batch, ebops_on):
   `src/hepattn/keras/export.py:70-80` is only needed under torch.
 - Keep `export.py`'s functional assembly from live layers (`build_functional_dense`, lines 17-39). It is
   plain Keras, and the layers are now the same objects that trained.
-- Saved Keras files have "no backend specialization" (https://keras.io/keras_3/), so a JAX-trained model
-  can be converted in any environment. The csim bit-exactness gates still run only on linux (`WORKLOG.hgq.md`, Stage 6).
+- Saved `.keras` files have "no backend specialization" (https://keras.io/keras_3/; the page says this of
+  `.keras` files, not of `.weights.h5`), so a JAX-trained model saved as `.keras` can be converted in any
+  environment; a `.weights.h5` file needs the same layer paths on the loading side. The csim bit-exactness gates still run only on linux (`WORKLOG.hgq.md`, Stage 6).
 
 ## 4. Staged work breakdown
 
@@ -331,6 +371,12 @@ The tolerances are the `docs/hgq/PARITY.md` rows. LOC estimates include the test
 | S9 | Optional: data parallelism, on-device optax matching, numpy loader, retire the hybrid | S8 | not estimated |
 
 Total S1-S8: **about 4,100 LOC** (the inventory's per-component sum is 3,945, including about 600 LOC of tests).
+**Treat this as a lower bound.** The inventory is a workflow output, not a file in the repo, so it cannot be
+re-checked. For scale (`wc -l`): the hybrid itself is 2,093 LOC in `src/hepattn/keras/` plus 3,056 LOC in
+`tests/keras/` (22 files), and it reuses, unchanged, about 4,000 LOC of torch code that this port rewrites
+(`task.py` 1,637, `decoder.py` 475, `attention.py` 441, `maskformer.py` 429, `loss.py` 370, `encoder.py` 303,
+`matcher.py` 296). The gates below name more than 35 checks, several of which port existing test files;
+600 LOC of tests is not enough for them.
 
 **What can run in parallel after S1:**
 - Lane A: S2, then S3.
@@ -362,7 +408,8 @@ S5 needs lanes A and B. S8 needs all four lanes.
   - The forward compiles once over 3 batches. Unsupported configs raise.
   - **G2 (Polaris):** a full forward + backward with a surrogate loss, at production shape and batch 32,
     jitted, must take ≤ 0.5x the hybrid's bare-loop step (`polaris/07_profile.py`, same node and batch,
-    EBOPs every step in both). If not, stop before S4-S8 merge.
+    EBOPs every step in both, and the same precision: `07_profile.py:134` runs bf16 autocast, so either
+    run the JAX arm in `mixed_bfloat16` or rerun 07 in fp32). If not, stop before S4-S8 merge.
 - **S4:**
   - `maskformer.loss` rows at 1e-4/1e-3, including the `mask_bce` `inf` semantics.
   - Each task's cost matrix matches the torch `task.cost` to 1e-5.
@@ -380,20 +427,28 @@ S5 needs lanes A and B. S8 needs all four lanes.
   - The spike's penalty check: step-0 loss minus task loss equals sum(beta x EBOPs), rel err ≤ 1e-5.
   - The EBOPs read-out equals the exact torch-backend value. Control: reading `_ebops` returns 4294967295.
   - Changing beta between steps leaves `_cache_size()` unchanged and scales the penalty by the beta ratio.
-  - PeriodicEBOPs reproduces the ~805 (active) vs ~0.38 (skipped) `quant_losses` of `tests/keras/test_periodic_ebops.py`.
-  - The BetaPID control-law tests (`tests/keras/test_beta_pid.py:82-184`) run unchanged.
+  - PeriodicEBOPs reproduces the 804.96 (active) vs 0.381 (skipped) `quant_losses` of
+    `tests/keras/test_periodic_ebops.py` (re-measured in this review; the test's own criterion is
+    skipped < 1% of active, lines 79-80).
+  - The BetaPID control-law tests (`tests/keras/test_beta_pid.py:82-184`) pass against the torch-free
+    controller (section 3.6). They cannot run unchanged under `KERAS_BACKEND=jax`: line 18 imports
+    `hepattn.keras.callbacks`, which raises under that backend.
   - The OneCycle LR equals torch `OneCycleLR` at 20 sampled steps.
   - k accumulated micro-batches equal one k-times batch.
+  - The weight-decay exclusion covers every variable with `quantizer` in its path (control:
+    `var_names=["quantizer"]` excludes 0, measured).
   - **G3 (Polaris):** the full train step at batch 32 must be **≥ 1.8x** faster than the hybrid's in-run
     step (`polaris/13_step_time.pbs`, same node), and the matching callback must be ≤ 15% of the step
-    (otherwise schedule optax in S9).
+    (otherwise schedule optax in S9). The in-run step uses the generated config (`13_step_time.pbs:31`):
+    bf16-mixed and PeriodicEBOPs every 8. Run the JAX arm with the same EBOPs period and precision, or
+    record the difference next to the result.
 - **S6:**
   - Save, load and step once: the result is bitwise equal to an uninterrupted run on CPU. GPU
     determinism is not assumed, so on GPU the check uses a tolerance.
   - Over one epoch of dummy data, `_cache_size()` ≤ 2 for train (EBOPs on/off) and ≤ 1 for each of eval and predict.
   - The prediction h5 has the same keys, shapes and dtypes as `PflowPredictionWriter` for the same weights.
   - The metrics equal `torchmetrics` on fixed predictions.
-  - The YAML loader reads `pflow_hgq.yaml` unchanged.
+  - The YAML loader reads `pflow_hgq.yaml` and the generated `polaris_hgq.yaml` (`polaris/03_make_config.py`) unchanged.
 - **S7:**
   - A converted hybrid checkpoint gives forwards equal to the hybrid's golden files at the S3 tolerances.
   - `tests/keras/test_export.py` (9 tests) passes under `KERAS_BACKEND=jax`. The csim gates run on linux.
@@ -427,7 +482,7 @@ S5 needs lanes A and B. S8 needs all four lanes.
 
 | Criterion | Threshold | Why |
 |---|---|---|
-| Speed | median ms/step of `jax-stateless` (or `jax-jit`) at batch 32 ≤ **0.5x** `torch-loop` | The full port is about 4,100 LOC. The no-port alternative (`cdc2f3b`) already gives 1.65x. The spike also leaves out the task heads, the losses and the host matching (16-58 ms, section 3.4). |
+| Speed | median ms/step of `jax-stateless` (or `jax-jit`) at batch 32 ≤ **0.5x** `torch-loop` | The full port is at least 4,100 LOC. The no-port alternative (`cdc2f3b`) gave 1.65x on a decoder-scope model (not measured on the full model). The spike also leaves out the task heads, the losses and the host matching (16-58 ms, section 3.4). Both spike arms run fp32, while production runs bf16-mixed. |
 | Overhead gone | JAX fixed cost (line through batch 4..32) ≤ 25% of its batch-32 step | Torch was 79% fixed on A100 (`e998873`) |
 | Correctness | for the JAX modes: `penalty_check` rel err ≤ 1e-5, every bitwidth variable changed, `loss_last` < `loss_first` | CPU measured ≤ 2.8e-6 |
 | Memory | `peak_dev_gb` (JAX, b32) ≤ `peak_dev_gb` (`torch-loop`, b32) | On CPU, JAX used 2-6x more host RAM. Batch 64 OOM'd on 40 GB with torch (`e998873`). |
@@ -435,7 +490,9 @@ S5 needs lanes A and B. S8 needs all four lanes.
 
 `n_ebops_var_saturated_uint32 > 0` is expected on JAX. It is a known problem with a planned fix (section 3.6), not a failure.
 
-**NO-GO** (any criterion fails, or JAX fails to compile or run on the GPU): adopt `cdc2f3b` on the hybrid.
+**NO-GO** (any criterion fails, or JAX fails to compile or run on the GPU): adopt `cdc2f3b` on the hybrid,
+after measuring it on the all-quantized production model (its 1.65x is from a decoder-scope model), with
+`da29f54` and without `TORCHDYNAMO_DISABLE=1` in `05_sweep.pbs:34`.
 Separately, run the matched Lightning A/B from section 1 if the team still wants to drop Lightning.
 
 ### 5.2 Risk register
@@ -449,21 +506,24 @@ Separately, run the matched Lightning A/B from section 1 if the team still wants
 | R5 | HGQ2-on-JAX quirks | `uint32` EBOPs saturation (measured); trace-time build fallback (measured, harmless); the upstream JAX tests run with `jax_disable_jit=True` (HGQ2 `tests/conftest.py`) | Section 3.6 fix; eager build before `jit`; our `jit` tests are the coverage, so keep them in CPU CI |
 | R6 | bf16 + HGQ2 on JAX | Unverified | fp32 first; the bf16 gate in S8 |
 | R7 | GPU memory under XLA | Unknown; host RSS was 2-6x higher on CPU | G1 memory criterion |
-| R8 | Numerics drift silently | LayerNorm eps (Keras 1e-3 vs torch 1e-5); initializers; beta1 cycling; weighted-CE normalisation; accumulation average vs sum; `finfo.min`/`inf`; NaN targets | The S2-S5 parity gates; the documented deviations in 3.7 |
+| R8 | Numerics drift silently | LayerNorm eps (Keras 1e-3 vs torch 1e-5); initializers; beta1 cycling (callable `beta_1` measured to fail); weighted-CE normalisation; weight-decay exclusion by name vs path (measured); LR/clip must match the hybrid's accum-compensated values; `finfo.min`/`inf`; NaN targets | The S2-S5 parity gates; the documented deviations in 3.7 |
 | R9 | Quantized forward differs across backends at rounding boundaries | Not yet measured | Measure first in S2, then set tolerances; paired delta criterion |
 | R10 | Existing `.ckpt` files become unusable | The torch `state_dict` key layout | S7 converter, gated on the golden files |
 | R11 | Two code paths during migration | — | `keras_native` is isolated; the hybrid stays untouched until G4 |
 | R12 | Polaris JAX environment | The driver and glibc versions for the `cuda12` wheels are not checked | The spike job prints `nvidia-smi`. Fallback: the ALCF `conda` module JAX (0.11.1). |
 | R13 | `cdc2f3b` depends on an unmerged HGQ2 fork | `helenllii/HGQ2@4235490` | Only matters on NO-GO; upstream the fork |
+| R14 | Baselines are not like-for-like | Spike arms fp32; 07 bare loop bf16 autocast (`07_profile.py:134`); 13 in-run bf16 + PeriodicEBOPs every 8 | State precision and EBOPs period with every G1-G3 number |
+| R15 | The hybrid's accumulation compensation is wrong (Lightning averages, `automatic.py:83`) | Production LR 1.25e-5 / clip 0.4 instead of 5e-5 / 0.1 | Team decision; the JAX driver copies whatever the compared hybrid run used |
 
 ### 5.3 Decisions needed from the user
 
 1. Run G1 (section 5.1). Choose between copying the two files and pushing `keras-jax`.
 2. On GO, accept: fp32 first, with bf16 decided in S8; beta > 0 always (`min_beta > 0`, ramp start > 0); a
-   fixed Adam beta1 unless a callable `beta_1` is verified; a torch CPU dependency for the data loader
-   until the optional S9.
+   fixed Adam beta1 (a callable `beta_1` was measured to fail) or a custom optimizer subclass; a torch CPU
+   dependency for the data loader until the optional S9.
 3. Whether single-process 4-GPU data parallelism is needed (S9), or one process per GPU (the current
    sweep pattern) is enough.
+4. Whether to fix the hybrid's grad-accumulation LR/clip compensation (R15) before the G4 comparison runs.
 
 ## Appendix: evidence index
 
@@ -475,6 +535,10 @@ Separately, run the matched Lightning A/B from section 1 if the team still wants
   - `match_probe.py` / `.log` and `match_probe_calls.py` / `.log`: `pure_callback` and the `vjp` split.
   - `api_check.py` / `.log`: the 100 Keras/JAX/HGQ2 names this plan uses all resolve in keras 3.15.0, jax 0.11.2
     and hgq2 0.1.9. `optax.assignment.hungarian_algorithm` is the exception: it is cited from the optax source and is not installed.
+- Review probes (2026-10-14, same scratchpad, `review/`): `probe_opt.py` (weight-decay exclusion by
+  `var_names` vs `var_list`; callable `beta_1` under jitted `stateless_apply`; LayerNormalization default
+  epsilon 1e-3), `test_periodic_ebops_print.py` / `periodic.log` (804.96 vs 0.381), and a rerun of `sat.py`
+  (JAX `_ebops` 4294967295 vs torch 37239136452608 for `e0_sa_softmax_exp_table`).
 - History: `e998873` (batch scan), `be28dfa` / `093757c` (bare loop, EBOPs every N), `5ebea38` / `6a20659`
   (optimizer and device fixes), `cdc2f3b` (Helen, quantizer compile); `polaris/README.md:90-96`.
 - Inventory of torch constructs per component, and the premise check: the workflow outputs that fed this plan.
