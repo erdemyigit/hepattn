@@ -276,11 +276,11 @@ def train_step(tv, ntv, ov, batch, ebops_on):
   average (`SP/keras/src/optimizers/base_optimizer.py:563-571,1168-1175`). **Lightning also averages:**
   in automatic optimization it divides each micro-batch loss by `accumulate_grad_batches`
   (lightning 2.5.2, `lightning/pytorch/loops/optimization/automatic.py:83,329`), and clips at the optimizer
-  step. The two have the same semantics. The claim in `polaris/README.md:93` and
-  `polaris/03_make_config.py:102-106` that Lightning *sums* is wrong, so the hybrid's LR / accum and
-  clip x accum compensation actually runs production at max LR 1.25e-5 and clip 0.4 (accum 4), not the
-  intended 5e-5 and 0.1. For the JAX driver: use **the same LR and clip values as the hybrid run it is
-  compared with** (G4), and fix the hybrid's compensation as a separate, team-level decision.
+  step. The two have the same semantics. The hybrid's old LR / accum and clip x accum compensation
+  (it assumed Lightning *sums*) ran every job before 2026-10-14 at max LR 1.25e-5 and clip 0.4 instead
+  of 5e-5 and 0.1. **Fixed** on `keras-jax`: `03_make_config.py` no longer rescales, pinned by
+  `tests/polaris/test_grad_accumulation.py`. The JAX driver uses 5e-5 / 0.1 with no rescaling; a G4
+  comparison must be against a hybrid run generated after the fix.
 - Precision: **fp32 first** (the spike ran fp32). bf16 under HGQ2 on JAX is unverified. Decide in S8
   with `keras.mixed_precision.set_dtype_policy("mixed_bfloat16")`, gated on the quantized parity and
   training checks. The Polaris production config is micro-batch 32 x accum 4 in bf16-mixed
@@ -506,14 +506,14 @@ Separately, run the matched Lightning A/B from section 1 if the team still wants
 | R5 | HGQ2-on-JAX quirks | `uint32` EBOPs saturation (measured); trace-time build fallback (measured, harmless); the upstream JAX tests run with `jax_disable_jit=True` (HGQ2 `tests/conftest.py`) | Section 3.6 fix; eager build before `jit`; our `jit` tests are the coverage, so keep them in CPU CI |
 | R6 | bf16 + HGQ2 on JAX | Unverified | fp32 first; the bf16 gate in S8 |
 | R7 | GPU memory under XLA | Unknown; host RSS was 2-6x higher on CPU | G1 memory criterion |
-| R8 | Numerics drift silently | LayerNorm eps (Keras 1e-3 vs torch 1e-5); initializers; beta1 cycling (callable `beta_1` measured to fail); weighted-CE normalisation; weight-decay exclusion by name vs path (measured); LR/clip must match the hybrid's accum-compensated values; `finfo.min`/`inf`; NaN targets | The S2-S5 parity gates; the documented deviations in 3.7 |
+| R8 | Numerics drift silently | LayerNorm eps (Keras 1e-3 vs torch 1e-5); initializers; beta1 cycling (callable `beta_1` measured to fail); weighted-CE normalisation; weight-decay exclusion by name vs path (measured); LR/clip must match the hybrid run (no accum rescaling after the R15 fix); `finfo.min`/`inf`; NaN targets | The S2-S5 parity gates; the documented deviations in 3.7 |
 | R9 | Quantized forward differs across backends at rounding boundaries | Not yet measured | Measure first in S2, then set tolerances; paired delta criterion |
 | R10 | Existing `.ckpt` files become unusable | The torch `state_dict` key layout | S7 converter, gated on the golden files |
 | R11 | Two code paths during migration | — | `keras_native` is isolated; the hybrid stays untouched until G4 |
 | R12 | Polaris JAX environment | The driver and glibc versions for the `cuda12` wheels are not checked | The spike job prints `nvidia-smi`. Fallback: the ALCF `conda` module JAX (0.11.1). |
 | R13 | `cdc2f3b` depends on an unmerged HGQ2 fork | `helenllii/HGQ2@4235490` | Only matters on NO-GO; upstream the fork |
 | R14 | Baselines are not like-for-like | Spike arms fp32; 07 bare loop bf16 autocast (`07_profile.py:134`); 13 in-run bf16 + PeriodicEBOPs every 8 | State precision and EBOPs period with every G1-G3 number |
-| R15 | The hybrid's accumulation compensation is wrong (Lightning averages, `automatic.py:83`) | Production LR 1.25e-5 / clip 0.4 instead of 5e-5 / 0.1 | Team decision; the JAX driver copies whatever the compared hybrid run used |
+| R15 | The hybrid's accumulation compensation is wrong (Lightning averages, `automatic.py:83`) | Production LR 1.25e-5 / clip 0.4 instead of 5e-5 / 0.1 | **Fixed 2026-10-14** in `03_make_config.py` + `tests/polaris/test_grad_accumulation.py`; compare only against post-fix hybrid runs |
 
 ### 5.3 Decisions needed from the user
 
@@ -523,7 +523,7 @@ Separately, run the matched Lightning A/B from section 1 if the team still wants
    dependency for the data loader until the optional S9.
 3. Whether single-process 4-GPU data parallelism is needed (S9), or one process per GPU (the current
    sweep pattern) is enough.
-4. Whether to fix the hybrid's grad-accumulation LR/clip compensation (R15) before the G4 comparison runs.
+4. ~~Whether to fix the hybrid's grad-accumulation LR/clip compensation (R15)~~ Done 2026-10-14.
 
 ## Appendix: evidence index
 

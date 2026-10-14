@@ -103,8 +103,8 @@ Constraints baked into the generated configs: `devices: 4` with `strategy: ddp`
 (measured net-slower on the quantized stack). `precision: bf16-mixed` is validated on CUDA (finite loss,
 quantizer bitwidth gradients flow); the quantizers keep fp32 internal state, so
 expect higher activation memory than the float twin (dim-256 model: micro-batch
-~32 per 40 GB — use gradient accumulation for larger effective batches, rescaling
-LR and grad-clip with the accumulation factor since the losses are mean-reduced).
+~32 per 40 GB — use gradient accumulation for larger effective batches. Do not rescale
+LR or grad-clip for it: Lightning averages accumulated micro-batch gradients).
 
 ## The `quant:` section
 

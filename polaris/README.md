@@ -45,8 +45,8 @@ val/loss 40.29 against the single-GPU 39.61 (**1.72%** apart on 10 batches).
 
 LR is deliberately **not** rescaled for `devices`: Lightning's DDP *averages* gradients,
 so the magnitude per optimizer step is unchanged and only the sample count behind it
-grows. That permits a larger LR but does not require one. Contrast `accumulate_grad_batches`,
-where Lightning *sums* and the LR division is required for correctness.
+grows. That permits a larger LR but does not require one. `accumulate_grad_batches` behaves the
+same way: Lightning averages over the accumulated micro-batches, so no rescaling is needed there either.
 
 **2. The sweep maps the accuracy-vs-resources curve** — but **`BETA_VALUES` must be
 calibrated first, and the obvious way to do it is wrong.** See the warning below.
@@ -90,7 +90,7 @@ calibrated first, and the obvious way to do it is wrong.** See the warning below
 | `torch.compile` | **Do not enable.** Measured 0.77× (slower): Keras-torch dispatch breaks the graph at every layer so inductor can't fuse. The `Compile` callback is stripped in `03_make_config.py`. |
 | `bf16-mixed` | Validated on CUDA — finite loss, quantizer bitwidth gradients flow. |
 | Batch size | Quantizers hold fp32 internal state. micro-batch 32 fits 40 GB; 64 needed ~78 GB; **128 OOM'd an 80 GB A100.** |
-| Grad accumulation | Losses are mean-reduced → Lightning **sums** accumulated grads. `03_make_config.py` sets LR ÷ accum and clip × accum so an optimizer step is invariant. |
+| Grad accumulation | Lightning **averages**: it divides each micro-batch loss by `accumulate_grad_batches` (`loops/optimization/automatic.py`), and clipping applies to that mean. So LR and clip are **not** rescaled (`tests/polaris/test_grad_accumulation.py`). Until 2026-10-14 `03_make_config.py` wrongly divided LR and multiplied clip by accum: every earlier job ran at LR 1.25e-5 / clip 0.4 instead of 5e-5 / 0.1. |
 | Checkpointing | The repo's `Checkpoint` monitors `val/loss`, which never fires mid-epoch — a walltime kill would lose the whole epoch. A plain `ModelCheckpoint` (`every_n_train_steps=1000`, `save_last`) is added, and `05_sweep.pbs` auto-resumes from `last.ckpt`. |
 | Test data | `test_clic_common_infer.root` has `-9999` sentinel indices that crash the loader. Configs evaluate on `val_clic_fix.root`. |
 | QAT cost | Measured in-run (`13_step_time.pbs`, run 7598775), median s per micro-batch after a 25-batch warmup: **1.0083 s on 1 GPU** (31,075 batches/epoch = **8.70 h** of step time) and **1.0873 s on 4 GPUs** (7,769 batches/rank = **2.34 h**). So DDP costs only **7.8% per batch** and buys **3.72×**. Note these are *step* times: the timer spans `batch_start`→`batch_end` and so excludes dataloader stalls, validation and checkpointing — the original 12.7 h wall clock contained ~4.0 h of that, so the real 4-GPU epoch is ~3 h, not 2.34 h. A float-vs-quantized per-step ratio still has *not* been measured under matched conditions; the earlier "~2.3×" was not reproducible and was removed rather than repaired. |

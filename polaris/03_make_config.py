@@ -10,6 +10,7 @@ batch size, precision) is set here so the repo's committed configs stay clean.
 Env overrides:
     HGQ_BATCH      micro-batch per GPU            (default 32)
     HGQ_ACCUM      gradient accumulation steps    (default 4)
+    HGQ_CONFIG_OUT output path                    (default ./polaris_hgq.yaml)
     HGQ_DEVICES    GPUs for one DDP run           (default 4; validated run 7598515)
     HGQ_PRECISION  bf16-mixed | 32                (default bf16-mixed)
     HGQ_BETA_MODE  pid | schedule                 (default pid)
@@ -33,7 +34,7 @@ import yaml
 
 REPO = pathlib.Path(__file__).resolve().parent.parent  # polaris/ -> repo root
 SRC = REPO / "src/hepattn/experiments/clic/configs/base.yaml"
-DST = REPO / "polaris_hgq.yaml"
+DST = pathlib.Path(os.environ.get("HGQ_CONFIG_OUT", REPO / "polaris_hgq.yaml"))
 if not SRC.exists():
     raise SystemExit(f"cannot find {SRC} — run this from the repo (it lives in polaris/)")
 
@@ -99,11 +100,14 @@ STEPS_PER_EPOCH = math.ceil(TRAIN_EVENTS / (BATCH * ACCUM))
 WARMUP_EPOCHS = float(os.environ.get("HGQ_WARMUP_EPOCHS", "1.0"))
 WARMUP_STEPS = max(1, round(WARMUP_EPOCHS * STEPS_PER_EPOCH))
 
-# Losses are mean-reduced, so Lightning SUMS the accumulated micro-batch gradients.
-# Keep each optimizer step invariant to ACCUM: divide LR, multiply the clip threshold.
+# No rescaling for ACCUM: Lightning divides each micro-batch loss by accumulate_grad_batches
+# (lightning/pytorch/loops/optimization/automatic.py), so the accumulated gradient is the
+# mean over BATCH x ACCUM events and clipping applies to that mean. An earlier version
+# divided LR and multiplied the clip by ACCUM, which ran every job up to 2026-10-14 at
+# LR 1.25e-5 / clip 0.4. tests/polaris/test_grad_accumulation.py pins this.
 # Reference point: 5e-5 at effective batch 128 (matches the group's float baseline).
-LR_MAX = 5.0e-5 / ACCUM
-CLIP = 0.1 * ACCUM
+LR_MAX = 5.0e-5
+CLIP = 0.1
 
 with open(SRC) as f:
     cfg = yaml.safe_load(f)
@@ -131,8 +135,8 @@ t = cfg["trainer"]
 # ranks, so the gradient magnitude at each optimizer step is unchanged; what grows is the
 # number of samples behind it (devices x BATCH x ACCUM), i.e. less gradient noise. That
 # permits a larger LR but does not require one, so raising it is left as a tuning
-# decision rather than smuggled in with a throughput change. Contrast ACCUM below, where
-# Lightning SUMS and the division IS required for correctness.
+# decision rather than smuggled in with a throughput change. ACCUM behaves the same way:
+# Lightning averages over accumulated micro-batches too.
 DEVICES = int(os.environ.get("HGQ_DEVICES", "4"))
 t["devices"] = DEVICES
 # Pin the strategy. Lightning auto-selects ddp for devices>1, but the validation ran with
@@ -260,22 +264,20 @@ print(f"  data       {DATA_DIR}")
 print(f"  ckpts      {CKPT_DIR}")
 print(f"  batch      {BATCH} x accum {ACCUM} x devices {DEVICES} = effective {BATCH * ACCUM * DEVICES}")
 print(f"  precision  {PRECISION}")
-print(f"  lr max     {LR_MAX:.3e}   clip {CLIP}   (invariant to accum)")
+print(f"  lr max     {LR_MAX:.3e}   clip {CLIP}   (Lightning averages over accum: no rescaling)")
 print(f"  epochs     {EPOCHS}")
 if BETA_MODE == "pid":
     print(f"  beta       PID -> target {TARGET_EBOPS:.3e} EBOPs (measured now: 1.6755e15)")
-    print(f"             init {INIT_BETA_EFFECTIVE:.2e}  ceiling {MAX_BETA_EFFECTIVE:.2e}"
-          f"  i={PID_I}  warmup {PID_WARMUP_EPOCHS} epoch(s)")
+    print(f"             init {INIT_BETA_EFFECTIVE:.2e}  ceiling {MAX_BETA_EFFECTIVE:.2e}  i={PID_I}  warmup {PID_WARMUP_EPOCHS} epoch(s)")
     headroom = math.log10(MAX_BETA_EFFECTIVE / INIT_BETA_EFFECTIVE)
     err = math.log10(1.6755e15 / TARGET_EBOPS)
-    print(f"             {headroom:.2f} decades of headroom; at a constant error of {err:.3f}"
-          f" the ceiling is reached in ~{headroom / (PID_I * err):.0f} epochs")
+    print(
+        f"             {headroom:.2f} decades of headroom; at a constant error of {err:.3f}"
+        f" the ceiling is reached in ~{headroom / (PID_I * err):.0f} epochs"
+    )
 else:
     print(f"  beta_end   {BETA_END:.2e}  (open-loop schedule)")
     print(f"  beta ramp  {WARMUP_STEPS} steps = {WARMUP_EPOCHS:g} epoch(s) at {STEPS_PER_EPOCH} steps/epoch")
 if EBOPS_EVERY > 1:
     scaled = f"beta_end scaled to {BETA_END_EFFECTIVE:.2e}" if BETA_MODE != "pid" else "pid betas scaled by 8"
-    print(
-        f"  EBOPs      every {EBOPS_EVERY} steps ({scaled}"
-        f" so time-averaged pressure is unchanged); ~16% faster steps"
-    )
+    print(f"  EBOPs      every {EBOPS_EVERY} steps ({scaled} so time-averaged pressure is unchanged); ~16% faster steps")
