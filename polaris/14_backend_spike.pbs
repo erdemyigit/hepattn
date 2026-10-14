@@ -1,0 +1,51 @@
+#!/bin/bash -l
+#PBS -N hgq_backend
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=00:45:00
+# NOTE: -q and -l walltime= below are FALLBACKS for a bare qsub.
+# submit.sh overrides both from polaris/env.sh (QUEUE_*/WALLTIME_*).
+#PBS -q debug
+#PBS -j oe
+#PBS -o logs/hgq_backend_spike.log
+#
+# Submit with:  bash polaris/submit.sh 14_backend_spike.pbs
+#
+# Same graph, same HGQ2 quantizers, same EBOPs penalty, two Keras backends on ONE A100:
+# torch eager (production) vs JAX jit. Answers whether leaving the torch/Lightning stack
+# for pure Keras-on-JAX would remove the ~890 ms fixed per-step cost 07_profile measured.
+#
+# ONE-TIME SETUP on a login node (compute nodes may not reach PyPI). The JAX env is
+# separate so it cannot disturb the torch env that 01_setup_env.sh built in .venv:
+#   cd "$WORK_ROOT/hepattn"
+#   uv venv --python 3.12.0 .venv-jax
+#   uv pip install --python .venv-jax/bin/python \
+#     "keras==3.15.0" "hgq2==0.1.9" "quantizers==1.2.2" "numpy==2.3.5" "jax[cuda12]==0.11.2" psutil
+# jax[cuda12] pulls CUDA 12 from pip wheels (jax-cuda12-plugin[with-cuda]), so no module
+# load is needed; it does need an NVIDIA driver new enough for CUDA 12 (nvidia-smi below
+# prints it). Versions match uv.lock (keras 3.15.0, hgq2 0.1.9) and the local CPU spike.
+set -uo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+source polaris/env.sh
+export PYTHONNOUSERSITE=1 TORCHDYNAMO_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# report real JAX device memory instead of the default 75% preallocation
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+REPO="$WORK_ROOT/hepattn"; cd "$REPO"
+mkdir -p logs
+
+[ -x "$REPO/.venv-jax/bin/python" ] || { echo "ERROR: $REPO/.venv-jax missing; see ONE-TIME SETUP in this file"; exit 1; }
+nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv | head -2
+"$REPO/.venv-jax/bin/python" -c "import jax; print('jax', jax.__version__, jax.devices())"
+
+# Production shapes (pflow_hgq.yaml / 07_profile.py): dim 256, 16 heads, 6 encoder +
+# 4 decoder layers, linformer k=256. SPIKE_ARGS overrides, e.g. SPIKE_ARGS="--attn sdpa".
+SPIKE_ARGS="${SPIKE_ARGS:---dim 256 --heads 16 --enc-layers 6 --dec-layers 4 --attn linformer}"
+# one GPU only: single-device step cost, as in 07_profile.pbs
+CUDA_VISIBLE_DEVICES=0 "$REPO/.venv-jax/bin/python" polaris/14_backend_spike.py --sweep \
+  --torch-python "$REPO/.venv/bin/python" --jax-python "$REPO/.venv-jax/bin/python" \
+  --modes "${SPIKE_MODES:-torch-loop,torch-eager,jax-jit,jax-stateless}" \
+  --batches "${SPIKE_BATCHES:-4,8,16,32}" --warmup 5 --iters 30 \
+  --out "logs/backend_spike_${PBS_JOBID:-local}.json" $SPIKE_ARGS
+echo "SPIKE-EXIT-$?"
