@@ -103,6 +103,13 @@ def run_sweep(args) -> None:
     ):
         passthrough += [f"--{k.replace('_', '-')}", str(getattr(args, k))]
     results = []
+
+    def save() -> None:
+        # after every run, so a walltime kill keeps everything finished so far
+        if args.out:
+            with Path(args.out).open("w") as f:
+                json.dump({"args": vars(args), "results": results}, f, indent=1)
+
     for mode in args.modes.split(","):
         backend = MODES[mode]
         py = args.torch_python if backend == "torch" else args.jax_python
@@ -114,19 +121,19 @@ def run_sweep(args) -> None:
                 cp = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=args.timeout, check=False)
             except subprocess.TimeoutExpired:
                 results.append({"mode": mode, "batch": batch, "error": f"timeout {args.timeout}s"})
+                save()
                 continue
             line = next((ln for ln in reversed(cp.stdout.splitlines()) if ln.startswith("RESULT ")), None)
             if cp.returncode != 0 or line is None:
                 err = (cp.stderr or cp.stdout).strip().splitlines()[-15:]
                 print("\n".join(err), flush=True)
                 results.append({"mode": mode, "batch": batch, "error": "\n".join(err)})
+                save()
                 continue
             res = json.loads(line[len("RESULT ") :])
             print(json.dumps(res, indent=1), flush=True)
             results.append(res)
-    if args.out:
-        with Path(args.out).open("w") as f:
-            json.dump({"args": vars(args), "results": results}, f, indent=1)
+            save()
     print_table(results)
 
 

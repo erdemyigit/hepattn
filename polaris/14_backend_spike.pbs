@@ -2,7 +2,7 @@
 #PBS -N hgq_backend
 #PBS -l select=1:system=polaris
 #PBS -l place=scatter
-#PBS -l walltime=00:45:00
+#PBS -l walltime=01:00:00
 # NOTE: -q and -l walltime= below are FALLBACKS for a bare qsub.
 # submit.sh overrides both from polaris/env.sh (QUEUE_*/WALLTIME_*).
 #PBS -q debug
@@ -45,7 +45,7 @@ SPIKE_ARGS="${SPIKE_ARGS:---dim 256 --heads 16 --enc-layers 6 --dec-layers 4 --a
 # one GPU only: single-device step cost, as in 07_profile.pbs
 CUDA_VISIBLE_DEVICES=0 "$REPO/.venv-jax/bin/python" polaris/14_backend_spike.py --sweep \
   --torch-python "$REPO/.venv/bin/python" --jax-python "$REPO/.venv-jax/bin/python" \
-  --modes "${SPIKE_MODES:-torch-loop,torch-eager,jax-jit,jax-stateless}" \
+  --modes "${SPIKE_MODES:-jax-stateless,jax-jit,torch-loop,torch-eager}" \
   --batches "${SPIKE_BATCHES:-4,8,16,32}" --warmup 5 --iters 30 \
   --out "logs/backend_spike_${PBS_JOBID:-local}.json" $SPIKE_ARGS
 echo "SPIKE-EXIT-$?"

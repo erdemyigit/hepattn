@@ -45,6 +45,8 @@ done
 BASE="$(basename "$SCRIPT")"
 case "$BASE" in
   05_sweep.pbs) DEF_QUEUE="${QUEUE_PROD:-preemptable}"; DEF_WALL="${WALLTIME_PROD:-72:00:00}"  ;;
+  # 16 subprocess runs at production shape, each with its own JAX compile: 20 min is too short
+  14_backend_spike.pbs) DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
   *)            DEF_QUEUE="${QUEUE_DEBUG:-debug}";      DEF_WALL="${WALLTIME_SMOKE:-00:20:00}" ;;
 esac
 QUEUE="${QUEUE:-$DEF_QUEUE}"
