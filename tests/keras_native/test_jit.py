@@ -109,7 +109,8 @@ def test_ebops_loss_term(case):
     stored = [int(np.asarray(ntv_train[i])) for i in idx]
     assert all(v > 0 for v in stored)
     assert n_train > n_eval, (n_train, n_eval)
-    betas = {float(np.asarray(v.value)) for v in module.non_trainable_variables if v.name == "beta"}
+    # the EBOPs beta of the HGQ2 leaves only (a frozen LayerNorm offset is also called "beta")
+    betas = {float(np.asarray(v.value)) for leaf in native_leaves(module).values() for v in leaf.non_trainable_variables if v.name == "beta"}
     assert len(betas) == 1, betas
     beta = betas.pop()
     penalty = float(q_train) - float(q_eval)
