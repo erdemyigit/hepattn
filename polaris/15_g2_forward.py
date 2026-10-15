@@ -12,8 +12,14 @@ Modes:
   hybrid-07         KERAS_BACKEND=torch. polaris/07_profile.py's step without its bf16 autocast: KerasMaskFormer
                     forward, model.loss (host Hungarian matching + task losses), backward. EBOPs is computed in the
                     forward but, as in 07, is not part of the backward.
-  hybrid-surrogate  KERAS_BACKEND=torch. The same forward + backward as the jax mode: surrogate + quant_losses().
+  hybrid-surrogate  KERAS_BACKEND=torch. The same forward + backward as the jax mode: surrogate + the HGQ2 losses
+                    of each keras layer ONCE. The hybrid's quant_losses() walks model.tasks and model.decoder.tasks
+                    (the same modules) and so counts the task heads twice (docs/hgq/port_log/S3.md deviation 9); this
+                    arm sums over the unique layers instead, which equals the per-layer terms of the jax arm.
+                    hybrid-07 keeps 07's quant_losses() call, so its recorded penalty is the double-counted sum.
 G2 compares jax with hybrid-07 at the same batch (plan: <= 0.5x); hybrid-surrogate is the like-for-like reference.
+Torch fp32 OOMs at batch 32 (job 7746577), so G2 is decided at batch 16, fp32: median jax / median hybrid-07 <= 0.5.
+Batch 8 is the second point of the same comparison, and JAX batch 32 is reported for scaling only.
 
 The model config is written once (``model_config``) and fed to both frameworks. At the defaults (dim 256, 16 heads,
 6 + 4 Linformer layers, k = 256, 160 nodes + 8 registers, 150 queries) it is 07_profile.py's model.
@@ -181,7 +187,10 @@ def model_config(args) -> dict:
 
 
 def load_batch(args):
-    """``args.batch`` CLIC events (ROOT file or dummy data) as numpy dicts (inputs, targets); int64 -> int32."""
+    """``args.batch`` CLIC events (ROOT file or dummy data) as numpy dicts (inputs, targets).
+
+    int64 -> int32 for the jax mode only (jax runs without x64); the torch arms get int64, as 07_profile.py does.
+    """
     import numpy as np
     import torch
 
@@ -201,6 +210,8 @@ def load_batch(args):
 
     def stack(i):
         out = {k: torch.stack([e[i][k] for e in events]).numpy() for k in events[0][i]}
+        if MODES[args.mode] != "jax":
+            return out
         return {k: v.astype(np.int32) if v.dtype == np.int64 else v for k, v in out.items()}
 
     return stack(0), stack(1)
@@ -480,6 +491,11 @@ def make_torch_step(args, inputs, targets):
             raise RuntimeError("no finite loss terms")
         return torch.stack(terms).sum()
 
+    unique_layers = list({id(layer): layer for layer in model.keras_layers()}.values())
+
+    def unique_quant_losses() -> torch.Tensor:  # quant_losses() without the task-head double count
+        return torch.stack([torch.as_tensor(t) for layer in unique_layers for t in layer.losses]).sum()
+
     first = {"done": False}
 
     def step():
@@ -492,7 +508,7 @@ def make_torch_step(args, inputs, targets):
             loss = total_loss(losses)
             penalty = model.quant_losses().detach()  # computed in the forward, not in the backward (as 07)
         else:
-            penalty = model.quant_losses()
+            penalty = unique_quant_losses()
             loss = surrogate(out) + penalty
         loss.backward()
         if device == "cuda":
@@ -510,6 +526,8 @@ def make_torch_step(args, inputs, targets):
         }
 
     extra = {
+        "keras_layers_walked": len(list(model.keras_layers())),
+        "keras_layers_unique": len(unique_layers),
         "torch": torch.__version__,
         "device": torch.cuda.get_device_name(0) if device == "cuda" else "cpu",
         "n_params": int(sum(np.prod(p.shape) for p in params)),
