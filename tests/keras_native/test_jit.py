@@ -71,6 +71,9 @@ def test_layer_trains_under_jit(case):
     nonzero = np.zeros(len(tv), dtype=bool)
     for call in range(3):
         (loss, (ntv, qloss, n_losses)), grads = step(tv, ntv, perturbed_inputs(inputs, call))
+        # NaN != 0 is True, so the nonzero check alone would accept a NaN gradient
+        bad = [v.path for v, g in zip(module.trainable_variables, grads, strict=True) if not np.isfinite(np.asarray(g)).all()]
+        assert not bad, f"{case}: non-finite gradient at call {call} for {bad}"
         nonzero |= np.array([bool(np.any(np.asarray(g) != 0)) for g in grads])
         assert np.isfinite(float(loss))
     assert step._cache_size() == 1, f"{case}: {step._cache_size()} compilations over 3 calls"  # noqa: SLF001

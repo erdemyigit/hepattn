@@ -25,6 +25,7 @@ from hepattn.keras_native.maskformer import MaskFormer as NMaskFormer
 from hepattn.keras_native.maskformer import from_config
 from hepattn.keras_native.tasks import IncidenceBasedRegressionTask, ObjectClassificationTask, ObjectHitMaskTask, topk_mask
 from hepattn.models.decoder import MaskFormerDecoderLayer
+from hepattn.models.task import ObjectHitMaskTask as TorchObjectHitMaskTask
 from hepattn.utils.masks import topk_attn
 
 from .golden.mf_cases import DIM, NUM_QUERIES, VARIANTS, clic_dummy_batch, native_kwargs, torch_model
@@ -112,6 +113,33 @@ def test_mask_logit_sentinel_and_incidence_axis(batch):
     assert inc.shape == (2, NUM_QUERIES, 160)
     np.testing.assert_allclose(inc.sum(axis=1)[valid], 1.0, atol=1e-5)
     assert (inc.sum(axis=1)[~valid] == 0).all()
+
+
+@pytest.mark.parametrize("threshold", [None, 0.5])
+def test_mask_attention_threshold_is_inclusive_as_torch(threshold):
+    """``sigmoid(logit) == threshold`` keeps the node, as torch's ``>=`` (``hepattn/models/task.py:571``).
+
+    sigmoid(0) is exactly 0.5 in both frameworks, so a ``>`` port differs at logit 0. The e2e and golden tests
+    cannot see this: their logits never sit exactly on the threshold. None uses the task's threshold (0.5 here).
+    """
+    finfo_min = np.finfo(np.float32).min
+    logits = np.array([[[0.0, -1.0, 1.0, finfo_min, 0.0, -1e-7]]], dtype=np.float32)
+    kwargs = {
+        "name": "mask",
+        "input_constituent": "node",
+        "input_object": "query",
+        "output_object": "pflow",
+        "target_object": "particle",
+        "losses": {"mask_bce": 1.0},
+        "costs": {"mask_dice": 1.0},
+        "dim": 8,
+        "pred_threshold": 0.5,
+    }
+    key = "pflow_node_logit"
+    ref = TorchObjectHitMaskTask(**kwargs).attn_mask({key: torch.from_numpy(logits)}, threshold=threshold)["node"].numpy()
+    got = np.asarray(ObjectHitMaskTask(**kwargs).attn_mask({key: logits}, threshold=threshold)["node"])
+    assert ref[0, 0, 0] and ref[0, 0, 4], "control: torch keeps a node whose sigmoid equals the threshold"
+    np.testing.assert_array_equal(got, ref)
 
 
 @pytest.mark.parametrize("variant", list(VARIANTS))
@@ -319,6 +347,7 @@ def kwargs_with(**changes):
         ({"unified_decoding": True}, NotImplementedError),
         ({"encoder_tasks": [{"class_path": "x"}]}, NotImplementedError),
         ({"input_sort_field": "phi"}, NotImplementedError),
+        ({"sorter": {"class_path": "hepattn.utils.sorter.Sorter"}}, NotImplementedError),
     ],
     ids=lambda v: "-".join(v) if isinstance(v, dict) else v.__name__,
 )
