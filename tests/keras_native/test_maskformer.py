@@ -194,8 +194,81 @@ def test_topk_mask_equals_torch_topk_attn_without_ties():
         assert (got.sum(axis=axis) == k).all()
 
 
+def mixed_regression_inputs(batch: dict, seed: int = 11) -> tuple[dict, np.ndarray, np.ndarray]:
+    """Regression-task inputs that exercise every per-object branch of ``get_proxy_feats`` in EVERY event.
+
+    The e2e and golden cases do not: their class argmax is all-charged (torch variant) or all-neutral (lin variant).
+    Here the class argmax cycles through 0..5 over the queries (charged 0-2 next to neutral 3-5 in one event, and
+    class 3 at the ``< 3`` edge). The incidence is continuous (no top-k ties) and normalised over the query axis on
+    valid nodes, so the ~60 track nodes per event have one max particle each and the other particles take the
+    top-2 (zero-track) branch.
+    """
+    rng = np.random.default_rng(seed)
+    b, n = batch["node_valid"].shape
+    x = {
+        "inputs": batch,
+        "query_embed": rng.standard_normal((b, NUM_QUERIES, DIM)).astype(np.float32),
+        "node_embed": rng.standard_normal((b, n, DIM)).astype(np.float32),
+        "node_valid": batch["node_valid"],
+    }
+    inc = rng.uniform(0.05, 1.0, (b, NUM_QUERIES, n))
+    inc = (inc / inc.sum(1, keepdims=True) * batch["node_valid"][:, None, :]).astype(np.float32)
+    probs = rng.uniform(0.0, 0.5, (b, NUM_QUERIES, 6))
+    probs[:, np.arange(NUM_QUERIES), np.arange(NUM_QUERIES) % 6] += 1.0
+    probs = (probs / probs.sum(-1, keepdims=True)).astype(np.float32)
+    return x, inc, probs
+
+
+def test_regression_task_parity_on_mixed_charged_and_neutral_objects(batch):
+    """IncidenceBasedRegressionTask vs torch at the e2e tolerance, with charged and neutral objects in the same event
+    and both charged proxy branches (max track, top-2 tracks) present; the branch counts are asserted, not assumed.
+
+    The task does not depend on the encoder / decoder attention variant, so one variant suffices.
+    """
+    tmodel, nmodel = ported_pair("lin", batch)
+    treg, nreg = tmodel.tasks[3], nmodel.tasks[3]
+    assert isinstance(nreg, IncidenceBasedRegressionTask)
+    x, inc, probs = mixed_regression_inputs(batch)
+
+    # coverage, from the inputs alone (numpy, independent of both implementations)
+    is_charged = probs.argmax(-1) < 3
+    assert (probs.argmax(-1) == 3).any()
+    for event in range(is_charged.shape[0]):
+        assert 0.3 < is_charged[event].mean() < 0.7, f"event {event}: charged fraction {is_charged[event].mean():.2f}"
+    charged_inc = inc * batch["node_is_track"][:, None, :]
+    is_max = (charged_inc == charged_inc.max(1, keepdims=True)) & (charged_inc > 0)
+    zero_track = ~is_max.any(-1)
+    rank = np.argsort(np.argsort(-charged_inc, axis=1), axis=1)  # continuous values: no ties among positive entries
+    top2_nonempty = ((rank < 2) & (charged_inc > 0)).any(-1)  # a zero-track particle that still gets a proxy track
+    for event in range(is_charged.shape[0]):
+        n_max = int((is_charged[event] & ~zero_track[event]).sum())
+        n_top2 = int((is_charged[event] & zero_track[event] & top2_nonempty[event]).sum())
+        assert n_max >= 10 and n_top2 >= 10, f"event {event}: charged objects on the max branch {n_max}, top-2 branch {n_top2}"
+
+    outputs = {"incidence": {"pflow_incidence": inc}, "classification": {"pflow_class_prob": probs}}
+    out_n = {k: np.asarray(keras.ops.convert_to_numpy(v)) for k, v in nreg(x, outputs=outputs).items()}
+    tx = {**{k: torch.from_numpy(v) for k, v in x.items() if k != "inputs"}, "inputs": tin(batch)}
+    toutputs = {task: {key: torch.from_numpy(v) for key, v in d.items()} for task, d in outputs.items()}
+    with torch.no_grad():
+        out_t = {k: v.numpy() for k, v in treg(tx, toutputs).items()}
+    assert set(out_t) == set(out_n) == {"pflow_regr", "pflow_proxy_regr"}
+    proxy = out_t["pflow_proxy_regr"]
+    assert np.isfinite(proxy).all()
+    # non-vacuous: eta is nonzero wherever a proxy has a constituent (charged particles with no track in their
+    # max / top-2 set get a constant proxy, as in torch)
+    eta_nonzero = proxy[..., 2] != 0
+    assert np.array_equal(eta_nonzero[is_charged], (~zero_track | top2_nonempty)[is_charged])
+    assert eta_nonzero[~is_charged].all()
+    for key in sorted(out_t):
+        assert_parity("regression.mixed", key, out_t[key], out_n[key], **E2E)
+
+
 def test_regression_proxy_uses_detached_incidence_and_class_probs(batch):
-    """Gradients reach the regression net only through its input embedding, never through incidence / class probs."""
+    """Gradients reach the regression net only through its input embedding, never through the incidence.
+
+    Only the incidence assertion discriminates (mutation T4, stop_gradient removed, fails it). The class probs enter
+    only through argmax, whose gradient is 0 with or without stop_gradient, so their assertion is structural.
+    """
     import jax  # noqa: PLC0415
 
     _, nmodel = ported_pair("lin", batch)
