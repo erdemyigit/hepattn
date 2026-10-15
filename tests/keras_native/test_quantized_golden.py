@@ -12,7 +12,7 @@ import keras
 import numpy as np
 import pytest
 
-from .golden.cases import CASES, QUANT_SPECS
+from .golden.cases import CASES, EXTRA_MODES, modes
 from .golden_utils import build_from_golden, build_native, init_state_mismatches, inputs_of, load_golden, run
 from .parity_utils import record_measurement
 
@@ -22,13 +22,14 @@ MEASURED = {
     ("dense_innet", "float"): 1.192e-07, ("dense_innet", "high"): 4.053e-06, ("dense_innet", "low"): 0.0,
     ("attn_self", "float"): 1.490e-07, ("attn_self", "high"): 2.548e-05, ("attn_self", "low"): 0.0,
     ("attn_cross", "float"): 2.384e-07, ("attn_cross", "high"): 5.341e-05, ("attn_cross", "low"): 0.0,
-    ("lin_self", "float"): 2.980e-08, ("lin_self", "high"): 0.0, ("lin_self", "low"): 0.0,
-    ("lin_cross", "float"): 2.980e-08, ("lin_cross", "high"): 0.0, ("lin_cross", "low"): 0.0,
+    ("lin_self", "float"): 2.980e-08, ("lin_self", "high"): 0.0, ("lin_self", "low"): 0.0, ("lin_self", "mid"): 0.0,
+    ("lin_cross", "float"): 2.980e-08, ("lin_cross", "high"): 0.0, ("lin_cross", "low"): 0.0, ("lin_cross", "mid"): 0.0,
     ("enc_lin", "float"): 7.153e-07, ("enc_lin", "high"): 4.548e-05, ("enc_lin", "low"): 7.153e-07,
     ("enc_torch", "float"): 7.153e-07, ("enc_torch", "high"): 6.116e-05, ("enc_torch", "low"): 7.153e-07,
     ("innet", "float"): 2.384e-07, ("innet", "high"): 4.053e-06, ("innet", "low"): 1.192e-07,
 }  # fmt: skip
 TOLERANCE = {key: 2.0 * value for key, value in MEASURED.items()}
+CASE_MODES = [(case, mode) for case in CASES for mode in modes(case)]
 
 # The hybrid oracle itself separates a single Linformer layer by only 5.3x (self) / 8.5x (cross): at 4-bit the
 # attention output underflows and the layer returns its quantized bias, so the low delta is capped by the
@@ -45,7 +46,7 @@ def native_outputs():
         if case not in cache:
             golden = load_golden(case)
             outs = {}
-            for mode in QUANT_SPECS:
+            for mode in modes(case):
                 module, _, _ = build_from_golden(case, mode, golden)
                 outs[mode] = keras.ops.convert_to_numpy(run(case, module, inputs_of(golden))).astype(np.float64)
             cache[case] = (golden, outs)
@@ -55,11 +56,10 @@ def native_outputs():
 
 
 def test_tolerance_table_covers_every_golden_case():
-    assert set(MEASURED) == {(case, mode) for case in CASES for mode in QUANT_SPECS}
+    assert set(MEASURED) == set(CASE_MODES)
 
 
-@pytest.mark.parametrize("mode", ["high", "low"])
-@pytest.mark.parametrize("case", list(CASES))
+@pytest.mark.parametrize(("case", "mode"), [(case, mode) for case, mode in CASE_MODES if mode != "float"])
 def test_init_quantizer_state_matches_hybrid(case, mode):
     """Built in the same HGQ2 scopes, the native leaves start from the hybrid's quantizer state, bit for bit.
 
@@ -72,8 +72,7 @@ def test_init_quantizer_state_matches_hybrid(case, mode):
     assert not mismatches, f"{case}/{mode}: initial quantizer state differs from the hybrid at {mismatches[:8]}"
 
 
-@pytest.mark.parametrize("mode", list(QUANT_SPECS))
-@pytest.mark.parametrize("case", list(CASES))
+@pytest.mark.parametrize(("case", "mode"), CASE_MODES)
 def test_golden_parity(native_outputs, case, mode):
     golden, outs = native_outputs(case)
     ref = golden[f"{mode}::out"].astype(np.float64)
@@ -102,3 +101,21 @@ def test_paired_delta(native_outputs, case):
         assert ratio == pytest.approx(hybrid_ratio, rel=1e-2), (case, ratio, hybrid_ratio)
     else:
         assert ratio >= 10, f"{case}: low/high delta ratio {ratio:.2f} < 10 (high {deltas['high']:.3e}, low {deltas['low']:.3e})"
+
+
+@pytest.mark.parametrize("case", sorted(EXTRA_MODES))
+def test_mid_rows_reach_the_quantized_linformer_graph(native_outputs, case):
+    """The "mid" rows exist because "low" collapses a single Linformer layer to its quantized bias.
+
+    If "low" ever becomes input-dependent, or "mid" stops being so, the extra mode needs revisiting.
+    """
+    golden, outs = native_outputs(case)
+
+    def unique_rows(out) -> int:
+        return len(np.unique(out.reshape(-1, out.shape[-1]), axis=0))
+
+    assert unique_rows(golden["low::out"]) == 1, f"{case}: the hybrid low output depends on the input now"
+    assert unique_rows(outs["low"]) == 1
+    rows = unique_rows(golden["float::out"])
+    assert unique_rows(golden["mid::out"]) == rows, f"{case}: the hybrid mid output is not input-dependent"
+    assert unique_rows(outs["mid"]) == rows

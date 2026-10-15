@@ -3,11 +3,12 @@
     KERAS_BACKEND=torch PYTHONPATH=<worktree>/src <hepattn>/.venv/bin/python tests/keras_native/golden/make_golden.py
 
 For every case in ``cases.CASES`` it builds the pure-torch reference module (seeded) and, for each mode in
-float/high/low, ports it into the hybrid twin with ``hepattn.keras.porting`` and runs it in eval mode. One
-compressed ``<case>.npz`` per case holds: the inputs (``in::<name>``), the torch reference state
-(``src::<state_dict key>``, shared by the modes), and per mode the output (``<mode>::out``) and every variable of
-every named keras leaf in tracking order (``<mode>::kv::<leaf>::<idx>::<var name>``), plus ``meta`` (json; per
-mode the leaf names, the output abs max and each leaf variable's ``trainable`` flag).
+``cases.modes(case)`` (float/high/low, plus mid for the single Linformer layers), ports it into the hybrid twin
+with ``hepattn.keras.porting`` and runs it in eval mode. One compressed ``<case>.npz`` per case holds: the inputs
+(``in::<name>``), the torch reference state (``src::<state_dict key>``, shared by the modes), and per mode the
+output (``<mode>::out``) and every variable of every named keras leaf in tracking order
+(``<mode>::kv::<leaf>::<idx>::<var name>``), plus ``meta`` (json; per mode the leaf names, the output abs max and
+each leaf variable's ``trainable`` flag).
 """
 
 import copy
@@ -38,7 +39,7 @@ from hepattn.keras.tasks import kerasify_module
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from cases import CASES, QUANT_SPECS, golden_file, make_inputs, torch_module, torch_state  # noqa: E402
+from cases import CASES, QUANT_SPECS, golden_file, make_inputs, modes, torch_module, torch_state  # noqa: E402
 
 LEAF_TYPES = (QDense, QEinsum, QSoftmax, keras.layers.Dense, EinsumOp, SoftmaxOp)
 
@@ -116,8 +117,8 @@ def main() -> None:
         arrays = {f"in::{k}": v for k, v in inputs.items()}
         arrays.update({f"src::{k}": v for k, v in torch_state(tmod).items()})
         meta = {"case": case, "versions": {"torch": torch.__version__, "keras": keras.__version__, "hgq2": getattr(hgq, "__version__", "?")}}
-        for mode, quant in QUANT_SPECS.items():
-            factory = LayerFactory(quant)
+        for mode in modes(case):
+            factory = LayerFactory(QUANT_SPECS[mode])
             keras.utils.clear_session(free_memory=False)
             set_keras_default_device("cpu")
             with factory.scopes():
@@ -141,7 +142,7 @@ def main() -> None:
         path = HERE / golden_file(case)
         np.savez_compressed(path, **arrays)
         sizes[case] = path.stat().st_size
-        print(case, sizes[case], {m: meta[m] for m in QUANT_SPECS}, flush=True)
+        print(case, sizes[case], {m: meta[m] for m in modes(case)}, flush=True)
     print(f"total {sum(sizes.values()) / 1e6:.2f} MB in {len(sizes)} files")
 
 

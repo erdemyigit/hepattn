@@ -17,7 +17,7 @@ import torch
 
 from hepattn.keras_native.factory import LayerFactory
 
-from .golden.cases import CASES, QUANT_SPECS, torch_module
+from .golden.cases import CASES, modes, torch_module
 from .golden_utils import build_native, golden_meta, inputs_of, load_golden, native_leaves, native_module
 
 PARAMETER_NAMES = {"kernel", "bias"}  # leaf variables that are torch parameters; the rest is quantizer state
@@ -62,8 +62,7 @@ def split_variables(module):
     return leaf_ids, non_leaf
 
 
-@pytest.mark.parametrize("mode", list(QUANT_SPECS))
-@pytest.mark.parametrize("case", list(CASES))
+@pytest.mark.parametrize(("case", "mode"), [(case, mode) for case in CASES for mode in modes(case)])
 def test_trainable_variables_match_torch_and_hybrid(case, mode):
     golden = load_golden(case)
     module, _ = build_native(case, mode, golden)

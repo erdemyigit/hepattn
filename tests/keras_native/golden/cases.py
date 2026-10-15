@@ -34,7 +34,17 @@ QUANT_SPECS = {
         "datalane": {"default_q_type": "kif", "i0": 2, "f0": 2},
         "table": {"default_q_type": "kif", "i0": 1, "f0": 3},
     },
+    # "low" with datalane f0 = 6. At "low" a single Linformer layer returns a constant (its quantized to_out bias:
+    # 1 unique output row, std 0), so its low rows never reach the quantized attention graph; from datalane
+    # f0 = 4 on the output depends on the input again (measured in the hybrid, see docs/hgq/port_log/S2.md).
+    "mid": {
+        "weight": {"default_q_type": "kbi", "b0": 4, "i0": 1},
+        "datalane": {"default_q_type": "kif", "i0": 2, "f0": 6},
+        "table": {"default_q_type": "kif", "i0": 1, "f0": 3},
+    },
 }
+BASE_MODES = ("float", "high", "low")
+EXTRA_MODES = {"lin_self": ("mid",), "lin_cross": ("mid",)}  # only where "low" is input-independent
 
 ENC_COMMON = {"num_layers": 2, "dim": DIM, "hybrid_norm": True, "value_residual": True, "num_register_tokens": REGS}
 
@@ -62,6 +72,11 @@ CASES: dict[str, dict] = {
         "name": "innet0",
     },
 }
+
+
+def modes(case: str) -> tuple[str, ...]:
+    """The quantization modes stored in a case's golden file."""
+    return BASE_MODES + EXTRA_MODES.get(case, ())
 
 
 def golden_file(case: str) -> str:
