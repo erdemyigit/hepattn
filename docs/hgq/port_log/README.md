@@ -29,3 +29,6 @@ Each item must be closed (or explicitly re-deferred) in the named stage's log.
 | S4 | user | Torch `mask_bce` / `mask_dice` average across events at B > 1; S4 keeps it. Change it in both frameworks or keep it. | User decision ([S4.md](S4.md) finding 1). |
 | S4 | S6 | Real CLIC batches: no target 1 at padded nodes (else `mask_bce` is inf), prefix-contiguous `particle_valid`. | Needs real data ([S4.md](S4.md) open issues). |
 | merge | S5 | The `high`-spec HGQ2 penalty (3.2e12) is 99.99% decoder cross-attention softmax exp tables; the penalty gate must be stated per layer, not as one total. | Explained in [critique.md](critique.md). |
+| R0 | R5 / pre-push | `pixi lock` on linux-64, then `pixi lock --check` exits 0 (the merged lock has no `hgq` env; CI uses `locked: true`). | `pixi lock` cannot solve the linux platforms on macOS ([R0.md](R0.md) deviation 2). |
+| R0 | plan owner | 12 strict xfails in `test_jit.py`, `test_maskformer.py`, `test_variables.py` are blocked on R5's `golden/{cases,mf_cases}.py`: decide which lane edits what. | File ownership ([R0.md](R0.md) open issues). |
+| R0 | R4b | Rewrite the `both` / `legacy` rows of `tests/keras/test_build_attention_linformer_k.py` when `linformer_proj_dim` starts to raise. | Plan 5.1. |
