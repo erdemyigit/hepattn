@@ -75,3 +75,20 @@ def test_negative_control_leaky_softmax_breaks_key_independence(kind):
     object.__setattr__(layer, "attn_softmax", LeakySoftmax())  # noqa: PLC2801
     out1, out2 = outputs_for_two_key_sets(layer)
     assert np.abs(out1[:, 0] - out2[:, 0]).max() > 1e-3, "the key-independence check would not catch a leaking softmax"
+
+
+@pytest.mark.parametrize("kind", ["linformer", "dense"])
+def test_kv_sort_idx_is_accepted_and_ignored(kind):
+    """R0 interface stub: ``call`` takes ``kv_sort_idx`` and the output does not change.
+
+    With a padded ``kv_mask``, a layer that gathered k and v by the index but not the mask would change the output.
+    """
+    layer = make_layer(kind, "float")
+    q, _ = make_padded_batch(2, 150, DIM, seed=9)
+    kv, kv_mask = make_padded_batch(2, 168, DIM, seed=10)
+    assert not kv_mask.all(), "fixture needs padding, or ignoring the mask and ignoring the index look the same"
+    sort_idx = np.stack([np.random.default_rng(s).permutation(168) for s in (1, 2)])
+    assert (sort_idx != np.arange(168)).any(), "a non-identity index is needed"
+    ref = keras.ops.convert_to_numpy(layer(q, k=kv, v=kv, kv_mask=kv_mask))
+    out = keras.ops.convert_to_numpy(layer(q, k=kv, v=kv, kv_mask=kv_mask, kv_sort_idx=sort_idx))
+    np.testing.assert_array_equal(out, ref)

@@ -86,13 +86,13 @@ class LinformerAttention(keras.layers.Layer):
         self.values_einsum.build([(None, heads, n, rank), (None, heads, rank, head_dim)])
         self.to_out.build((None, n, self.dim))
 
-    def call(self, q, k=None, v=None, q_mask=None, kv_mask=None, attn_mask=None, initial_v=None, training=None):
-        """Low-rank attention; returns (B, N, D). ``q_mask``, ``kv_mask`` and ``initial_v`` are ignored.
+    def call(self, q, k=None, v=None, q_mask=None, kv_mask=None, attn_mask=None, initial_v=None, kv_sort_idx=None, training=None):
+        """Low-rank attention; returns (B, N, D). ``q_mask``, ``kv_mask``, ``initial_v`` and ``kv_sort_idx`` are ignored.
 
         Raises:
             ValueError: If only one of ``k``/``v`` is given, or for masking with rank k < kv_len.
         """
-        del q_mask, kv_mask, initial_v
+        del q_mask, kv_mask, initial_v, kv_sort_idx
         if k is None and v is None:
             k = v = q
         if k is None or v is None:

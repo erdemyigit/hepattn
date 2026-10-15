@@ -132,8 +132,11 @@ class Attention(keras.layers.Layer):
         self.values_einsum.build([(None, heads, q_len, kv_len), (None, heads, kv_len, head_dim)])
         self.out_proj.build((None, q_len, self.dim))
 
-    def call(self, q, k=None, v=None, q_mask=None, kv_mask=None, attn_mask=None, initial_v=None, training=None):
+    def call(self, q, k=None, v=None, q_mask=None, kv_mask=None, attn_mask=None, initial_v=None, kv_sort_idx=None, training=None):
         """Attention of ``q`` over ``k``/``v`` (self-attention when both are None).
+
+        ``kv_sort_idx`` is accepted and ignored: dense attention is permutation-equivariant, and org
+        ``Attention.forward`` uses it only in its Linformer branch.
 
         Returns:
             ``out`` (B, Sq, D). With ``value_residual=True`` it returns ``(out, v_cache)`` instead: the first
@@ -144,6 +147,7 @@ class Attention(keras.layers.Layer):
         Raises:
             ValueError: If ``v`` is given without ``k``.
         """
+        del kv_sort_idx
         if k is None and v is None:
             k = v = q
         elif k is None:
