@@ -66,7 +66,9 @@ class InputNet(keras.layers.Layer):
 
         Args:
             input_name: Constituent name (e.g. ``node``).
-            net: ``Dense`` kwargs (``input_size``, ``output_size``, ...).
+            net: ``Dense`` kwargs (``input_size``, ``output_size``, ...). ``init`` defaults to ``"torch"``: the
+                hybrid's input nets are torch ``Dense`` modules ported by ``kerasify_module``, so they start
+                from the torch initialisation.
             fields: Feature fields concatenated along the last axis.
             posenc: ``FourierPositionEncoder`` kwargs (``dim``, ``fields``, ``scale``; ``input_name`` defaults to ours),
                 or None.
@@ -88,7 +90,7 @@ class InputNet(keras.layers.Layer):
 
         self.input_name = input_name
         self.fields = list(fields)
-        self.net = Dense(factory=factory, name=sub("net"), **net)
+        self.net = Dense(factory=factory, name=sub("net"), **{"init": "torch", **net})
         self.posenc = None
         if posenc is not None:
             posenc = dict(posenc)

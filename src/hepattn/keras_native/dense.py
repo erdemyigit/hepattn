@@ -2,7 +2,14 @@
 
 Same layer structure and names as the hybrid ``hepattn.keras.dense.KerasDense`` (``{name}_hidden{i}``,
 ``{name}_final``), so weights port one-to-one. Sublayers are built in ``build`` from the static input shape.
+
+Initialisation (``init``): ``"keras"`` (glorot-uniform kernel, zero bias) is what the hybrid's encoder/decoder
+Dense layers get, because the hybrid builds those from the config. ``"torch"`` is ``nn.Linear``'s default,
+kernel and bias U(+-1/sqrt(fan_in)); the hybrid's input nets and task heads start from it, because
+``kerasify_module`` ports them from torch ``Dense`` modules.
 """
+
+import math
 
 import keras
 
@@ -50,14 +57,17 @@ class Dense(keras.layers.Layer):
         final_activation: str | None = None,
         dropout: float = 0.0,
         bias: bool = True,
+        init: str = "keras",
         factory: LayerFactory | None = None,
         name: str | None = None,
         **kwargs,
     ) -> None:
         """Args as in hepattn Dense; activations are names (``silu``, ``SiLU``, ``torch.nn.SiLU``, ``SwiGLU``).
 
+        ``init`` is ``"keras"`` or ``"torch"`` (see the module docstring).
+
         Raises:
-            ValueError: For SwiGLU as the final activation.
+            ValueError: For SwiGLU as the final activation or an unknown ``init``.
             NotImplementedError: For SwiGLU or dropout in quantized mode (as in the hybrid).
         """
         super().__init__(name=name, **kwargs)
@@ -83,14 +93,32 @@ class Dense(keras.layers.Layer):
         if factory.quantize and dropout:
             raise NotImplementedError("dropout is not supported in quantized mode")
 
+        if init not in {"keras", "torch"}:
+            raise ValueError(f"init must be 'keras' or 'torch', got '{init}'")
+
         def sub(part: str) -> str | None:
             return f"{name}_{part}" if name else None
 
+        def initializers(fan_in: int) -> dict:
+            if init == "keras":
+                return {}
+            # nn.Linear: kaiming_uniform(a=sqrt(5)) kernel and bias, both U(+-1/sqrt(fan_in))
+            bound = 1.0 / math.sqrt(fan_in)
+            uniform = keras.initializers.VarianceScaling(scale=1.0 / 3.0, mode="fan_in", distribution="uniform")
+            return {"kernel_initializer": uniform, "bias_initializer": keras.initializers.RandomUniform(-bound, bound)}
+
+        fan_ins = [input_size, *self.hidden_sizes]  # SwiGLU halves a hidden layer's 2 * size outputs back to size
         self.hidden = [
-            factory.dense(size * 2 if self.gate else size, activation=None if self.gate else activation, use_bias=bias, name=sub(f"hidden{i}"))
+            factory.dense(
+                size * 2 if self.gate else size,
+                activation=None if self.gate else activation,
+                use_bias=bias,
+                name=sub(f"hidden{i}"),
+                **initializers(fan_ins[i]),
+            )
             for i, size in enumerate(self.hidden_sizes)
         ]
-        self.final = factory.dense(output_size, activation=final_activation, use_bias=bias, name=sub("final"))
+        self.final = factory.dense(output_size, activation=final_activation, use_bias=bias, name=sub("final"), **initializers(fan_ins[-1]))
         self.dropout = keras.layers.Dropout(dropout, name=sub("dropout")) if dropout else None
 
     def build(self, input_shape) -> None:

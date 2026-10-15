@@ -124,10 +124,25 @@ class LayerFactory:
             stack.enter_context(LayerConfigScope(**{"enable_ebops": True, "beta0": 1e-5, **self.quant.ebops}))
             yield
 
-    def dense(self, units: int, activation: str | None = None, use_bias: bool = True, name: str | None = None) -> keras.layers.Layer:
+    def dense(
+        self,
+        units: int,
+        activation: str | None = None,
+        use_bias: bool = True,
+        name: str | None = None,
+        kernel_initializer: Any = "glorot_uniform",
+        bias_initializer: Any = "zeros",
+    ) -> keras.layers.Layer:
+        kwargs = {
+            "activation": activation,
+            "use_bias": use_bias,
+            "name": name,
+            "kernel_initializer": kernel_initializer,
+            "bias_initializer": bias_initializer,
+        }
         if self.quantize:
-            return QDense(units, activation=activation, use_bias=use_bias, name=name)
-        return keras.layers.Dense(units, activation=activation, use_bias=use_bias, name=name)
+            return QDense(units, **kwargs)
+        return keras.layers.Dense(units, **kwargs)
 
     def einsum(self, equation: str, name: str | None = None) -> keras.layers.Layer:
         if self.quantize:
