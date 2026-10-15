@@ -1,14 +1,17 @@
-"""S4 mutation runner: apply one mutation at a time, run the named tests, record the result, restore with git.
+"""S4 mutation runner: apply one mutation at a time, run the named tests, record the result, restore.
 
-Usage (from anywhere): ``python docs/hgq/port_log/S4_mutations.py [M1 M2 ...]``. Needs a clean worktree for
-the mutated files, because it restores them with ``git checkout``. With no arguments it runs all mutations
-and writes ``S4_mutations.json`` next to this file.
+Usage (from anywhere): ``python docs/hgq/port_log/S4_mutations.py [M1 R1 ...]``. The runner copies the
+tracked files of this worktree (their working-tree contents) into a private temporary directory and
+mutates only that copy, so it never touches the shared lane worktree (other agents may edit it
+concurrently). With no arguments it runs all mutations and writes ``S4_mutations.json`` next to this file.
 """
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -20,6 +23,7 @@ OBJ = "src/hepattn/keras_native/objective.py"
 TP = "tests/keras_native/test_objective_parity.py"
 TM = "tests/keras_native/test_matching.py"
 TE = "tests/keras_native/test_objective_e2e.py"
+# R* were found by the S4 reviewers; the S4 fixes added the tests that kill them.
 M = [
     (
         "M1 mask_bce/dice per-event (diagonal b==q only, mean over Nv)",
@@ -104,29 +108,76 @@ M = [
         '            if not spec.permute_loss or spec.name not in layer_out or spec.name == "regression":',
         [TM, TE],
     ),
+    ("R1 total_loss drops the first leaf", OBJ, "    return sum(leaves[1:], leaves[0])", "    return sum(leaves[1:], 0.0 * leaves[0])", [TP, TE]),
+    ("R4 mask_bce ignores sample_weight", LOSSES, "        loss *= f32(sample_weight)", "        loss = loss", [TP, TE]),
+    (
+        "R14 kl_div_loss without eps",
+        LOSSES,
+        "    loss = -f32(true) * ops.log(f32(pred) + eps)",
+        "    loss = -f32(true) * ops.log(f32(pred))",
+        [TP, TM, TE],
+    ),
+    (
+        "R14c kl_div_cost without eps",
+        LOSSES,
+        "    log_pred = ops.log(f32(pred) + eps)",
+        "    log_pred = ops.log(f32(pred))",
+        [TP, TE],
+    ),
+    (
+        "R15 mask_dice_cost without the pad multiply",
+        LOSSES,
+        "    probs = ops.sigmoid(f32(logits)) * ops.expand_dims(f32(input_pad_mask), 1)",
+        "    probs = ops.sigmoid(f32(logits))",
+        [TP, TE],
+    ),
+    ("R17 encoder outputs ignored again", OBJ, "    if encoder:\n", "    if False:\n", [TP]),
+    (
+        "R18 matcher n_jobs ignored",
+        OBJ,
+        '    return int(args.get("n_jobs", 8)) if args.get("parallel_solver", False) else 1',
+        "    return 1",
+        [TP],
+    ),
 ]
+
+
+def _private_copy() -> Path:
+    files = subprocess.run([GIT, "ls-files", "-z"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.split("\0")
+    dst = Path(tempfile.mkdtemp(prefix="s4_mutations_"))
+    for rel in filter(None, files):
+        src = ROOT / rel
+        if src.is_file():
+            (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst / rel)
+    return dst
 
 
 def main(selected: list[str]) -> None:
     results = []
-    for name, path, old, new, tests in M:
-        if selected and name.split()[0] not in selected:
-            continue
-        f = ROOT / path
-        src = f.read_text()
-        assert src.count(old) == 1, (name, src.count(old))
-        f.write_text(src.replace(old, new))
-        try:
-            env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(ROOT / "src"), "HOME": os.environ["HOME"]}
-            cmd = [PY, "-m", "pytest", "-p", "no:cacheprovider", "-q", "-W", "ignore", *tests]
-            r = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True, check=False)
-            lines = r.stdout.splitlines()
-            failed = [line.split(" - ")[0].replace("FAILED ", "") for line in lines if line.startswith(("FAILED", "ERROR"))]
-            summary = lines[-1] if lines else r.stderr[-300:]
-        finally:
-            subprocess.run([GIT, "checkout", "--", path], cwd=ROOT, check=True)
-        results.append({"mutation": name, "summary": summary, "failed": failed})
-        print(json.dumps(results[-1]), flush=True)
+    copy = _private_copy()
+    print(f"private copy: {copy}", flush=True)
+    try:
+        for name, path, old, new, tests in M:
+            if selected and name.split()[0] not in selected:
+                continue
+            f = copy / path
+            src = f.read_text()
+            assert src.count(old) == 1, (name, src.count(old))
+            f.write_text(src.replace(old, new))
+            try:
+                env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": str(copy / "src"), "HOME": os.environ["HOME"]}
+                cmd = [PY, "-m", "pytest", "-p", "no:cacheprovider", "-q", "-W", "ignore", *tests]
+                r = subprocess.run(cmd, cwd=copy, env=env, capture_output=True, text=True, check=False)
+                lines = r.stdout.splitlines()
+                failed = [line.split(" - ")[0].replace("FAILED ", "") for line in lines if line.startswith(("FAILED", "ERROR"))]
+                summary = lines[-1] if lines else r.stderr[-300:]
+            finally:
+                f.write_text(src)
+            results.append({"mutation": name, "summary": summary, "failed": failed})
+            print(json.dumps(results[-1]), flush=True)
+    finally:
+        shutil.rmtree(copy, ignore_errors=True)
     if not selected:
         Path(__file__).with_suffix(".json").write_text(json.dumps(results, indent=1))
 
