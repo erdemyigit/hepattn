@@ -1,0 +1,60 @@
+#!/bin/bash -l
+#PBS -N hgq_g2
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=01:00:00
+# NOTE: -q and -l walltime= below are FALLBACKS for a bare qsub.
+# submit.sh overrides both from polaris/env.sh (QUEUE_*/WALLTIME_*).
+#PBS -q debug
+#PBS -j oe
+#PBS -o logs/hgq_g2_forward.log
+#
+# Submit with:  bash polaris/submit.sh 15_g2_forward.pbs
+#
+# Gate G2 (docs/hgq/KERAS_JAX_PLAN.md section 4, S3): the native keras_native MaskFormer, jitted forward + backward
+# with a surrogate loss (output terms + EBOPs penalty), against the hybrid's bare-loop step of 07_profile.py, at the
+# production shape (dim 256, 16 heads, 6 + 4 Linformer layers, k = 256, 160 nodes + 8 registers, 150 queries), fp32 in
+# every arm, EBOPs every step, one GPU. JAX runs first (batches 8, 16, 32), then the torch arms (8, 16: torch fp32 OOMs
+# at batch 32 on a 40 GB A100, job 7746577). Results: logs/g2_<jobid>.json, written after every run.
+#
+# ONE-TIME SETUP on a login node (compute nodes may not reach PyPI). .venv-jax is the env of 14_backend_spike.pbs;
+# this adds what the keras_native suite needs (the S1 set of docs/hgq/KERAS_NATIVE.md) with the CUDA 12 jax and a
+# CPU-only torch (used only by CLICDataset here; a CUDA torch would load a second set of CUDA libraries into the JAX
+# process). The resolution was checked with `uv pip compile --python-platform x86_64-manylinux_2_28 --python-version
+# 3.12` (torch 2.10.0+cpu, jax-cuda12-plugin 0.11.2, nvidia-cudnn-cu12 9.27):
+#   cd "$WORK_ROOT/hepattn"
+#   [ -x .venv-jax/bin/python ] || uv venv --python 3.12.0 .venv-jax
+#   uv pip install --python .venv-jax/bin/python \
+#     --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match \
+#     "keras==3.15.0" "hgq2==0.1.9" "quantizers==1.2.2" "numpy==2.3.5" "jax[cuda12]==0.11.2" psutil \
+#     "torch==2.10.0" "lightning==2.5.2" "pyyaml==6.0.3" "uproot==5.7.1" "awkward==2.9.0" "atlas-ftag-tools==0.2.18" \
+#     "einops==0.8.2" "lapx==0.9.4" "scipy==1.18.1" "torchmetrics==1.8.2" "pytorch-lightning==2.6.1" \
+#     "lion-pytorch==0.2.3" "torchjd==0.7.0" "jsonargparse[signatures]==4.40.1" "matplotlib==3.10.8"
+# The torch arms use the existing $REPO/.venv (01_setup_env.sh). $REPO must hold the keras_native code (branch
+# kn/lane-a or later); both envs import hepattn from $REPO/src through PYTHONPATH.
+set -uo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+source polaris/env.sh
+export PYTHONNOUSERSITE=1 TORCHDYNAMO_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# report real JAX device memory instead of the default 75% preallocation
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
+REPO="$WORK_ROOT/hepattn"; cd "$REPO"
+mkdir -p logs
+
+[ -x "$REPO/.venv-jax/bin/python" ] || { echo "ERROR: $REPO/.venv-jax missing; see ONE-TIME SETUP in this file"; exit 1; }
+[ -f "$REPO/src/hepattn/keras_native/maskformer.py" ] || { echo "ERROR: $REPO has no keras_native MaskFormer (check out kn/lane-a)"; exit 1; }
+nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv | head -2
+"$REPO/.venv-jax/bin/python" -c "import jax, torch; print('jax', jax.__version__, jax.devices(), '| torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+
+# real CLIC events as in 07_profile.py (G2_DATA_FILE="" uses CLICDataset dummy data; the shapes are static either way)
+G2_DATA_FILE="${G2_DATA_FILE-$DATA_ROOT/val_clic_fix.root}"
+# one GPU only: single-device step cost, as in 07_profile.pbs
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$REPO/src" "$REPO/.venv-jax/bin/python" polaris/15_g2_forward.py --sweep \
+  --torch-python "$REPO/.venv/bin/python" --jax-python "$REPO/.venv-jax/bin/python" \
+  --modes "${G2_MODES:-jax,hybrid-07,hybrid-surrogate}" \
+  --jax-batches "${G2_JAX_BATCHES:-8,16,32}" --hybrid-batches "${G2_HYBRID_BATCHES:-8,16}" \
+  --warmup 5 --iters 20 --data-file "$G2_DATA_FILE" \
+  --out "logs/g2_${PBS_JOBID:-local}.json" ${G2_ARGS:-}
+echo "G2-EXIT-$?"
