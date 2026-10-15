@@ -20,9 +20,12 @@ from hepattn.keras_native.factory import LayerFactory
 from .golden.cases import CASES, modes, torch_module
 from .golden_utils import build_native, golden_meta, inputs_of, load_golden, native_leaves, native_module
 
-# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict, so the marker fails once the named lane fixes the test.
-R3_XFAIL = pytest.mark.xfail(
-    strict=True, reason="R3 (after the R2 merge): the torch reference passes linformer_proj_dim, which org Attention rejects since PR #9"
+# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict. Blocked on a file this lane does not own:
+# the torch reference takes its kwargs from golden/cases.py (R5, plan section 6). See docs/hgq/port_log/R0.md, open issues.
+CASES_LIN_XFAIL = pytest.mark.xfail(
+    strict=True,
+    raises=TypeError,
+    reason="blocked on golden/cases.py LIN_KWARGS (R5-owned): it passes linformer_proj_dim, which org Attention rejects since PR #9",
 )
 
 PARAMETER_NAMES = {"kernel", "bias"}  # leaf variables that are torch parameters; the rest is quantizer state
@@ -69,7 +72,7 @@ def split_variables(module):
 
 @pytest.mark.parametrize(
     ("case", "mode"),
-    [pytest.param(case, mode, marks=R3_XFAIL) if case == "enc_lin" else (case, mode) for case in CASES for mode in modes(case)],
+    [pytest.param(case, mode, marks=CASES_LIN_XFAIL) if case == "enc_lin" else (case, mode) for case in CASES for mode in modes(case)],
 )
 def test_trainable_variables_match_torch_and_hybrid(case, mode):
     golden = load_golden(case)

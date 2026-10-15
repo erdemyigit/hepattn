@@ -31,7 +31,9 @@ from .parity_utils import assert_parity, make_padded_batch
 from .porting import perturb_affine_params, port_attention, port_dense, port_encoder, port_input_net, port_linformer
 
 # R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict, so the marker fails once the named lane fixes the test.
-R2_XFAIL = pytest.mark.xfail(strict=True, reason="R2: the torch reference passes linformer_proj_dim, which org Attention rejects since PR #9")
+R2_XFAIL = pytest.mark.xfail(
+    strict=True, raises=TypeError, reason="R2: the torch reference passes linformer_proj_dim, which org Attention rejects since PR #9"
+)
 
 
 def t(x) -> torch.Tensor:

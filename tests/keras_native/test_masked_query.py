@@ -79,9 +79,12 @@ def test_negative_control_leaky_softmax_breaks_key_independence(kind):
 
 @pytest.mark.parametrize("kind", ["linformer", "dense"])
 def test_kv_sort_idx_is_accepted_and_ignored(kind):
-    """R0 interface stub: ``call`` takes ``kv_sort_idx`` and the output does not change.
+    """R0 interface stub: ``call`` takes ``kv_sort_idx`` and ignores it (bit-exact output).
 
-    With a padded ``kv_mask``, a layer that gathered k and v by the index but not the mask would change the output.
+    Exact equality fails for ANY use of the index: a gather of k and v without the mask (R0 review: max 0.63)
+    and also a consistent gather of k, v and ``kv_mask``, which is mathematically equal for dense attention and
+    differs only by summation order (max 3.6e-7). So this pins "ignored", not "gathered correctly"; R2 replaces
+    it when it implements the gather.
     """
     layer = make_layer(kind, "float")
     q, _ = make_padded_batch(2, 150, DIM, seed=9)

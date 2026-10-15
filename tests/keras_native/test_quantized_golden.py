@@ -33,7 +33,9 @@ CASE_MODES = [(case, mode) for case in CASES for mode in modes(case)]
 
 # R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict, so the marker fails once the named lane fixes the test.
 R5_XFAIL = pytest.mark.xfail(
-    strict=True, reason="R5: the torch reference passes linformer_proj_dim, which org Attention rejects since PR #9; goldens regenerate in R5"
+    strict=True,
+    raises=TypeError,
+    reason="R5: the torch reference passes linformer_proj_dim, which org Attention rejects since PR #9; goldens regenerate in R5",
 )
 XCASE_MODES = [pytest.param(*row, marks=R5_XFAIL) if row[0] == "enc_lin" else row for row in CASE_MODES]
 
