@@ -29,7 +29,7 @@ Evidence comes from three investigations in this workflow, plus planner checks:
 - **Work:** 6 stages. After the merge stage, 4 lanes run in parallel with disjoint file ownership. Total about 2,150-2,550 LOC
   (estimate, section 6).
 - **Corrections to earlier notes:**
-  - `WORKLOG.hgq.md:155` says the PR #5 cos/sin bug is not on keras-jax. That is wrong. `pflow_data.py:240-241` on keras-jax
+  - `WORKLOG.hgq.md:156` says the PR #5 cos/sin bug is not on keras-jax. That is wrong. `pflow_data.py:240-241` on keras-jax
     reads `torch.cat([track_cosphi, topo_phi], -1)` (sinphi likewise), the same as org/main.
   - The merged `uv.lock` is stale: `uv lock --check` exits 1 on the trial merge and 0 on `37ff127`
     (`$S/trial-logs/uv_lock_check{,_baseline}.log`). The trial investigation did not report this.
@@ -41,6 +41,7 @@ Evidence comes from three investigations in this workflow, plus planner checks:
 | Item | Value | Evidence |
 |---|---|---|
 | Model | org/main `ac0da8f`, CLIC, `base.yaml` + `linformer.yaml`. The overlay's key sets contain all of base's keys, so merging and replacing give the same effective config | `$S/specgap/probe_chain.py` |
+| Why this pin is "the latest float Linformer model" | On 2026-10-15 the live org `main` is `ac0da8f` (`git ls-remote org`), PR #9 merged 2026-10-01. It is newer than this user's own Linformer branches (`linformer-float` `731db27`, last commit 2026-09-17; `linformer-into-unified-main` `9a86b47`, 2026-09-24), which carry Helen's Linformer path. Org PR #2 (that path) is open but superseded by #9. masked-linformer `main` is still `dce2e15` | `git ls-remote org`; `git log -1 --format=%cd`; `gh pr list -R compressed-maskformer-reco/hepattn --state all`; `gh api repos/compressed-maskformer-reco/masked-linformer/commits/main` |
 | Commits in it, not on keras-jax | 20 (`git log 1df05cc..org/main`): #9 `ac0da8f`, #8 `e9ef1a6`, #3 `a2bc9c7`, `a4263c1`, #1 (`84dd040`..`cfc40a0`), CI #4 | `git log` |
 | masked-linformer | `dce2e15` (MIT), pinned in org `pyproject.toml:42` as a GitHub archive URL. Only dependency: `torch>=2.0` | `$S/masked-linformer/pyproject.toml:8` |
 | Data | `pflow_data.py` is unchanged by the retarget. The PR #5 bug (`topo_phi` used as topo cos/sin) is in the target, and PR #5 is still open. Torch and native read the same data, so parity is not affected | `pflow_data.py:240-241` on both trees; https://github.com/compressed-maskformer-reco/hepattn/pull/5 |
@@ -51,13 +52,14 @@ Evidence comes from three investigations in this workflow, plus planner checks:
 |---|---|---|
 | Input | `node_features` (B,160,27). Net: `Dense(27→256, SwiGLU)` = Linear(27,108), SwiGLU, Linear(54,256). `SwiGLU(x) = x1·silu(x2)`, where x1 is the first half. Fourier posenc on (eta, phi) is added after the net | `activation.py:6-9`, `input.py:53-57`, `posenc.py:118-138` |
 | Sorting | `key_phi` = concatenation of `node_phi`. `key_sort_idx = argsort(masked_fill(~valid, +inf))`: padding last, not a stable sort. The encoder sorts, gathers and unsorts internally. `kv_sort_idx` goes only to decoder `q_ca` | `maskformer.py:116-134`, `encoder.py:22-26,222-296`, `decoder.py:316,465` |
-| Encoder | 6 layers, dim 256, 16 heads, 8 register tokens (L=168). FastLayerNorm (non-affine, eps 1e-5), `hybrid_norm`, `dense_norm_placement=legacy`. Layer 0: `x += Attn(FLN x)`, then `x = FLN x; x += FFN x`. Layers 1-5: `x += Attn x`, then `x += FFN(FLN x)`. `qkv_norm` on q, k, v at full width. Value residual in layers 1-5. FFN `Dense(256, SwiGLU)` | `norm.py:19-27,64-99`, `attention.py:273-303` |
+| Encoder | 6 layers, dim 256, 16 heads, 8 register tokens (L=168). FastLayerNorm (non-affine, eps 1e-5), `hybrid_norm`, `dense_norm_placement=legacy`. Layer 0: `x += Attn(FLN x)`, then `x = FLN x; x += FFN x`. Layers 1-5: `x += Attn x`, then `x += FFN(FLN x)`. `qkv_norm` on q, k, v at full width. Value residual in layers 1-5. FFN `Dense(256, SwiGLU)` | `norm.py:19-27,64-99`, `encoder.py:56-99,137-149` (Residual placement), `attention.py:273-303` |
 | Attention | Packed `in_proj_weight` (768,256), xavier init, bias 0, plus `out_proj`. Linformer `proj_k`, `proj_v` (seq_len, 64), U(±1/8). With `kv_sort_idx`: gather k, v and both masks first. `attn_mask` None: `project` (where-zeroing + column renorm when `kv_mask` is given) then unmasked SDPA. Otherwise: `attend(q,k,v,E,F, attn_mask & kv_mask)` | `attention.py:202-213,317-331`; masked_linformer `project` L39-53, `_rescale` L56-63, `attend` L66-87 |
-| Decoder | 4 layers, 150 queries. Mask `sigmoid(logit).detach() >= 0.1`; all-False rows restored to all-True. Order `ca_sa_dense`, `self_attn_norm_kv=True`. Call sites: `q_ca` = attend, mask (B,150,160), `kv_mask`, `kv_sort_idx`; `q_sa` = project with no masks (uses `E[:150]`); `kv_ca` = attend, mask (B,160,150), no `kv_mask`. No value residual | `decoder.py:293-296,451-493`; measured in `$S/specgap/orgmain_forward.out` |
+| Decoder | 4 layers, 150 queries. Mask `sigmoid(logit).detach() >= 0.1`; all-False rows restored to all-True. Order `ca_sa_dense`, `self_attn_norm_kv=True`. Call sites: `q_ca` = attend, mask (B,150,160), `kv_mask`, `kv_sort_idx`; `q_sa` = project with no masks (uses `E[:150]`); `kv_ca` = attend, mask (B,160,150), no `kv_mask`. No value residual | `decoder.py:293-296,451-493`, `task.py:569-575` (threshold); measured in `$S/specgap/orgmain_forward.out` |
+| Batch of one, all valid | If `batch_size == 1` and every key is valid, `key_valid` becomes `None` (not for flash-varlen). The encoder then calls `project` with `mask=None`: `E[:n]`, **no renorm**. A mask of all ones is not the same as no mask when `n < seq_len`. Production never takes this path: events with ≥ 160 nodes are dropped, so at most 159 of 160 nodes are valid. Test fixtures at small shapes can take it, and native always passes the mask, so parity fixtures must give every event at least one padded node. Add one B=1 all-valid test that asserts the documented difference at `n < seq_len` and equality at `n = seq_len` | `maskformer.py:112-113`; masked_linformer L16-18, L45-46; `experiments/clic/pflow_data.py:120` |
 | Tasks | Classification at every layer (`has_first_layer_loss`), mask at every layer, incidence and regression at the final layer only. Classification `Dense(256→6)`, hidden [256,128,32], SiLU. Mask `4·object_net(q)·constituent_net(kv)`, both SwiGLU Linear(256,1024) → Linear(512,256). Incidence `net` 256→256→256→256 SiLU, `node_net` SwiGLU Linear(256,512) → Linear(256,256). Regression `mode=scale`, `use_nodes`, input 518 → 512→256→128→64→32→5, SiLU, output `net·proxy` | `task.py:201-217,552-567,1340-1347,1465-1640` |
 | Costs | `2·object_ce_cost(logits)` (bug 2 fix), `1·mask_dice_cost`. At the final layer also `1·kl_div_cost` and `10·L1` | `task.py:240-251`, `loss.py:41-60,96-118` |
 | Matcher | `nan_to_num` (nan → big, +inf → big, -inf → -big; big = f32max/10). Solver `lap1015_late`, with fallback to scipy on an invalid permutation; parallel, `n_jobs` 16; `device_solver` off | `matcher.py:125-147,290-332`; `base.yaml:150-162` |
-| Losses | `2·CE` with class weights [1,3,8,1.5,1,0.5]. `5·mask_bce` and `1·mask_dice` normalised **per event** (bug 1 fix). `1·kl_div` and `10·L1` at the final layer. The total is the sum over layer_0..3 and final | `loss.py:36-38,63-93,202-241`, `wrapper.py:46-63` |
+| Losses | `2·CE` with class weights [1,3,8,1.5,1] and null weight 0.5, over all 150 queries (`mask` is ignored). `5·mask_bce` and `1·mask_dice` normalised **per event** (bug 1 fix). `1·kl_div` and `10·L1` at the final layer. The total is the sum over layer_0..3 and final | `loss.py:36-38,63-93,202-241`, `wrapper.py:46-63` |
 | Trainer (not model) | Lion, LR 1e-6 → 8e-5 → 1e-6, wd 1e-4, clip 0.1, bf16-mixed, batch 512 | `base.yaml`; out of scope here, see Q-defaults in section 7 |
 
 ### 1.3 Gaps in keras_native at `37ff127` (measured in the spec investigation)
@@ -127,16 +129,21 @@ The hybrid after the merge: the torch forward, tasks, losses and matcher come fr
      first match (`AttributeError: lap_late`, reproduced in the trial). R4 makes the generated config use `scipy`.
      lap1015 is not importable locally in either venv (`ModuleNotFoundError`).
 7. Keep the evidence: copy `$S/spec_gap_log.md`, `$S/specgap/*.py`, `$S/trial-logs/LOG.md`, `$S/trial-probes/*.py` and
-   `$S/qml_proto/{LOG.md,*.py,*.out}` into `docs/hgq/port_log/retarget/`. `/private/tmp` is not durable, and R2 ports
+   `$S/qml_proto/{LOG.md,*.py,*.out}` and `$S/review_rt/{LOG.md,*.log,*.out}` into `docs/hgq/port_log/retarget/`. `/private/tmp` is not durable, and R2 ports
    `qml_layers.py`.
 8. Remove the scratch worktrees `$S/trial-merge` and `$S/baseline-kj` and the branch `scratch/trial-merge`. They share this repository's `.git`.
 
 **R0 gate** (commands as in `$S/trial-logs/run.sh`):
 - (a) Hybrid `tests/keras` + `tests/polaris`: 107 passed / 8 skipped, as the trial measured at `f110dcc`.
 - (b) Native `tests/keras_native`: 311 passed / 41 xfailed / 2 skipped / 0 failed.
-- (c) Torch `tests/models tests/polaris tests/loss tests/matching -m 'not gpu and not requiresdata'`: 0 failed. The trial ran
+- (c) Torch `tests/models tests/polaris tests/loss -m 'not gpu and not requiresdata'`: 0 failed. The trial ran
   models + polaris: 310 passed / 173 skipped. `tests/loss` brings org's `test_loss_per_event_normalisation.py`, and
   `tests/models` brings `test_object_classification_cost.py`.
+  `tests/matching` cannot be green locally: lap1015 is not built, so `PYTHONPATH=src` makes `src/lap1015` an empty namespace
+  package. Measured (critic, `$S/review_rt/loss_matching{,_baseline}.log`): 106 failed on the trial merge and 105 on `37ff127`,
+  every one `AttributeError: module 'lap1015' has no attribute 'lap_late'/'lap_early'/'releases_gil'`; `tests/loss` had 0 failures.
+  Gate: every `tests/matching` failure is one of these lap1015 AttributeErrors (grep the log). Otherwise build lap1015 first
+  (org `pyproject.toml:55-68`) and require 0 failed.
 - (d) `uv lock --check` exits 0.
 
 Between R0 and R4, `polaris/03_make_config.py` writes a mixed model: old encoder, PR #8 decoder and tasks. Quantized builds of it
@@ -160,8 +167,10 @@ fail on SwiGLU (trial). Do not launch Polaris jobs from keras-jax in that window
   (`loss.py:88-90`). Rewrite the module docstring (`losses.py:8-17`).
 - `objective.ObjectClassificationTask.cost`: pass `outputs[f"{output_object}_logit"]` instead of `_class_prob`
   (`objective.py:130-133`). `losses.object_ce_cost` then applies the single softmax.
-- When no object is valid, native gives 0. Torch now also gives 0, because of `clamp_min(1.0)` (`loss.py:207`). The documented
-  deviation in `losses.py:5-6` goes away.
+- When no object is valid, native gives 0. For `mask_bce` / `mask_dice`, torch now also gives 0, because of `clamp_min(1.0)`
+  (`loss.py:207`). The documented deviation in `losses.py:5-6` stays for the other losses: the regression L1 loss
+  (`task.py:1590-1595`, boolean indexing then a mean) and `kl_div_loss` (`loss.py:271-277`) still give NaN on an empty
+  selection in torch. Narrow the docstring; do not delete it.
 - `docs/hgq/PARITY.md`: the note "`mask_bce` can be `inf` on randomly-initialized models" no longer holds. Padded-node terms are
   multiplied by that event's pad mask, which is 0. At random init the spec measured mask_bce ≈ 2.9, finite. Regenerate the file
   in R5 (`tests/keras/gen_parity_report.py`).
@@ -178,7 +187,7 @@ mask logits 3·N(0,1) set to `finfo.min` at padded nodes, targets Bernoulli(0.05
 | B1-b | Decomposition: `L([e0,e1,e2]) == Σ n_b·L([e_b]) / Σ n_b`, with n_b the valid-object count, to 2x measured | violated (a test-local copy of the old formula must show the violation ≥ 10x the tolerance) | holds by construction | per-event normalisation is the only thing that makes events independent |
 | B1-c | Control: at B=1 the old and new formulas agree | equal | equal | shows B1-a/b react only to batch coupling |
 | B1-d | Target 1 at a padded node with a `finfo.min` logit: finite and equal to torch | inf | finite | padding is multiplied by the event's own mask |
-| B1-e | No valid object: 0, equal to torch | 0 (torch NaN) | 0 = 0 | replaces `test_no_valid_object_gives_zero_where_torch_gives_nan` |
+| B1-e | No valid object: 0, equal to torch | 0 (torch NaN) | 0 = 0 | replaces `test_no_valid_object_gives_zero_where_torch_gives_nan`. Before and after agree, so this is a regression pin; its control is a mutant that drops `max(sum(valid), 1)` (gives NaN) |
 | B2-a | `ObjectClassificationTask.cost` equals the org task cost on F1 | max diff 0.5626 | 1.2e-7 when fed logits (probe rerun by the planner) | gap 0.56 against a tolerance of about 2.4e-7 |
 | B2-b | ptp of the class cost on F1: native = torch; the `_class_prob` mutant compresses it ≥ 4x | 0.187 | 0.881 (4.7x) | |
 | B2-c | 2×2 assignment. Logits rows [5,0,0,0,0,0] and [0,5,0,0,0,0], targets classes [0,1], dice [[.95,.30],[.30,.95]], cost `2·ce + dice`. Native and torch `Matcher` pick [0,1]; the double-softmax mutant picks [1,0] | [1,0] | [0,1] | measured with scipy on both cost formulas (planner check, `$S/retarget_plan_log.md`): totals −1.9696 vs 0.0747 |
@@ -201,7 +210,7 @@ R1 also takes the matcher (section 5.7), because it owns `objective.py` and `mat
 |---|---|---|---|
 | **(a) Update the hybrid to the new model** | 250-650 LOC including Polaris config and tests. Arithmetic on the trial estimate of 450-700: reusing the native core replaces the 150-250 LOC attention branch with about 50-100 LOC of glue. If reuse fails gate H0: 450-700 | Trainable new-model QAT on Polaris now, with the existing Lightning path. G2, S7 and G4 stay like-for-like. Independent quantized goldens for everything except the attention core | An independent quantized implementation of the masked-Linformer core |
 | (b) Keep the hybrid at the old model semantics | About 50-60 LOC: `f110dcc` (+18/−5), pinning `03_make_config.py` to the pre-merge model (30-40, trial), and forcing scipy | Existing goldens; checkpoint compatibility with the old runs | No trainable new-model QAT until native S5+S6 (about 1,490 LOC estimated, `KERAS_JAX_PLAN.md` section 4). The S7 and G4 gates (`KERAS_JAX_PLAN.md:512,516`) compare against the hybrid and would have to be redefined. Not truly "old" either: the hybrid gets bugs 1-2 through the shared torch losses (section 3.1) |
-| (c) Freeze at a tag (`hgq2-hybrid-legacy` at `37ff127`) and delete it from the branch | A tag; delete `src/hepattn/keras/` (1,950 lines, `wc -l`) and `tests/keras/` | A smaller branch | The NO-GO fallback if G2 fails (`KERAS_JAX_PLAN.md` section 0.4: G2 has not been run). The S7/G4 references. Golden regeneration. Any QAT run before native S8 |
+| (c) Freeze at a tag (`hgq2-hybrid-legacy` at `37ff127`) and delete it from the branch | A tag; delete `src/hepattn/keras/` (1,950 lines, `wc -l`) and `tests/keras/` | A smaller branch | The fallback if G2 fails (`KERAS_JAX_PLAN.md:468-471`: if G2 fails, "stop before S4-S8 merge"; G2 has not been run). The S7/G4 references. Golden regeneration. Any QAT run before native S8 |
 
 **Recommendation: (a).**
 1. It is what the request says: the hybrid is the production HGQ2 path until G4 (`KERAS_JAX_PLAN.md` section 3.1).
@@ -255,13 +264,17 @@ Change:
 - `from_config` unwraps encoder `class_path` / `init_args` and checks the encoder `dim` against the MaskFormer `dim`.
 - It accepts `input_sort_field`, the PR #8 keys, FastLayerNorm, `activation: SwiGLU` in quantized mode, and
   `linformer_seq_len` / `linformer_k`.
-- **Unknown keys raise.** No `**_ignored` anywhere in attention; this is the root cause of the silent k=256.
+- **Unknown keys raise.** No `**_ignored` anywhere in attention; this is the root cause of the silent k=256. `build_attention`
+  is in `attention.py`, which R2 owns, so R2 makes this change (section 5.6); R3 only passes the keys through.
 - A test helper loads `base.yaml`, then deep-merges `linformer.yaml`.
 
 Gates:
-- every one of the 8 blockers in `probe_chain.py` is gone;
+- every one of the 8 blockers in `probe_chain.py` is gone (critic rerun: the 8 reproduce, and with all 8 patched the float model
+  builds with k=256; run the probe with the clic directory as `argv[3]`, or `scale_dict_path` does not resolve);
 - variable shapes and counts equal the torch model built from the same merged config: `proj_k` (168,64) in the encoder and
-  (160,64) in `q_ca`;
+  (160,64) in `q_ca` and `kv_ca`. One listed exception: `q_sa` is (150,64) in native and (160,64) in torch
+  (`$S/specgap/orgmain_forward.out`), because native drops the dead tail rows (section 5.6). This gate needs R2's Linformer
+  branch, so R3 runs it after rebasing on the R2 merge (R3 merges after R2);
 - `linformer_proj_dim` and a misspelt key raise. Control: at `37ff127` the same config builds k=256.
 
 ### 5.2 FastLayerNorm and `dense_norm_placement` (R3)
@@ -273,7 +286,8 @@ Change:
 - Encoder and decoder layers pass the new keys through.
 
 Gates:
-- FastLayerNorm parity with torch;
+- FastLayerNorm parity with torch. This alone does not discriminate: an affine LayerNorm at its default init (gamma 1, beta 0)
+  gives the same output. The variable-count gate below is the control;
 - encoder layer parity at depth 0 and depth 1 with `legacy`. Control: `hybridnorm` placement differs (measure it; the trial's
   hybrid porter refused the mismatch);
 - variable count: native and torch FastLayerNorm have 0 variables, against 2 for LayerNorm.
@@ -286,8 +300,9 @@ Change: `query_update_order` (`ca_dense_sa` | `ca_sa_dense`), `_query_self_attn`
 Gates:
 - decoder-layer parity at depth 0 and 1;
 - controls at depth 0: wrong order (hybrid measured 0.41), `self_attn_norm_kv=False` (0.13);
-- at depth ≥ 1, `self_attn_norm_kv` has no effect (about 5e-7), as expected under hybrid norm. Assert that too, so the test
-  documents why the control must be at depth 0.
+- at depth ≥ 1, `self_attn_norm_kv` has no effect, as expected under hybrid norm (no pre-attention norm there). The hybrid
+  probe measured 4.8e-7, the same as its matched-configuration floor (critic rerun of `probe_pr8_hybrid.py`). Assert that too,
+  so the test documents why the control must be at depth 0.
 
 ### 5.4 Quantized SwiGLU (R3; independent twin in R4)
 
@@ -315,14 +330,19 @@ Change:
 
 Dense attention is permutation-equivariant, so sorting is invisible with `attn_type: torch`. **The R3 gates therefore test the
 mechanics directly:**
-- `sort_index` equals torch `sort_index` exactly, on unique phi values with padding (padding last);
-- `unsort(sort(x)) == x` exactly;
+- `sort_index` equals torch `sort_index` exactly on the valid prefix (the first `n_valid` entries of each event), and the padding
+  suffix holds the same set of indices. Full equality is not achievable: torch argsort is not stable, so it orders the tied
+  `+inf` padding entries differently from `keras.ops.argsort` (JAX `stable=True` default). Critic check on unique phi,
+  B=4, N=160, valid [120,37,159,80]: full equal False, valid prefix equal True, padding sets equal True. Control: dropping
+  the `+inf` fill interleaves padding with valid tokens and fails the prefix check;
+- `unsort(sort(x)) == x` exactly, with an assert that the fixture's sort index is not the identity (else the round trip is vacuous);
 - a position-marking stub layer (adds a bias that depends on the sorted position) gives the same output as the torch encoder with
   the same stub. Control: without the sort, the outputs differ.
 
 R5 adds the discriminating end-to-end check with the Linformer encoder. Control: removing the sort changes the outputs; measure it.
 `keras.ops.argsort` kept tied `+inf` entries in their input order (local check). Torch argsort is not stable, but ties among
-padding do not change valid outputs: padded rows are zeroed in `project` and masked in `attend`.
+padding do not change valid outputs: padded rows are zeroed in `project` and masked in `attend`. Padded output rows do differ,
+so every parity comparison (here, in 5.8 and in the hybrid goldens) uses valid slots only.
 
 ### 5.6 Masked-Linformer attention (R2)
 
@@ -351,6 +371,8 @@ Specifics:
   the tail enters only the renorm numerator. In `q_sa`, org calls `project` with `mask=None`, which uses `proj[:n]` and no rescale
   (masked_linformer L45-46). Org's rows 150-159 there get no gradient. Native does not create them, and porting drops them.
   Test: perturbing those torch rows changes no torch output (exactly 0). This keeps the "nonzero gradient" JIT gate free of exemptions.
+  The hybrid (R4b) keeps torch's (160,64) shape in `q_sa`, so its state_dict keys and shapes still match torch (R4a gate);
+  only native drops the rows, and the 5.1 shape gate lists that one exception.
 - **Renorm precision.** Set the LUT input and the energy-lane fractional bits to `2·f_E + 4`, where `f_E` is the largest fractional
   bit count of E's weight quantizer. That is 16 at the production spec (`kbi b0=8 i0=2`, step 1/64).
   - Prototype at 12 bits: 18.5% max relative error at 1-2 valid keys, 0.9% at 20.
@@ -402,7 +424,10 @@ Gates:
 
 Gates:
 - native against the org torch MaskFormer built from `base.yaml` + `linformer.yaml` at test shapes, with ported weights: the
-  per-layer outputs at the `maskformer.e2e` rows (5e-5/1e-4, re-measured); the mask booleans exactly equal per layer (float);
+  per-layer outputs at the `maskformer.e2e` rows (5e-5/1e-4, re-measured); the mask booleans exactly equal per layer (float),
+  on a fixture where every valid mask logit is at least 10x the logit tolerance away from `logit(0.1)` (assert this margin,
+  or a 1e-6 difference can flip a boolean and the exact check fails for no model reason); every event has a padded node
+  (section 1.2, "Batch of one, all valid");
   the matched loss at the `maskformer.loss` rows;
 - controls: no sorting; `ca_dense_sa`; old losses. Each must exceed the tolerance by ≥ 10x;
 - quantized full-model paired delta on the layer-0 mask logits (S3 measured 0.30 against 31.09);
@@ -419,11 +444,11 @@ discrimination, at most 2 fix rounds, and a log in `docs/hgq/port_log/R<n>.md`.
 |---|---|---|---|---|---|
 | R0 integrate | Merge, lock files, `f110dcc` hunks, strict xfails, `kv_sort_idx` stub, environment, evidence copy | everything before the lanes fork | — | ~60 own, plus the regenerated locks | section 2 |
 | R1 objective | Bugs 1 and 2, matcher | `keras_native/{losses,objective,matching}.py`; `tests/keras_native/{test_objective_parity,test_objective_e2e,test_matching,objective_utils}.py`; new `test_org_loss_fixes.py` | R0 | ~250 | section 3.3, section 5.7; the 11 objective xfails rewritten |
-| R2 attention | Masked-Linformer core and `Attention` branch, factory leaves; `build_attention` stops routing to Helen's Linformer | `keras_native/{attention,masked_linformer,factory}.py`; `tests/keras_native/{test_masked_query,test_jit,test_float_parity,test_import_hygiene}.py`; new `test_masked_linformer.py`; in `porting.py` only `port_attention`, `port_linformer`, `port_any_attention` | R0 | ~650 (prototype 293 lines) | section 5.6; import hygiene also under `KERAS_BACKEND=torch` without jax |
-| R3 layers | Config, norms, placement, decoder order, quantized SwiGLU, sorting | `keras_native/{norm,dense,encoder,decoder,maskformer,input}.py`; `tests/keras_native/{test_maskformer,test_variables,test_init,test_helpers}.py` (`test_init.py` drops its Helen-Linformer checks; R2 tests the new init bounds); new `test_pr8_layers.py`; in `porting.py` all other `port_*` functions | R0 | ~500 | sections 5.1-5.5 |
+| R2 attention | Masked-Linformer core and `Attention` branch, factory leaves; `build_attention` stops routing to Helen's Linformer | `keras_native/{attention,masked_linformer,factory}.py`; `tests/keras_native/{test_masked_query,test_jit,test_float_parity,test_import_hygiene}.py`; new `test_masked_linformer.py`; in `tests/keras_native/porting.py` only `port_attention`, `port_linformer`, `port_any_attention` | R0 | ~650 (prototype 293 lines) | section 5.6; import hygiene also under `KERAS_BACKEND=torch` without jax |
+| R3 layers | Config, norms, placement, decoder order, quantized SwiGLU, sorting | `keras_native/{norm,dense,encoder,decoder,maskformer,input}.py`; `tests/keras_native/{test_maskformer,test_variables,test_init,test_helpers}.py` (`test_init.py` drops its Helen-Linformer checks; R2 tests the new init bounds); new `test_pr8_layers.py`; in `tests/keras_native/porting.py` all other `port_*` functions | R0 | ~500 | sections 5.1-5.5 |
 | R4a hybrid | Quantized SwiGLU (independent, same leaf rule), sorting in `KerasEncoder`/`KerasMaskFormer`, `03_make_config.py` = base + linformer + HGQ settings with solver `scipy`, a `HEPATTN_BRANCH` variable in `01_setup_env.sh` (default `keras-hgq2`) | `src/hepattn/keras/**` (except deletions), `tests/keras/**`, `polaris/**`, `docs/hgq/USAGE.md` | R0 | 200-450 | Hybrid float parity against org torch for the full model (2x measured; PR #8 controls as in section 4); quantized-SwiGLU paired delta; the generated Polaris config builds in float and quantized and runs a forward + matched loss (`probe_polaris_build.py` pattern); torch/hybrid state_dict key and shape check |
 | R4b hybrid core | Masked-Linformer branch of `KerasAttention` reusing `keras_native.masked_linformer`; rewrite `tests/keras/test_linformer_parity.py` | as R4a | R2 merged | 50-200 (450-700 for R4 overall if H0 fails) | H0 (section 4); `tests/keras` green |
-| R5 integrate | Goldens, full-model gates, deletions, docs | `tests/keras_native/golden/**`, `tests/keras_native/{test_mf_golden,test_quantized_golden,test_lane_integration,test_mf_jit,conftest,golden_utils,mf_golden_utils}.py`; deletes `src/hepattn/models/linformer.py`, `keras/linformer.py`, `keras_native/linformer.py` (−127) once `grep` finds no user; `docs/hgq/**` | R1-R4b | ~450 | section 5.8; the native, hybrid and torch suites green with no xfails left; hls4ml code-generation smoke for the new leaf kinds (`KERAS_TORCH_DEVICE=cpu`); critic pass |
+| R5 integrate | Goldens, full-model gates, deletions, docs | `tests/keras_native/golden/**`, `tests/keras_native/{test_mf_golden,test_quantized_golden,test_lane_integration,test_mf_jit,conftest,golden_utils,mf_golden_utils}.py`; deletes `src/hepattn/models/linformer.py`, `keras/linformer.py`, `keras_native/linformer.py` (−127) once `grep` finds no user; `docs/hgq/**` | R1-R4b | ~450 | section 5.8; the native, hybrid and torch suites green with no xfails left (torch `tests/matching`: as R0 gate (c), only lap1015 AttributeErrors unless lap1015 is built); hls4ml code-generation smoke for the new leaf kinds (`KERAS_TORCH_DEVICE=cpu`); critic pass |
 
 Total: about 2,150-2,550 LOC. These are estimates; reference sizes: QML prototype 293 lines, native `linformer.py` 127,
 trial estimate 450-700 for the hybrid. After R5, fast-forward `keras-jax` to `rt/integration`. Push only when the user has
@@ -473,3 +498,23 @@ Risks:
 7. **lap1015 against scipy:** same optimum, ties may differ. Gates compare matched totals, not indices.
 8. **Between R0 and R4 the generated Polaris config is a mixed model.** Do not launch Polaris jobs from keras-jax in that window.
    Running jobs use the `keras-hgq2` clone and are not affected.
+
+## 8. Critic review (2026-10-15)
+
+Checked against org/main `ac0da8f`, masked-linformer `dce2e15`, HGQ2 0.1.9, the trial merge and the prototypes. Log:
+`$S/review_rt/LOG.md`. Reruns that confirm the plan: `probe_chain.py` (8 blockers, k=256), `probe_losses.py` (all numbers in
+sections 1.3 and 3.3), `probe_pr8_hybrid.py` (≤ 7.2e-7; controls 0.407 and 0.135), the scipy non-finite behaviour, the B2-c
+totals (hand calculation), `git merge-tree` (3 conflicts), the 41-failure breakdown in `final.native.log`.
+
+Corrected in this file:
+- R0 gate (c) and the R5 gate: `tests/matching` fails locally on lap1015 alone (106 / 105 failures), not 0.
+- Section 5.5: torch and keras argsort agree only on the valid prefix, because torch breaks `+inf` ties differently.
+- Section 3.2: the empty-selection deviation remains for the regression L1 and `kl_div` losses.
+- Section 5.1: the `q_sa` shape exception, R2 ownership of `build_attention`, and the gate's dependency on R2.
+- Section 1.2: the batch-of-one all-valid path (`maskformer.py:112-113`), which turns the renorm off.
+- Discrimination notes: B1-e, FastLayerNorm parity, the unsort round trip, exact mask booleans.
+- References: `WORKLOG.hgq.md:156`, `KERAS_JAX_PLAN.md:468-471`, `tests/keras_native/porting.py`, the pin rationale.
+
+Not verified here (they rest on the cited investigation logs): hls4ml acceptance of an elementwise same-shape `QEinsum` for
+SwiGLU; the 1e6-entry hls4ml table cap; `pixi lock` solving linux platforms on macOS; the LOC estimates; that the hybrid
+`KerasAttention` can hold the native core under the torch backend (gate H0 exists for this).
