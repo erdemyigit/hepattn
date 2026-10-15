@@ -18,3 +18,4 @@ Each item must be closed (or explicitly re-deferred) in the named stage's log.
 |---|---|---|---|
 | S2 | S3 | Full-model paired delta (plan section 4, S2): layer-0 mask logit, high ~0.30 vs low ~31, separation >= 10x. | Needs the S3 decoder and mask task. S2 applies the criterion per layer ([S2.md](S2.md), deviation 6). |
 | S2 | first Linux/GPU run | Re-measure the golden rows whose S2 tolerance is 0 (bit-exact on macOS arm64 CPU). | 2x a measured 0 is 0 ([S2.md](S2.md), deviation 7). |
+| S2 | S3, S4 | Task-head `Dense` layers start from the hybrid's init: `init="torch"` (nn.Linear U(+-1/sqrt(fan_in)) kernel and bias), with an init test like `tests/keras_native/test_init.py`. | The heads are built in S3/S4; S2 set it for `InputNet` ([S2.md](S2.md), deviation 9). |
