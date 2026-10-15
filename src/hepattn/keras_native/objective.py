@@ -128,9 +128,10 @@ class ObjectClassificationSpec:
         return weights
 
     def cost(self, outputs: dict, targets: dict) -> dict:
-        probs = outputs[self.output_object + "_class_prob"]
+        # PR #3 (a2bc9c7): object_ce_cost softmaxes, so it takes the logits, not *_class_prob
+        logits = outputs[self.output_object + "_logit"]
         target = targets[self.target_object + "_class"]
-        return {name: w * L.object_ce_cost(probs, target) for name, w in self.costs.items()}
+        return {name: w * L.object_ce_cost(logits, target) for name, w in self.costs.items()}
 
     def loss(self, outputs: dict, targets: dict) -> dict:
         logits = outputs[self.output_object + "_logit"]
