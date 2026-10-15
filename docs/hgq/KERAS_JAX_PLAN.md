@@ -36,7 +36,8 @@ Logs: `docs/hgq/port_log/` (one file per stage, plus `merge.md`). Lanes `kn/lane
 | Merge: lane A model outputs train through lane B's matched loss | pass | `test_lane_integration.py`; [merge.md](port_log/merge.md) (3 mutations caught) |
 
 Test runs on the merged tree: [merge.md](port_log/merge.md) (native 350 passed / 1 skipped incl. the 2 merge tests;
-hybrid `tests/keras` 104 passed / 8 skipped, same as S1; `tests/polaris` 3 passed).
+hybrid `tests/keras` 104 passed / 8 skipped, same as S1; `tests/polaris` 3 passed). After the critique
+([critique.md](port_log/critique.md), 3 tests added, 13 new mutations): native 353 passed / 1 skipped.
 
 **Deviations from this plan** (details in the stage logs):
 - G2 is decided at batch 16 fp32, because torch fp32 OOMed at b32 in G1. The G2 torch arms have no optimizer, so b32
@@ -53,15 +54,19 @@ hybrid `tests/keras` 104 passed / 8 skipped, same as S1; `tests/polaris` 3 passe
 **What remains:**
 - Polaris: G2 (`bash polaris/submit.sh 15_g2_forward.pbs`), then G3 (S5) and G4 (S8).
 - S5 train step on top of `test_lane_integration.py`: optimizer, schedule, clipping, accumulation (count host
-  calls in the accumulation path), EBOPs/beta, PeriodicEBOPs, BetaPID; explain the constant 3.2e12 HGQ2 penalty at the
-  test spec (merge.md); raise on a MaskFormer `sorter` / `input_sort_field`; pass the YAML matcher `n_jobs` (16).
+  calls in the accumulation path), EBOPs/beta, PeriodicEBOPs, BetaPID; pass the YAML matcher `n_jobs` (16).
+  The constant 3.2e12 HGQ2 penalty at the `high` test spec (merge.md) is explained in
+  [critique.md](port_log/critique.md): 99.99% of it is the 4 decoder cross-attention softmax exp tables (8.3e11 and
+  7.8e11 each, table f0 = 16), which do not depend on the data. It is not uint32 saturation (the loss is float).
+  `MaskFormer` already raises on `sorter` and on `input_sort_field` (both rows in `test_unsupported_configs_raise`).
 - S6 driver, data, checkpoints, metrics, eval (check real CLIC batches: no target 1 on padded nodes, prefix-contiguous
   `particle_valid`); S7 converter + export (key quantizer variables by leaf name and position, not `var.path`);
   S8 Polaris validation.
-- Minor review items not fixed in the lanes: `LinformerAttention` accepts any keyword (`**_ignored`); the JIT gate's
-  nonzero-gradient check does not reject NaN; the G2 hybrid-07 arm calls `quant_losses()` inside the timed step;
-  no test pins the `>=` mask threshold; G2 does not record `hepattn.__file__`; dense-attention quantized parity is
-  loose (S3.md deviation 12).
+- Minor review items not fixed in the lanes: `LinformerAttention` accepts any keyword (`**_ignored`, as this plan's
+  3.2 row asks); the G2 hybrid-07 arm calls `quant_losses()` inside the timed step (as 07 does); dense-attention
+  quantized parity is loose (S3.md deviation 12). Fixed in the critique ([critique.md](port_log/critique.md)): the
+  JIT gate now rejects NaN gradients, a test pins the `>=` mask threshold, G2 records `hepattn.__file__`, and the
+  `MaskFormer` docstring no longer calls eager `model.losses` equivalent.
 
 ## 0. Decision summary
 

@@ -10,6 +10,7 @@ Setup and test commands: [KERAS_NATIVE.md](../KERAS_NATIVE.md).
 | S2 layers, S3 decoder + MaskFormer (lane A) | [S2.md](S2.md), [S3.md](S3.md) | `kn/lane-a` / `hepattn-kn-a` |
 | S4 costs, losses, matching (lane B) | [S4.md](S4.md) | `kn/lane-b` / `hepattn-kn-b` |
 | Merge of lanes A and B, cross-lane interface test | [merge.md](merge.md) | `keras-jax` / `hepattn-keras-jax` |
+| Completeness critique of S1-S4 after the merge | [critique.md](critique.md) | `keras-jax` / `hepattn-keras-jax` |
 
 ## Gates carried to a later stage
 
@@ -24,3 +25,7 @@ Each item must be closed (or explicitly re-deferred) in the named stage's log.
 | S3 | S5 | EBOPs penalty semantics: use `stateless_call(return_losses=True)` (each layer once). The hybrid's `quant_losses()` counts the task heads twice (e.g. prod 804.9605 vs 804.9105), so S5 penalty checks compare against the per-layer sum; eager `model.losses` counts repeated task calls. | [S3.md](S3.md) deviation 9. |
 | S3 | S5, S8 | WRAP datalane overflow (HGQ2 default) makes native-vs-hybrid quantized outputs chaotic at production bitwidths; parity at prod is gated before the mask feedback only. Training-level comparisons (G4) must not expect forward parity. | [S3.md](S3.md) deviation 8. |
 | S3 | S4, S6 | Regression proxies depend on top-k tie-breaking for quantized incidences (torch CPU, torch CUDA and JAX differ). | [S3.md](S3.md) deviation 7. |
+| S4 | S5 | Pass `n_jobs=matcher_n_jobs_from_config(...)` (16 for `pflow_hgq.yaml`) to `matched_loss`; the default 1 is about 6.5x slower at B=32. Check `jax_default_matmul_precision` (TF32) for the fp32 costs on the A100. | Train step not in S4 ([S4.md](S4.md) open issues). |
+| S4 | user | Torch `mask_bce` / `mask_dice` average across events at B > 1; S4 keeps it. Change it in both frameworks or keep it. | User decision ([S4.md](S4.md) finding 1). |
+| S4 | S6 | Real CLIC batches: no target 1 at padded nodes (else `mask_bce` is inf), prefix-contiguous `particle_valid`. | Needs real data ([S4.md](S4.md) open issues). |
+| merge | S5 | The `high`-spec HGQ2 penalty (3.2e12) is 99.99% decoder cross-attention softmax exp tables; the penalty gate must be stated per layer, not as one total. | Explained in [critique.md](critique.md). |

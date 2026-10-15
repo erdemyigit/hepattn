@@ -30,6 +30,7 @@ matched_loss(clic_specs())))`.
 Side observation for S5: in the same probe, `sum(stateless_call losses)` at the `QUANT_SPECS["high"]` test spec was
 3216651583488.0 (3.2e12) and the same for all 3 batches. Not investigated here. S5's penalty gate (plan 3.6, uint32 EBOPs
 saturation) must explain it before the penalty is put into a training loss.
+Explained in [critique.md](critique.md): 99.99% of it comes from the 4 decoder cross-attention softmax exp tables.
 
 ## Test runs on the merged tree (before `aa2a7e7`)
 - Native, `.venv-jax`, `KERAS_BACKEND=jax`, `PYTHONPATH=hepattn-keras-jax/src`, `tests/keras_native`:

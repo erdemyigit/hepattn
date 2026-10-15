@@ -4,6 +4,20 @@
 JAX (plan: [KERAS_JAX_PLAN.md](KERAS_JAX_PLAN.md); stage logs: [port_log/](port_log/README.md)).
 No module in it imports torch. `hepattn/keras/` (the hybrid, torch backend) stays the parity oracle.
 
+## Modules (state after the S1-S4 merge)
+
+| Stage | Modules | Tests (`tests/keras_native/`) |
+|---|---|---|
+| S1 | `factory.py` (moved from `hepattn/keras`, re-exported there), `norm.py`, `scaling.py` | `test_import_hygiene.py`, `test_helpers.py`, `test_collection_guard.py` |
+| S2 | `dense.py`, `attention.py`, `linformer.py`, `encoder.py`, `input.py` | `test_float_parity.py`, `test_masked_query.py`, `test_quantized_golden.py`, `test_jit.py`, `test_variables.py`, `test_init.py` |
+| S3 | `tasks.py` (4 task forwards), `decoder.py`, `maskformer.py` (`MaskFormer`, `from_config`) | `test_maskformer.py`, `test_mf_golden.py`, `test_mf_jit.py` |
+| S4 | `losses.py`, `matching.py` (host scipy LSAP via `jax.pure_callback`), `objective.py` (`matched_loss`) | `test_objective_parity.py`, `test_matching.py`, `test_objective_e2e.py` |
+| merge | | `test_lane_integration.py` (S3 model through the S4 loss, one jitted step) |
+
+`matching.py` imports `jax` directly (`jax.pure_callback`, `jax.lax.stop_gradient`), so the matched loss
+(`objective.match_layers` / `matched_loss`) runs only on the JAX backend. Every other module uses `keras.ops` only.
+Not started: S5 train step, S6 driver/data/checkpoints/eval, S7 converter/export (plan section 4).
+
 ## Environment (macOS arm64, CPU)
 
 `.venv-jax` (Python 3.12.0) at the worktree root runs the native code and, in the same process, the
