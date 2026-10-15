@@ -1,0 +1,6 @@
+Using CPython 3.12.0 interpreter at: /usr/local/bin/python3.12
+warning: The workspace `requires-python` value (`==3.12`) contains an exact match without a patch version. When omitted, the patch version is implicitly `0` (e.g., `==3.12.0`). Did you mean `==3.12.*`?
+Resolved 227 packages in 1.11s
+error: The lockfile at `uv.lock` needs to be updated, but `--check` was provided.
+
+hint: To update the lockfile, run `uv lock`.

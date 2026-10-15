@@ -54,12 +54,16 @@ for venv in .venv-jax ../hepattn/.venv; do
 done
 ```
 
-On Polaris (one time; the login node needs outbound HTTPS to GitHub):
+On Polaris (one time; the login node needs outbound HTTPS to GitHub). **Valid only after `keras-jax` is
+fast-forwarded to `rt/integration` and pushed (after R5).** Until then `origin/keras-jax` (`197ede2`) has neither
+the org merge nor masked-linformer in `uv.lock`: `uv sync --locked` succeeds there but gives an env that cannot import
+org attention. To test earlier, push a branch that contains the merge and set `KJ_BRANCH` to it.
 
 ```bash
 # Hybrid env: a separate clone, because running jobs use $WORK_ROOT/hepattn on keras-hgq2 (01_setup_env.sh:38-41).
 # uv.lock pins masked-linformer; --locked fails loudly if uv.lock is stale.
-git clone --branch keras-jax https://github.com/erdemyigit/hepattn.git $WORK_ROOT/hepattn-kj && cd $WORK_ROOT/hepattn-kj && \
+KJ_BRANCH=${KJ_BRANCH:-keras-jax}
+git clone --branch $KJ_BRANCH https://github.com/erdemyigit/hepattn.git $WORK_ROOT/hepattn-kj && cd $WORK_ROOT/hepattn-kj && \
   uv venv --python 3.12.0 .venv && uv sync --group hgq --no-install-project --locked --python .venv/bin/python
 # .venv-jax: the KERAS_JAX_PLAN.md section 5.1 line, then masked-linformer (needed only for the torch parity tests):
 uv pip install --python .venv-jax/bin/python --no-deps \
