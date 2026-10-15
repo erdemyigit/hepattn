@@ -1,7 +1,49 @@
-name: Test
-on: [push, pull_request]
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  # Lint rules live once in .pre-commit-config.yaml; this job only runs them.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v5
+      - name: pre-commit hooks (prek)
+        run: uvx prek@0.4.5 run --all-files --show-diff-on-failure
+        env:
+          SKIP: no-commit-to-branch
+
+  type_check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Pixi
+        uses: prefix-dev/setup-pixi@v0.9.1
+        with:
+          pixi-version: v0.50.2
+          cache: true
+          locked: true
+          environments: ci
+
+      - name: Run ty
+        run: |
+          pixi run -e ci ty check src/hepattn/models
+          pixi run -e ci ty check src/hepattn/utils
+          pixi run -e ci ty check src/hepattn/flex
+          pixi run -e ci ty check tests/
+
   unit:
     runs-on: ubuntu-latest
     steps:
@@ -74,3 +116,14 @@ jobs:
           flags: integration
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # The single check the main-branch ruleset requires for the merge queue.
+  ci-required:
+    name: ci required
+    if: always()
+    needs: [lint, type_check, unit, integration]
+    runs-on: ubuntu-latest
+    steps:
+      - name: every needed job succeeded
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: exit 1

@@ -49,7 +49,10 @@ def load_convert_h5(filepath):
         pflow_indicator = pflow_class < 1 if "Bin" in filepath else (pflow_class < 5) & (np.abs(pflow_ptetaphi[..., 1]) < 4)
 
         neutral_mask = (pflow_class < 5) & (pflow_class > 2)
-        pflow_ptetaphi[neutral_mask][..., 0] = pflow_data[neutral_mask][..., 0] / np.cosh(pflow_ptetaphi[neutral_mask][..., 1])
+        # Single advanced-index assignment writes in place; the previous chained form
+        # `arr[mask][..., 0] = ...` assigned to a temporary copy and was a silent no-op,
+        # leaving neutral pt as the direct regression instead of the calorimeter E/cosh(eta).
+        pflow_ptetaphi[neutral_mask, 0] = pflow_data[neutral_mask, 0] / np.cosh(pflow_ptetaphi[neutral_mask, 1])
 
         event_number = f["events"]["event_number"][:]
 

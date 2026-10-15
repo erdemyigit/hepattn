@@ -1,4 +1,5 @@
 from functools import partial
+from typing import Literal
 
 import torch
 from torch import Tensor, nn
@@ -16,6 +17,13 @@ SCORE_MODS = {
     "relative_position": relative_position,
     "relative_position_wrapped": relative_position_wrapped,
 }
+
+
+def sort_index(value: Tensor, valid: Tensor | None) -> Tensor:
+    """Argsort of value with the padding last, so the real tokens stay contiguous in sorted order."""
+    if valid is not None:
+        value = value.masked_fill(~valid, float("inf"))
+    return torch.argsort(value, dim=-1)
 
 
 class DropPath(nn.Module):
@@ -102,6 +110,7 @@ class EncoderLayer(nn.Module):
         value_residual: bool = False,
         qkv_norm: bool = False,
         hybrid_norm: bool = False,
+        dense_norm_placement: Literal["hybridnorm", "legacy"] = "hybridnorm",
         dense_kwargs: dict | None = None,
         attn_kwargs: dict | None = None,
     ) -> None:
@@ -116,6 +125,7 @@ class EncoderLayer(nn.Module):
             value_residual: Whether to apply a residual connection from initial values.
             qkv_norm: Whether to use qkv norm in the Attention layer
             hybrid_norm: Whether to use HybridNorm from 2503.04598.
+            dense_norm_placement: Where the dense layer's norm goes, see get_hybrid_norm_config.
             dense_kwargs: Keyword arguments for dense layer.
             attn_kwargs: Keyword arguments for self-attention layer.
         """
@@ -124,7 +134,7 @@ class EncoderLayer(nn.Module):
         attn_kwargs = attn_kwargs or {}
         dense_kwargs = dense_kwargs or {}
 
-        attn_norm, dense_post_norm, qkv_norm = get_hybrid_norm_config(norm, depth, hybrid_norm, qkv_norm)
+        attn_norm, dense_post_norm, qkv_norm = get_hybrid_norm_config(norm, depth, hybrid_norm, qkv_norm, dense_norm_placement)
 
         # handle value residual
         attn_kwargs["value_residual"] = value_residual
@@ -214,7 +224,7 @@ class Encoder(nn.Module):
         # We don't need to use the stable sort assuming that the sort values are unique
         x_sort_idx = None
         if x_sort_value is not None:
-            x_sort_idx = torch.argsort(x_sort_value, dim=-1)
+            x_sort_idx = sort_index(x_sort_value, kv_mask)
             x = torch.gather(x, dim=-2, index=x_sort_idx.unsqueeze(-1).expand_as(x))
 
             # Also permute the kv mask if we have one

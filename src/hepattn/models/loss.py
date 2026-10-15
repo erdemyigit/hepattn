@@ -63,29 +63,34 @@ def object_ce_cost(pred_logits, targets):
 def mask_dice_loss(pred_logits, targets, object_valid_mask=None, input_pad_mask=None, sample_weight=None):  # noqa: ARG001
     """Compute the DICE loss for binary masks.
 
+    Each object's mask is padded with its own event's constituent mask, and the per-object
+    DICE is averaged over the valid objects.
+
+    The batch axis is kept until the final reduction on purpose: indexing the valid objects
+    out first collapses [batch, object, constituent] to rank 2, and the [batch, 1, constituent]
+    padding mask then broadcasts against the flattened object axis instead of the batch, which
+    pairs every object with every event's padding and normalises it by a batch average rather
+    than by its own event.
+
     Args:
         pred_logits: [batch_size, num_objects, num_inputs] - predicted logits for binary masks
         targets: [batch_size, num_objects, num_inputs] - ground truth binary masks
         object_valid_mask: [batch_size, num_objects] - mask indicating valid target objects
-        input_pad_mask: [batch_size, num_inputs] - mask indicating valid inputs (not used by DICE)
+        input_pad_mask: [batch_size, num_inputs] - mask indicating valid inputs
         sample_weight: Not used by DICE!
 
     Returns:
         loss: Scalar tensor representing the DICE loss
     """
-    # only condition on  valid object masks
-    if object_valid_mask is not None:
-        pred_logits = pred_logits[object_valid_mask]
-        targets = targets[object_valid_mask]
-
     probs = pred_logits.sigmoid()
     if input_pad_mask is not None:
-        probs = probs * input_pad_mask.unsqueeze(1)
+        probs = probs * input_pad_mask.unsqueeze(1).to(probs.dtype)
 
     numerator = 2 * (probs * targets).sum(-1)
     denominator = probs.sum(-1) + targets.sum(-1)
-    loss = 1 - (numerator + 1) / (denominator + 1)
-    return loss.mean()
+    per_object = 1 - (numerator + 1) / (denominator + 1)
+
+    return _mean_over_valid_objects(per_object, object_valid_mask)
 
 
 def mask_dice_cost(pred_logits, targets, input_pad_mask=None, sample_weight=None):
@@ -129,11 +134,20 @@ def mask_iou_cost(pred_logits, targets, input_pad_mask=None, eps=1e-6):
 
 
 def mask_focal_loss(pred_logits, targets, gamma=2.0, object_valid_mask=None, input_pad_mask=None, sample_weight=None):
-    """Compute the focal loss for binary classification.
+    """Compute the focal loss for binary masks.
+
+    Each object's loss is averaged over the valid constituents of its own event, and the result
+    is averaged over the valid objects, so every object contributes equally.
+
+    The batch axis is kept until the final reduction on purpose: indexing the valid objects
+    out first collapses [batch, object, constituent] to rank 2, and the [batch, 1, constituent]
+    padding mask then broadcasts against the flattened object axis instead of the batch, which
+    pairs every object with every event's padding and normalises it by a batch average rather
+    than by its own event.
 
     Args:
-        pred_logits: [batch_size, num_objects] - predicted logits for binary classification
-        targets: [batch_size, num_objects] - ground truth class labels
+        pred_logits: [batch_size, num_objects, num_inputs] - predicted logits for binary masks
+        targets: [batch_size, num_objects, num_inputs] - ground truth binary masks
         gamma: Focusing parameter for the focal loss
         object_valid_mask: [batch_size, num_objects] - mask indicating valid target objects
         input_pad_mask: [batch_size, num_inputs] - mask indicating valid inputs
@@ -142,29 +156,19 @@ def mask_focal_loss(pred_logits, targets, gamma=2.0, object_valid_mask=None, inp
     Returns:
         loss: Scalar tensor representing the focal loss
     """
-    if object_valid_mask is not None:
-        pred_logits = pred_logits[object_valid_mask]
-        targets = targets[object_valid_mask]
-        sample_weight = sample_weight[object_valid_mask] if sample_weight is not None else None
-
     pred = pred_logits.sigmoid()
     ce_loss = F.binary_cross_entropy_with_logits(pred_logits, targets.type_as(pred_logits), weight=sample_weight, reduction="none")
-
-    # Apply input padding mask
-    if input_pad_mask is not None:
-        ce_loss = ce_loss * input_pad_mask.unsqueeze(1)
-        pred = pred * input_pad_mask.unsqueeze(1)
-
     p_t = pred * targets + (1 - pred) * (1 - targets)
     loss = ce_loss * ((1 - p_t) ** gamma)
 
-    # Normalise by valid elements such that each mask contributes equally
     if input_pad_mask is not None:
-        valid_counts = input_pad_mask.sum(-1, keepdim=True)
-        loss = loss.sum(-1) / valid_counts.clamp_min(1.0)
-        return loss.mean()
+        # Normalise by valid elements such that each mask contributes equally
+        valid_counts = input_pad_mask.sum(-1, keepdim=True).to(loss.dtype)
+        per_object = (loss * input_pad_mask.unsqueeze(1).to(loss.dtype)).sum(-1) / valid_counts.clamp_min(1.0)
+    else:
+        per_object = loss.mean(-1)
 
-    return loss.mean(-1).mean()
+    return _mean_over_valid_objects(per_object, object_valid_mask)
 
 
 def mask_focal_cost(pred_logits, targets, gamma=2.0, input_pad_mask=None, sample_weight=None):
@@ -195,11 +199,28 @@ def mask_focal_cost(pred_logits, targets, gamma=2.0, input_pad_mask=None, sample
         return torch.einsum("bnc,bmc->bnm", focal_pos, targets) + torch.einsum("bnc,bmc->bnm", focal_neg, (1 - targets))
 
 
+def _mean_over_valid_objects(per_object, object_valid_mask):
+    """Average a [batch_size, num_objects] quantity over the valid objects only."""
+    if object_valid_mask is None:
+        return per_object.mean()
+    weight = object_valid_mask.to(per_object.dtype)
+    return (per_object * weight).sum() / weight.sum().clamp_min(1.0)
+
+
 def mask_bce_loss(pred_logits, targets, object_valid_mask=None, input_pad_mask=None, sample_weight=None):
     """Compute the binary cross-entropy loss for binary masks.
 
+    Each object's loss is averaged over the valid constituents of its own event, and the result
+    is averaged over the valid objects, so every object contributes equally.
+
+    The batch axis is kept until the final reduction on purpose: indexing the valid objects
+    out first collapses [batch, object, constituent] to rank 2, and the [batch, 1, constituent]
+    padding mask then broadcasts against the flattened object axis instead of the batch, which
+    pairs every object with every event's padding and normalises it by a batch average rather
+    than by its own event.
+
     Args:
-        pred_logits: [batch_size, num_objects, num_inputs] - predicted logits for binary
+        pred_logits: [batch_size, num_objects, num_inputs] - predicted logits for binary masks
         targets: [batch_size, num_objects, num_inputs] - ground truth binary masks
         object_valid_mask: [batch_size, num_objects] - mask indicating valid target objects
         input_pad_mask: [batch_size, num_inputs] - mask indicating valid inputs
@@ -208,24 +229,16 @@ def mask_bce_loss(pred_logits, targets, object_valid_mask=None, input_pad_mask=N
     Returns:
         loss: Scalar tensor representing the binary cross-entropy loss
     """
-    if object_valid_mask is not None:
-        pred_logits = pred_logits[object_valid_mask]
-        targets = targets[object_valid_mask]
-        sample_weight = sample_weight[object_valid_mask] if sample_weight is not None else None
-
     loss = F.binary_cross_entropy_with_logits(pred_logits, targets, weight=sample_weight, reduction="none")
 
-    # Apply input padding mask
     if input_pad_mask is not None:
-        loss = loss * input_pad_mask.unsqueeze(1)
+        # Normalise by valid elements such that each mask contributes equally
+        valid_counts = input_pad_mask.sum(-1, keepdim=True).to(loss.dtype)
+        per_object = (loss * input_pad_mask.unsqueeze(1).to(loss.dtype)).sum(-1) / valid_counts.clamp_min(1.0)
+    else:
+        per_object = loss.mean(-1)
 
-    # Normalise by valid elements such that each mask contributes equally
-    if input_pad_mask is not None:
-        valid_counts = input_pad_mask.sum(-1, keepdim=True)
-        loss = loss.sum(-1) / valid_counts.clamp_min(1.0)
-        return loss.mean()
-
-    return loss.mean(-1).mean()
+    return _mean_over_valid_objects(per_object, object_valid_mask)
 
 
 def mask_bce_cost(pred_logits, targets, input_pad_mask=None, sample_weight=None):
@@ -273,6 +286,20 @@ def kl_div_cost(pred_logits, true, eps=1e-8):
 def mask_kl_div_loss(pred_logits, targets, object_valid_mask=None, input_pad_mask=None, sample_weight=None, eps=1e-8):  # noqa: ARG001
     """KL divergence loss for hit-object assignment (recommend using energy_fractions as input).
 
+    Each object is masked and normalised with its own event's constituent mask, and the result
+    is averaged over the valid objects.
+
+    The batch axis is kept until the final reduction on purpose: indexing the valid objects
+    out first collapses [batch, object, constituent] to rank 2, and the [batch, 1, constituent]
+    padding mask then broadcasts against the flattened object axis instead of the batch, which
+    pairs every object with every event's padding and normalises it by a batch average rather
+    than by its own event.
+
+    Because the invalid object slots are only weighted out at the end, their all-zero target
+    rows are still renormalised here; the ``clamp_min`` on that normaliser turns the 0/0 they
+    would produce (a NaN that survives a zero weight) into 0. Any valid object has a positive
+    target sum, so the clamp never changes its value.
+
     Args:
         pred_logits: [batch_size, num_objects, num_inputs] - predicted logits
         targets: [batch_size, num_objects, num_inputs] - ground truth
@@ -284,25 +311,24 @@ def mask_kl_div_loss(pred_logits, targets, object_valid_mask=None, input_pad_mas
     Returns:
         loss: KL loss
     """
-    if object_valid_mask is not None:
-        pred_logits = pred_logits[object_valid_mask]
-        targets = targets[object_valid_mask]
-
     if input_pad_mask is not None:
-        pred_logits = pred_logits.masked_fill(~input_pad_mask.unsqueeze(1), float("-inf"))
-        targets = targets * input_pad_mask.unsqueeze(1)
-        # Renormalise to keep targets sums to 1 for each object
-        targets = targets / targets.sum(-1, keepdim=True) + eps
+        pad = input_pad_mask.unsqueeze(1)
+        pred_logits = pred_logits.masked_fill(~pad, float("-inf"))
+        targets = targets * pad.to(targets.dtype)
+        # Renormalise to keep targets summing to 1 for each object
+        targets = targets / targets.sum(-1, keepdim=True).clamp_min(eps) + eps
 
     pred_probs = torch.softmax(pred_logits, dim=-1)
     loss = -targets * torch.log(pred_probs + eps)
 
-    # Apply input padding mask such that each mask contributes equally
     if input_pad_mask is not None:
-        valid_counts = input_pad_mask.sum(-1, keepdim=True)
-        loss = loss.sum(-1) / (valid_counts + eps)
-        return loss.mean()
-    return loss.mean(-1).mean()
+        # Apply input padding mask such that each mask contributes equally
+        valid_counts = input_pad_mask.sum(-1, keepdim=True).to(loss.dtype)
+        per_object = (loss * pad.to(loss.dtype)).sum(-1) / (valid_counts + eps)
+    else:
+        per_object = loss.mean(-1)
+
+    return _mean_over_valid_objects(per_object, object_valid_mask)
 
 
 def mask_kl_div_cost(pred_logits, targets, input_pad_mask=None, sample_weight=None, eps=1e-8):  # noqa: ARG001

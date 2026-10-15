@@ -6,6 +6,7 @@ import numpy as np
 import torch
 from jsonargparse.typing import register_type
 from lightning.pytorch.cli import LightningCLI
+from lightning.pytorch.loggers import CSVLogger
 
 torch._dynamo.config.capture_scalar_outputs = True  # noqa: SLF001
 
@@ -114,6 +115,19 @@ class CLI(LightningCLI):
 
     def after_instantiate_classes(self) -> None:
         sc = self.config[self.subcommand]
+
+        # Persist train + val losses to disk as a metrics.csv, independent of the Comet
+        # logger. On clusters without internet / COMET_API_KEY the CometLogger runs offline
+        # and its archive is not reliably persisted, so train-loss was being lost (only
+        # val-loss survived, via the checkpoint filenames). A CSVLogger writes every logged
+        # metric (train/loss, val/loss, per-layer/per-task breakdowns) per step+epoch to
+        # <run_dir>/csv_metrics/metrics.csv. Added post-instantiation so it does not disturb
+        # the single-logger `name`/`offline_directory` wiring set up in the parser.
+        # Only when logging is enabled: `logger: false` must stay logger-free, and the
+        # CSVLogger must not become loggers[0], which Checkpoint assumes is Comet-like.
+        if self.subcommand == "fit" and self.trainer.loggers and not any(type(lg).__name__ == "CSVLogger" for lg in self.trainer.loggers):
+            csv_logger = CSVLogger(save_dir=self.trainer.default_root_dir, name="csv_metrics", version="")
+            self.trainer.loggers = [*self.trainer.loggers, csv_logger]
 
         if self.subcommand == "test":
             ckpt_path = sc["ckpt_path"] or get_best_epoch(Path(sc["config"][0].relative))

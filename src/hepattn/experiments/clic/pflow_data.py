@@ -783,7 +783,10 @@ class PflowDataModule(L.LightningDataModule):
                 **self.kwargs,
             )
 
-        if stage == "fit":
+        # "validate" too, so `main.py validate` can re-score an existing checkpoint on the
+        # val set (Lightning passes stage="validate" there, and without this val_dset is
+        # never built).
+        if stage in {"fit", "validate"}:
             self.val_dset = CLICDataset(
                 filepath=self.valid_path,
                 num_events=self.num_val,
@@ -794,6 +797,8 @@ class PflowDataModule(L.LightningDataModule):
         # Only print train/val dataset details when actually training
         if stage == "fit" and self.trainer.is_global_zero:
             print(f"Created training dataset with {len(self.train_dset):,} events")
+            print(f"Created validation dataset with {len(self.val_dset):,} events")
+        elif stage == "validate" and self.trainer.is_global_zero:
             print(f"Created validation dataset with {len(self.val_dset):,} events")
 
         if stage == "test":

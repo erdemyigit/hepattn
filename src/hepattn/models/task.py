@@ -244,8 +244,11 @@ class ObjectClassificationTask(Task):
             output = outputs[self.output_object + "_logit"].detach().to(torch.float32)
             target = targets[self.target_object + "_valid"].to(torch.float32)
         else:
-            # Multi-class detection case
-            output = outputs[self.output_object + "_class_prob"].detach().to(torch.float32)
+            # Multi-class detection case. object_ce_cost softmaxes internally, so it must be
+            # fed LOGITS. forward() stores softmax(logits) under the _class_prob key, so
+            # reading that key here applied a second softmax and compressed the dynamic range
+            # of this term by ~4.5x relative to the mask costs it is summed with.
+            output = outputs[self.logits_key].detach().to(torch.float32)
             target = targets[self.target_object + "_class"].long()
 
         for cost_fn, cost_weight in self.costs.items():

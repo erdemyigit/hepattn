@@ -55,17 +55,25 @@ def load_pred_hgpflow(pred_path, threshold=0.5, num_events=None, return_proxy=Fa
 def load_pred_mpflow(pred_path, threshold=0.5, num_events=None, return_proxy=False):
     tree = uproot.open(pred_path)["event_tree"]
 
-    vars_to_load = ["pred_ind", "proxy_pt", "proxy_eta", "proxy_phi", "mpflow_pt", "mpflow_eta", "mpflow_phi", "mpflow_class"]
+    # Support both old flat TTree format (mpflow_pt) and new RNTuple format (mpflow.pt)
+    keys = set(tree.keys())
+    sep = "_" if "mpflow_pt" in keys else "."
 
-    mask = np.array([np.array(x > threshold) for x in tree["pred_ind"].array(library="np", entry_stop=num_events)])  # , dtype=object)
+    def _read(name):
+        key = name.replace("_", sep, 1)
+        return ak.to_numpy(tree[key].array(entry_stop=num_events, library="ak"))
+
+    pred_ind = ak.to_numpy(tree["pred_ind"].array(entry_stop=num_events, library="ak")).astype(bool)
+    mask = pred_ind > threshold
+
+    vars_to_load = ["proxy_pt", "proxy_eta", "proxy_phi", "mpflow_pt", "mpflow_eta", "mpflow_phi", "mpflow_class"]
 
     mpflow_dict = {}
     for var in tqdm(vars_to_load, desc="Loading mpflow predictions...", total=len(vars_to_load)):
         new_var = var.replace("mpflow_", "")
-        mpflow_dict[new_var] = np.array(
-            [x[m] for x, m in zip(tree[var].array(library="np", entry_stop=num_events), mask, strict=False)], dtype=object
-        )
-    mpflow_dict["event_number"] = tree["event_number"].array(library="np", entry_stop=num_events).astype(int)  # - 643_00 # HACK
+        arr = _read(var)
+        mpflow_dict[new_var] = np.array([x[m] for x, m in zip(arr, mask, strict=False)], dtype=object)
+    mpflow_dict["event_number"] = ak.to_numpy(tree["event_number"].array(entry_stop=num_events, library="ak")).astype(int)
 
     # compute mass and energy
     for k in ["mass", "e", "charge"]:

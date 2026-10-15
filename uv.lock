@@ -775,6 +775,7 @@ dependencies = [
     { name = "lapx" },
     { name = "lightning" },
     { name = "lion-pytorch" },
+    { name = "masked-linformer" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "onnx" },
@@ -830,6 +831,7 @@ requires-dist = [
     { name = "lapx", specifier = ">=0.9.2,<0.10" },
     { name = "lightning", specifier = "==2.5.2" },
     { name = "lion-pytorch", specifier = ">=0.2.3,<0.3" },
+    { name = "masked-linformer", url = "https://github.com/compressed-maskformer-reco/masked-linformer/archive/dce2e151e9d25cefd85454b3dffd5c83ec217097.tar.gz" },
     { name = "matplotlib", specifier = ">=3.10.6,<4" },
     { name = "numpy", specifier = ">=2.1.2,<3" },
     { name = "onnx", specifier = ">=1.19.0,<2" },
@@ -1520,6 +1522,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/aa/5b/bec5aa9bbbb2c946ca2733ef9c4ca91c91b6a24580193e891b5f7dbe8e1e/markupsafe-3.0.3-cp312-cp312-win_amd64.whl", hash = "sha256:26a5784ded40c9e318cfc2bdb30fe164bdb8665ded9cd64d500a34fb42067b1c", size = 15105, upload-time = "2025-09-27T18:36:39.701Z" },
     { url = "https://files.pythonhosted.org/packages/e5/f1/216fc1bbfd74011693a4fd837e7026152e89c4bcf3e77b6692fba9923123/markupsafe-3.0.3-cp312-cp312-win_arm64.whl", hash = "sha256:35add3b638a5d900e807944a078b51922212fb3dedb01633a8defc4b01a3c85f", size = 13906, upload-time = "2025-09-27T18:36:40.689Z" },
 ]
+
+[[package]]
+name = "masked-linformer"
+version = "0.1.0"
+source = { url = "https://github.com/compressed-maskformer-reco/masked-linformer/archive/dce2e151e9d25cefd85454b3dffd5c83ec217097.tar.gz" }
+dependencies = [
+    { name = "torch" },
+]
+sdist = { hash = "sha256:7a815412a643c8374dd33796bd714e24f55fa1008a976baa660aac4f90b05fe4" }
+
+[package.metadata]
+requires-dist = [{ name = "torch", specifier = ">=2.0" }]
 
 [[package]]
 name = "matplotlib"

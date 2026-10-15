@@ -12,6 +12,12 @@ repos:
       - id: yamllint
         args: ["-d", "{extends: relaxed, rules: {line-length: disable}}"]
 
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.8.1
+    hooks:
+      - id: nbstripout
+        args: [--keep-id]
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:

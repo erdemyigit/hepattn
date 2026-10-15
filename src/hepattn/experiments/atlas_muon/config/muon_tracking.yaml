@@ -158,7 +158,6 @@ model:
                       - r
                       - theta
                       - phi
-                    dim: *dim
                     sym_fields:
                       - phi
 

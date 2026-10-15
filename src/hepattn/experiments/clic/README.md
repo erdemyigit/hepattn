@@ -6,15 +6,29 @@ We present GLOW, a transformer-based particle flow model that combines incidence
 
 ## Running the Model
 
-First, set up your environment (see the top level [README.md](../../../../README.md) for more details):
+Everything for CLIC runs in the `clic` pixi environment. It contains the whole GPU
+training stack (torch with CUDA, flash-attention, the compiled `lap1015` solver) plus
+the analysis packages (`fastjet`, `energyflow`, `vector`, `pathos`), so training,
+evaluation and the performance notebooks all use this one environment. There is no
+need to install the `default` environment described in the top level
+[README.md](../../../../README.md); that one serves the other experiments and lacks the
+analysis packages.
+
+Clone the repository, enter the pixi container, and install and activate the `clic`
+environment:
 
 ```shell
 git clone git@github.com:samvanstroud/hepattn.git
 cd hepattn
 apptainer shell --nv --bind /share/ pixi.sif
+pixi install -e clic --locked
 pixi shell -e clic
-cd hepattn/src/hepattn/experiments/clic/
+cd src/hepattn/experiments/clic/
 ```
+
+The install takes a while the first time (the environment is about 15 GB). The
+container is only needed on systems whose `libc` is older than 2.28; see the top level
+README for the pull command and the alternatives.
 
 If you don't already have the CLIC data, download it from one of the locations listed in the [CLIC Data](#clic-data) section below.
 

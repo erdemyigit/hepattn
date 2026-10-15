@@ -39,6 +39,7 @@ dependencies = [
     "atlas-ftag-tools>=0.2.9,<0.3",
     "ty>=0.0.1a20,<0.0.1a21",
     "lapx>=0.9.2,<0.10",
+    "masked-linformer @ https://github.com/compressed-maskformer-reco/masked-linformer/archive/dce2e151e9d25cefd85454b3dffd5c83ec217097.tar.gz",
 ]
 
 [dependency-groups]
@@ -54,11 +55,24 @@ hgq = [
 fa2 = ["flash-attn @ https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.4.17/flash_attn-2.8.3%2Bcu128torch2.9-cp312-cp312-linux_x86_64.whl"]
 
 [build-system]
-requires = ["scikit-build-core>=0.3.3", "pybind11"]
+requires = ["scikit-build-core>=0.10", "pybind11"]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
 wheel.packages = ["src/hepattn", "src/lap1015/src/lap1015"]
+
+# Pixi passes its own `pixi-conda-environment` config-setting to the build backend. Under
+# scikit-build-core's default strict checking that is a hard error, so `pixi install` on a
+# fresh clone fails outright and the compiled `lap1015` extension never gets built.
+# Downgrading unknown config-settings to a warning is the documented escape hatch.
+strict-config = false
+
+# NOT set here, deliberately: `editable.rebuild = true`. It sounds like the fix for an editable
+# install whose compiled .so has gone stale against main.cpp, but the import hook it installs
+# runs under the *system* cmake, which cannot find the Python development headers -- so every
+# `import lap1015` fails outright, which is strictly worse than a stale .so. Rebuild explicitly
+# with `pixi reinstall hepattn`, and let
+# tests/matching/test_solvers.py::test_lap1015_releases_gil catch a stale build.
 
 
 [tool.pixi.workspace]
@@ -90,7 +104,7 @@ platforms = ["linux-64"]
 default = { features = ["gpu", "fa2"] }
 isambard = { features = ["gpu"] }
 cpu = { features = ["cpu"] }
-clic = { features = ["clic"] }
+clic = { features = ["gpu", "fa2", "clic"] }
 tide = { features = ["tide"] }
 hgq = { features = ["cpu", "hgq"] }
 # NOTE: pixi.lock must be regenerated on linux after manifest changes —
