@@ -113,6 +113,8 @@ def test_ebops_loss_term(case):
     assert len(betas) == 1, betas
     beta = betas.pop()
     penalty = float(q_train) - float(q_eval)
+    assert beta > 0, f"{case}: EBOPs beta is {beta}; the penalty checks below would be vacuous"
+    assert penalty > 0, f"{case}: train-mode losses carry no EBOPs penalty ({penalty})"
     if UINT32_MAX in stored:
         assert CASES[case]["kind"] in {"attn", "enc", "lin"}, "only softmax exp tables should saturate"
         assert penalty > beta * sum(stored)

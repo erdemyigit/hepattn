@@ -171,6 +171,20 @@ def test_cross_attention_parity_with_attn_mask():
     assert_parity("attention.cross_masked", "dim64h8+qkvnorm", ref, got, atol=1e-6, rtol=1e-5)
 
 
+def test_cross_attention_parity_distinct_values():
+    """Values projected from ``v``, not ``k`` (the other tests pass v == k, which hides a k/v mix-up)."""
+    tattn, nattn = attention_pair(q_len=12, kv_len=20, qkv_norm=True, norm="LayerNorm")
+    q, _ = make_padded_batch(2, 12, DIM, seed=30)
+    k, kv_mask = make_padded_batch(2, 20, DIM, seed=31)
+    v, _ = make_padded_batch(2, 20, DIM, seed=32)
+    with torch.no_grad():
+        ref = tattn(t(q), k=t(k), v=t(v), kv_mask=t(kv_mask))
+    got = nattn(q, k=k, v=v, kv_mask=kv_mask)
+    assert_parity("attention.cross_distinct_v", "dim64h8+qkvnorm", ref, got, atol=1e-6, rtol=1e-5)
+    # control: v != k matters at O(1), so values taken from k would fail the parity above
+    assert np.abs(n(nattn(q, k=k, v=k, kv_mask=kv_mask)) - n(got)).max() > 1e-2
+
+
 def test_mask_polarity_probe():
     """Perturbing masked-out keys must not change valid outputs (catches an inverted mask)."""
     _, nattn = attention_pair(q_len=16)
@@ -264,6 +278,19 @@ def test_linformer_cross_attention_parity_masked():
         ref = tlin(t(q), k=t(kv), v=t(kv), attn_mask=t(attn_mask))
     got = nlin(q, k=kv, v=kv, attn_mask=attn_mask)
     assert_parity("linformer.cross_masked", "dim256h16k256", ref, got, atol=2e-5, rtol=2e-4)
+
+
+def test_linformer_cross_attention_parity_distinct_values():
+    """Values projected from ``v``, not ``k`` (the other tests pass v == k, which hides a k/v mix-up)."""
+    tlin, nlin = linformer_pair(10, 150, 168)
+    q, _ = make_padded_batch(2, 150, L_DIM, seed=33)
+    k, _ = make_padded_batch(2, 168, L_DIM, seed=34)
+    v, _ = make_padded_batch(2, 168, L_DIM, seed=35)
+    with torch.no_grad():
+        ref = tlin(t(q), k=t(k), v=t(v))
+    got = nlin(q, k=k, v=v)
+    assert_parity("linformer.cross_distinct_v", "dim256h16k256", ref, got, atol=2e-5, rtol=2e-4)
+    assert np.abs(n(nlin(q, k=k, v=k)) - n(got)).max() > 1e-2  # control: v != k matters
 
 
 def test_linformer_ignores_dense_attention_options():
