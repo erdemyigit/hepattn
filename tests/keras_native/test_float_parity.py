@@ -370,7 +370,10 @@ def test_clic_shaped_encoder_parity():
 
 
 def test_clic_linformer_encoder_parity():
-    """pflow_hgq.yaml encoder: linformer (k=256, seq 256), 6 layers, dim 256, 160 nodes + 8 registers."""
+    """pflow_hgq.yaml encoder: linformer (k=256, seq 256), 6 layers, dim 256, 160 nodes + 8 registers.
+
+    PARITY.md has no row for it; it is held at the ``encoder.clic_shaped`` row (same encoder and shape).
+    """
     cfg = {
         "num_layers": 6,
         "dim": 256,
@@ -385,7 +388,7 @@ def test_clic_linformer_encoder_parity():
     with torch.no_grad():
         ref = tenc(t(x), kv_mask=t(kv_mask))
     got = nenc(x, kv_mask=kv_mask)
-    assert_parity("encoder.clic_linformer", "6L_dim256_h16_lin256_8reg", ref, got, valid_mask=kv_mask, atol=2e-5, rtol=2e-4)
+    assert_parity("encoder.clic_linformer", "6L_dim256_h16_lin256_8reg", ref, got, valid_mask=kv_mask, atol=2e-6, rtol=2e-5)
 
 
 @pytest.mark.parametrize(
