@@ -84,12 +84,14 @@ def test_kv_sort_idx_is_accepted_and_ignored(kind):
     Exact equality fails for ANY use of the index: a gather of k and v without the mask (R0 review: max 0.63)
     and also a consistent gather of k, v and ``kv_mask``, which is mathematically equal for dense attention and
     differs only by summation order (max 3.6e-7). So this pins "ignored", not "gathered correctly"; R2 replaces
-    it when it implements the gather.
+    it when it implements the gather. For ``linformer`` only the signature is pinned: Helen's layer discards
+    ``kv_mask``.
     """
     layer = make_layer(kind, "float")
     q, _ = make_padded_batch(2, 150, DIM, seed=9)
     kv, kv_mask = make_padded_batch(2, 168, DIM, seed=10)
-    assert not kv_mask.all(), "fixture needs padding, or ignoring the mask and ignoring the index look the same"
+    if kind == "dense":  # native LinformerAttention drops kv_mask, so the padding matters only here
+        assert not kv_mask.all(), "fixture needs padding, or ignoring the mask and ignoring the index look the same"
     sort_idx = np.stack([np.random.default_rng(s).permutation(168) for s in (1, 2)])
     assert (sort_idx != np.arange(168)).any(), "a non-identity index is needed"
     ref = keras.ops.convert_to_numpy(layer(q, k=kv, v=kv, kv_mask=kv_mask))

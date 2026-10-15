@@ -54,6 +54,10 @@ for venv in .venv-jax ../hepattn/.venv; do
 done
 ```
 
+The two local venvs were installed from the equivalent `git+https://github.com/compressed-maskformer-reco/masked-linformer@dce2e151…`
+URL, so `keras_native_env.txt` records that form; the command above freezes as the archive URL. Both give the same
+`masked_linformer.py` (`cmp` against the `dce2e15` checkout, R0 review).
+
 On Polaris (one time; the login node needs outbound HTTPS to GitHub). **Valid only after `keras-jax` is
 fast-forwarded to `rt/integration` and pushed (after R5).** Until then `origin/keras-jax` (`197ede2`) has neither
 the org merge nor masked-linformer in `uv.lock`: `uv sync --locked` succeeds there but gives an env that cannot import
