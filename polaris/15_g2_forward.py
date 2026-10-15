@@ -299,9 +299,12 @@ def run_one(args) -> None:
     import keras
     import numpy as np
 
+    import hepattn
+
     keras.utils.set_random_seed(args.seed)
     inputs, targets = load_batch(args)
     info = {"mode": args.mode, "batch": args.batch, "precision": "fp32", "ebops_every_step": True, "keras": keras.__version__}
+    info["hepattn_file"] = hepattn.__file__  # which tree's code ran (PYTHONPATH vs an installed hepattn)
     info.update({k: getattr(args, k) for k in ("dim", "heads", "enc_layers", "dec_layers", "linformer_k", "nodes", "queries")})
     info["data"] = args.data_file or "dummy"
     step, extra = make_jax_step(args, inputs) if backend == "jax" else make_torch_step(args, inputs, targets)

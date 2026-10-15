@@ -2,8 +2,9 @@
 
 ``call(inputs, training)`` returns the torch output tree: ``{"encoder": {}, "layer_{i}": {task: {...}, "attn_mask"},
 "final": {task: {...}}}``. The HGQ2 regularisation terms are not walked from a module tree (hybrid
-``quant_losses``): under JAX they come back from ``model.stateless_call(..., return_losses=True)``, and eagerly from
-``model.losses`` after a training-mode call.
+``quant_losses``): they come back from ``model.stateless_call(..., return_losses=True)``, which counts each layer
+once. Eager ``model.losses`` after ``model(x, training=True)`` is NOT the same: it keeps the terms of every call of a
+repeated task layer (421 vs 411 terms, docs/hgq/port_log/S3.md deviation 9), so use it for nothing quantitative.
 
 Construction: ``MaskFormer(input_nets=[...], encoder={...}, decoder={...}, tasks=[...], dim=..., quant=...)`` with
 plain dicts, or ``from_config`` with the ``model:`` section of a hepattn YAML (``pflow_hgq.yaml``, or the generated
