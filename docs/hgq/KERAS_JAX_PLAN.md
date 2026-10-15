@@ -1,13 +1,67 @@
 # Plan: move HGQ2 QAT training to pure Keras on JAX
 
-Status: proposal. It waits for one Polaris measurement (section 5.1) before any port work starts.
-Date: 2026-10-14. Branch: `keras-jax` (local only, not pushed), worktree `hepattn-keras-jax`.
+Status: G1 GO; S1-S4 merged into `keras-jax` on 2026-10-15 (see "Status" below). Originally a proposal that waited for G1.
+Date: 2026-10-14. Branch: `keras-jax` (pushed only up to `197ede2`), worktree `hepattn-keras-jax`.
 Scope: only the CLIC HGQ2 quantization-aware training, evaluation and export path. The other
 experiments (`atlas_muon`, `trackml`, `tide`, ...) and the float torch model stay on torch and Lightning.
 
 All paths are relative to the `hepattn-keras-jax` worktree unless they start with `SP/`, which means
 `.venv-jax/lib/python3.12/site-packages/` (keras 3.15.0, hgq2 0.1.9, jax 0.11.2, scipy 1.18.1).
 Commits are on `keras-jax` (`git log main..keras-jax`).
+
+## Status (2026-10-15, after the S1-S4 merge)
+
+Logs: `docs/hgq/port_log/` (one file per stage, plus `merge.md`). Lanes `kn/lane-a` (`hepattn-kn-a`) and
+`kn/lane-b` (`hepattn-kn-b`) are merged into `keras-jax` and kept. `origin/keras-jax` is at `197ede2` (pre-S1); nothing after it is pushed.
+
+**Stages done:** S0 (G1 = GO), S1, S2, S3 (except G2), S4. **Not started:** S5, S6, S7, S8.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| G1 (Polaris, job 7746577, A100-40GB, fp32, spike graph) | GO (user) | `hepattn/WORKLOG.hgq.md`: torch loop 617 ms vs jax jit 69 ms at b16 (8.9x); torch OOM at b32. The "fixed share <= 25%" criterion failed as written (53% at b32) |
+| S1 import hygiene; hybrid suite through the factory shim | pass | [S1.md](port_log/S1.md) Gates |
+| S2 float parity at PARITY.md tolerances | pass | `test_float_parity.py`; [S2.md](port_log/S2.md) Gates (max 2.38e-6 on `encoder.clic_shaped`, through the rtol term) |
+| S2 fully-masked-query key independence + positive and leaky-softmax controls | pass | `test_masked_query.py`; S2.md |
+| S2 quantized golden parity at 2x measured; paired delta | pass | `test_quantized_golden.py`; 7/9 cases >= 10x, the 2 single-Linformer cases match the hybrid's own 5.3x/8.5x (S2.md deviation 6). Full model: 0.30144 vs 31.0916, 103x ([S3.md](port_log/S3.md)) |
+| S2 per-layer JIT (1 compile, nonzero grads, EBOPs > 0) | pass | `test_jit.py`; S2.md |
+| S3 `maskformer.e2e` float at 5e-5/1e-4 | pass | `test_maskformer.py`; S3.md |
+| S3 per-layer mask booleans exactly equal | pass for float; quantized rows held at 2x measured flips | S3.md deviation 11 |
+| S3 all-False-row restore + restore-off control; 1 compile over 3 batches; unsupported configs raise | pass | `test_maskformer.py`, `test_mf_jit.py`; S3.md |
+| S3 quantized MaskFormer vs hybrid golden files | pass, prod (WRAP) rows gated at layer 0 only | `test_mf_golden.py`; S3.md deviations 8, 12 |
+| **G2** (Polaris) jitted native fwd+bwd <= 0.5x hybrid bare-loop step | **not run** | `polaris/15_g2_forward.pbs`, validated on CPU only. Decided at b16 fp32, not the plan's b32 (S3.md "G2 decision rule") |
+| S4 loss rows 1e-4/1e-3 incl. `mask_bce` inf | pass | `test_objective_e2e.py`; [S4.md](port_log/S4.md) Gates (max abs 1.9e-6) |
+| S4 task costs to 1e-5; matched total over 100 batches (rel 1e-6) | pass | `test_objective_parity.py`, `test_matching.py` (rel 0.0; identity control worse 100/100) |
+| S4 `pure_callback` gradients = fixed-index reference, 1 callback per step | pass | `test_matching.py` (grad diff 0.0; identity control 0.649) |
+| S4 NaN targets, weighted CE, permutation | pass | S4.md Gates. The NaN control needs a squared residual (deviation 2) |
+| Merge: lane A model outputs train through lane B's matched loss | pass | `test_lane_integration.py`; [merge.md](port_log/merge.md) (3 mutations caught) |
+
+Test runs on the merged tree: [merge.md](port_log/merge.md) (native 350 passed / 1 skipped incl. the 2 merge tests;
+hybrid `tests/keras` 104 passed / 8 skipped, same as S1; `tests/polaris` 3 passed).
+
+**Deviations from this plan** (details in the stage logs):
+- G2 is decided at batch 16 fp32, because torch fp32 OOMed at b32 in G1. The G2 torch arms have no optimizer, so b32
+  may fit; a reviewer suggests also trying it (S3 review).
+- Torch `mask_bce` / `mask_dice` average across events at B > 1 (probably an upstream bug). S4 keeps the torch
+  semantics. **This needs a user decision** (S4.md deviation 1).
+- The plan's claim that `where(mask, |out - nan|, 0)` gives NaN gradients is false in JAX for l1 (S4.md deviation 2).
+- The hybrid's `quant_losses()` counts the task heads twice; S5 must use `stateless_call(return_losses=True)`
+  (S3.md deviation 9). Eager `model.losses` over-counts too.
+- Exact mask equality only in float; prod WRAP rows gated before the first mask feedback (S3.md deviations 8, 11).
+- Golden rows measured at 0 have tolerance 0; re-measure on the first Linux/GPU run (S2.md deviation 7, S3.md).
+- The single Linformer layer separates high/low only 5.3x/8.5x in the hybrid itself (S2.md deviation 6).
+
+**What remains:**
+- Polaris: G2 (`bash polaris/submit.sh 15_g2_forward.pbs`), then G3 (S5) and G4 (S8).
+- S5 train step on top of `test_lane_integration.py`: optimizer, schedule, clipping, accumulation (count host
+  calls in the accumulation path), EBOPs/beta, PeriodicEBOPs, BetaPID; explain the constant 3.2e12 HGQ2 penalty at the
+  test spec (merge.md); raise on a MaskFormer `sorter` / `input_sort_field`; pass the YAML matcher `n_jobs` (16).
+- S6 driver, data, checkpoints, metrics, eval (check real CLIC batches: no target 1 on padded nodes, prefix-contiguous
+  `particle_valid`); S7 converter + export (key quantizer variables by leaf name and position, not `var.path`);
+  S8 Polaris validation.
+- Minor review items not fixed in the lanes: `LinformerAttention` accepts any keyword (`**_ignored`); the JIT gate's
+  nonzero-gradient check does not reject NaN; the G2 hybrid-07 arm calls `quant_losses()` inside the timed step;
+  no test pins the `>=` mask threshold; G2 does not record `hepattn.__file__`; dense-attention quantized parity is
+  loose (S3.md deviation 12).
 
 ## 0. Decision summary
 
