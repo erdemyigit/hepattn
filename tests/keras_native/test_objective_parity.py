@@ -1,5 +1,8 @@
 """S4: keras_native costs and losses equal the torch task.cost / task.loss on random CLIC-shaped tensors."""
 
+import logging
+import warnings
+
 import keras
 import numpy as np
 import pytest
@@ -14,6 +17,7 @@ from hepattn.models.matcher import Matcher
 from .objective_utils import (
     CLIC_YAML,
     LAYER_TASKS,
+    ORG_BASE_YAML,
     assert_close_same_nonfinite,
     max_errors,
     random_outputs,
@@ -24,13 +28,6 @@ from .objective_utils import (
 
 COST_TOL = {"atol": 1e-5, "rtol": 1e-5}  # plan gate S4: each task cost to 1e-5
 LOSS_TOL = {"atol": 1e-4, "rtol": 1e-3}  # PARITY.md maskformer.loss rows
-
-# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict, so the marker fails once the named lane fixes the test.
-R1_XFAIL = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="R1: pins the objective semantics before org a4263c1 (per-event mask loss) and PR #3 (logits in the class cost)",
-)
 
 
 @pytest.fixture(scope="module")
@@ -48,7 +45,6 @@ def _np(x):
 
 
 @pytest.mark.parametrize(("seed", "batch"), [(0, 1), (1, 3), (2, 4)])
-@R1_XFAIL
 def test_task_costs_equal_torch(tasks, specs, seed, batch):
     rng = np.random.default_rng(seed)
     targets = random_targets(rng, batch)
@@ -70,14 +66,17 @@ def test_task_costs_equal_torch(tasks, specs, seed, batch):
 
 
 @pytest.mark.parametrize("padded_node_targets", [False, True], ids=["real-like", "dummy-like"])
-@R1_XFAIL
 def test_task_losses_equal_torch(tasks, specs, padded_node_targets):
-    """Losses on unpermuted outputs (the matching is tested separately). ``dummy-like`` reproduces mask_bce = inf."""
+    """Losses on unpermuted outputs (the matching is tested separately).
+
+    ``dummy-like`` puts target 1 at padded nodes. Before org ``a4263c1`` that made torch and native mask_bce
+    inf at the 3 mask layers; with the per-event normalisation every loss is finite.
+    """
     rng = np.random.default_rng(10)
     targets = random_targets(rng, 4, padded_node_targets=padded_node_targets)
     outputs = random_outputs(rng, targets["node_valid"])
     targets_t = to_torch(targets)
-    n_inf = 0
+    n_compared = 0
     for layer, layer_out in outputs.items():
         for name in LAYER_TASKS[layer]:
             ref = tasks[name].loss(to_torch(layer_out[name]), targets_t)
@@ -85,26 +84,31 @@ def test_task_losses_equal_torch(tasks, specs, padded_node_targets):
             assert set(ref) == set(got)
             for key in ref:
                 r, g = ref[key].numpy(), _np(got[key])
-                if not np.isfinite(r):
-                    assert np.array_equal(r, g), f"non-finite {layer}.{name}.{key}: torch {r} vs native {g}"
-                    n_inf += 1
-                    continue
+                assert np.isfinite(r), f"{layer}.{name}.{key}: torch {r}"
                 abs_err, rel_err = assert_close_same_nonfinite(r, g, **LOSS_TOL, what=f"{layer}.{name}.{key}")
                 print(f"loss {layer}.{name}.{key} ({'dummy' if padded_node_targets else 'real'}): {r:.6f}, abs {abs_err:.2e}, rel {rel_err:.2e}")
-    # mask_bce is inf at the 3 mask layers exactly when padded nodes carry target 1 (PARITY.md semantics)
-    assert n_inf == (3 if padded_node_targets else 0)
+                n_compared += 1
+    assert n_compared == 10
 
 
 def _per_event_mask_bce(logits, targets, object_valid, pad):
-    """The per-event formula of plan 3.3 (sum over valid nodes / count, mean over valid objects). NOT torch."""
+    """The a4263c1 formula in numpy: sum over the event's valid nodes / count, mean over the valid objects."""
     bce = L.bce_with_logits(logits, targets)
     per = np.sum(np.where(pad[:, None, :], np.asarray(bce), 0.0), -1) / np.maximum(pad.sum(-1), 1)[:, None]
     return per[object_valid].mean()
 
 
-@R1_XFAIL
-def test_mask_losses_use_the_torch_cross_event_broadcast():
-    """Torch weights each valid object by EVERY event's node mask. A per-event port would differ (control)."""
+def _cross_event_mask_bce(logits, targets, object_valid, pad):
+    """The formula before a4263c1: every valid object weighted by EVERY event's node mask (control)."""
+    bce = np.asarray(L.bce_with_logits(logits, targets), dtype=np.float64)
+    term = np.einsum("qpn,bn->bqp", bce, pad.astype(np.float64)) / np.maximum(pad.sum(-1), 1)[:, None, None]
+    return term[np.broadcast_to(object_valid[None], term.shape)].mean()
+
+
+def test_mask_losses_are_normalised_per_event():
+    """Torch (a4263c1) and native reduce each object over its own event's nodes. The old cross-event
+    formula differs (control); with one event both formulas agree, so the difference is the coupling only.
+    """
     rng = np.random.default_rng(3)
     batch = 3
     targets = random_targets(rng, batch, padded_node_targets=False)
@@ -121,12 +125,14 @@ def test_mask_losses_use_the_torch_cross_event_broadcast():
     np.testing.assert_allclose(bce_n, bce_t, rtol=1e-6)
     np.testing.assert_allclose(dice_n, dice_t, rtol=1e-6)
 
-    per_event = _per_event_mask_bce(logits, tgt, ov, pad)
-    assert abs(per_event - bce_t) > 1e-3 * abs(bce_t), (per_event, bce_t)
-    # with one event, both formulas agree: the difference above is the cross-event term only
+    np.testing.assert_allclose(_per_event_mask_bce(logits, tgt, ov, pad), bce_t, rtol=1e-6)
+    cross = _cross_event_mask_bce(logits, tgt, ov, pad)
+    print(f"mask_bce: torch {bce_t:.6f}, native {bce_n:.6f}, cross-event formula {cross:.6f}")
+    assert abs(cross - bce_t) > 1e-3 * abs(bce_t), (cross, bce_t)  # measured 1.3e-3 relative; tolerance above 1e-6
     one = slice(0, 1)
-    bce_t1 = torch_loss.mask_bce_loss(args_t[0][one], args_t[1][one], kw_t["object_valid_mask"][one], kw_t["input_pad_mask"][one]).item()
-    np.testing.assert_allclose(_per_event_mask_bce(logits[one], tgt[one], ov[one], pad[one]), bce_t1, rtol=1e-6)
+    np.testing.assert_allclose(
+        _cross_event_mask_bce(logits[one], tgt[one], ov[one], pad[one]), float(L.mask_bce_loss(logits[one], tgt[one], ov[one], pad[one])), rtol=1e-6
+    )
 
 
 def test_weighted_ce_equals_torch_and_is_not_the_plain_mean():
@@ -151,19 +157,25 @@ def test_weighted_ce_equals_torch_and_is_not_the_plain_mean():
     assert abs(got - wrong_norm) > 0.1 * got, (got, wrong_norm)
 
 
-@R1_XFAIL
-def test_no_valid_object_gives_zero_where_torch_gives_nan(specs):
-    """Documented deviation: torch's mean over an empty selection is NaN; the static-shape port returns 0."""
+def test_no_valid_object_gives_zero_and_torch_nan_only_for_kl_div_and_l1(specs):
+    """No valid object: the mask losses give 0 in torch too (``clamp_min(1)``, a4263c1). The documented
+    deviation remains for kl_div and the regression l1: torch's mean over an empty selection is NaN, the
+    static-shape port returns 0.
+    """
     rng = np.random.default_rng(5)
     targets = random_targets(rng, 2, padded_node_targets=False, n_particles=[0, 0])
     outputs = random_outputs(rng, targets["node_valid"])["final"]
     tasks = {t.name: t for t in torch_tasks()}
     targets_t = to_torch(targets)
-    for name in ("mask", "incidence", "regression"):
+    torch_nan = {"mask": False, "incidence": True, "regression": True}
+    for name, nan in torch_nan.items():
         ref = tasks[name].loss(to_torch(outputs[name]), targets_t)
         got = specs[name].loss(outputs[name], targets)
+        assert set(ref) == set(got)
         for key in ref:
-            assert np.isnan(ref[key].item()), f"{name}.{key}: torch {ref[key].item()}"
+            assert np.isnan(ref[key].item()) == nan, f"{name}.{key}: torch {ref[key].item()}"
+            if not nan:
+                assert ref[key].item() == 0.0, f"{name}.{key}: torch {ref[key].item()}"
             assert float(got[key]) == 0.0, f"{name}.{key}: native {float(got[key])}"
 
 
@@ -177,8 +189,9 @@ def test_costs_and_losses_are_float32_for_bfloat16_outputs(specs):
             assert keras.backend.standardize_dtype(value.dtype) == "float32", name
 
 
-def test_specs_from_pflow_hgq_yaml_equal_clic_specs_and_torch_tasks(tasks):
-    cfg = yaml.safe_load(CLIC_YAML.read_text())
+@pytest.mark.parametrize("config", [CLIC_YAML, ORG_BASE_YAML], ids=["pflow_hgq", "org_base"])
+def test_specs_from_yaml_equal_clic_specs_and_torch_tasks(tasks, config):
+    cfg = yaml.safe_load(config.read_text())
     entries = cfg["model"]["model"]["init_args"]["tasks"]["init_args"]["modules"]
     parsed = O.specs_from_config(entries)
     assert parsed == O.clic_specs()
@@ -271,7 +284,6 @@ def test_total_loss_is_the_sum_of_every_leaf():
     assert float(O.total_loss(leaves)) == 127.0
 
 
-@R1_XFAIL
 def test_mask_bce_sample_weight_with_non_unit_null_weight_equals_torch():
     """null_weight != 1 weights the BCE of target-0 entries; CLIC uses 1.0, so this path needs its own case."""
     rng = np.random.default_rng(11)
@@ -344,25 +356,51 @@ def test_non_empty_encoder_outputs_raise(specs):
             O.model_losses({**outputs, "encoder": encoder}, targets, spec_list)
 
 
-def test_matcher_n_jobs_from_pflow_hgq_yaml_equals_torch_matcher():
-    cfg = yaml.safe_load(CLIC_YAML.read_text())
-    entry = cfg["model"]["model"]["init_args"]["matcher"]
-    torch_matcher = Matcher(**entry["init_args"])
+def _torch_matcher(**init_args) -> Matcher:
+    with warnings.catch_warnings():  # lap1015 here is not the GIL-releasing build (R0.md); the warning is expected
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return Matcher(**init_args)
+
+
+def test_matcher_n_jobs_from_org_base_yaml_equals_torch_matcher(caplog):
+    """org/main base.yaml: lap1015_late, 16 threads. Native solves it with scipy and logs that once."""
+    entry = yaml.safe_load(ORG_BASE_YAML.read_text())["model"]["model"]["init_args"]["matcher"]
+    assert entry["init_args"]["default_solver"] == "lap1015_late"
+    torch_matcher = _torch_matcher(**entry["init_args"])
     assert torch_matcher.parallel_solver
-    assert O.matcher_n_jobs_from_config(entry) == torch_matcher.n_jobs == 16
+    O._log_lap1015_fallback.cache_clear()  # noqa: SLF001
+    with caplog.at_level(logging.WARNING, logger=O.__name__):
+        assert O.matcher_n_jobs_from_config(entry) == torch_matcher.n_jobs == 16
+        assert O.matcher_n_jobs_from_config(entry) == 16
+    assert [r.getMessage().split(":")[0] for r in caplog.records] == ["keras_native solves default_solver=lap1015_late with scipy"]
+    scipy_entry = {**entry, "init_args": {**entry["init_args"], "default_solver": "scipy"}}
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=O.__name__):
+        assert O.matcher_n_jobs_from_config(scipy_entry) == 16
+    assert not caplog.records
     base = {"class_path": entry["class_path"], "init_args": {"adaptive_solver": False}}
     assert O.matcher_n_jobs_from_config(base) == 1  # torch default parallel_solver=False
-    assert O.matcher_n_jobs_from_config({**base, "init_args": {"adaptive_solver": False, "parallel_solver": True}}) == Matcher().n_jobs
+    parallel = {**base, "init_args": {"adaptive_solver": False, "parallel_solver": True}}
+    assert O.matcher_n_jobs_from_config(parallel) == Matcher().n_jobs
+    explicit_off = {**base, "init_args": {"adaptive_solver": False, "device_solver": None}}
+    assert O.matcher_n_jobs_from_config(explicit_off) == 1
+
+
+_MATCHER = "hepattn.models.matcher.Matcher"
 
 
 @pytest.mark.parametrize(
     "entry",
     [
-        {"class_path": "hepattn.models.matcher.Matcher", "init_args": {}},  # torch default adaptive_solver=True
-        {"class_path": "hepattn.models.matcher.Matcher", "init_args": {"adaptive_solver": False, "default_solver": "lap1015"}},
-        {"class_path": "hepattn.models.matcher.Matcher", "init_args": {"adaptive_solver": False, "unknown": 1}},
+        {"class_path": _MATCHER, "init_args": {}},  # torch default adaptive_solver=True
+        {"class_path": _MATCHER, "init_args": {"adaptive_solver": False, "default_solver": "lap1015"}},
+        {"class_path": _MATCHER, "init_args": {"adaptive_solver": False, "default_solver": "lap1015_early"}},
+        {"class_path": _MATCHER, "init_args": {"adaptive_solver": True, "default_solver": "lap1015_late"}},
+        {"class_path": _MATCHER, "init_args": {"adaptive_solver": False, "device_solver": "jv"}},
+        {"class_path": _MATCHER, "init_args": {"adaptive_solver": False, "unknown": 1}},
         {"class_path": "my.OtherMatcher", "init_args": {"adaptive_solver": False}},
     ],
+    ids=["adaptive-default", "lap1015", "lap1015_early", "lap1015_late-adaptive", "device-jv", "unknown-option", "other-class"],
 )
 def test_unsupported_matcher_configs_raise(entry):
     with pytest.raises(NotImplementedError):

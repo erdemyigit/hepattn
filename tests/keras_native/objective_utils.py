@@ -15,6 +15,8 @@ C = 6  # 5 classes + null
 FIELDS = ("e", "pt", "eta", "sinphi", "cosphi")
 SCALE_DICT = str(REPO_ROOT / "src/hepattn/experiments/clic/configs/clic_var_transform.yaml")
 CLIC_YAML = REPO_ROOT / "src/hepattn/experiments/clic/configs/pflow_hgq.yaml"
+# org/main ac0da8f model config: the target of the retarget (matcher lap1015_late, same task losses/costs).
+ORG_BASE_YAML = REPO_ROOT / "src/hepattn/experiments/clic/configs/base.yaml"
 # Which tasks the decoder emits at each layer (pflow_hgq.yaml flags, 2 decoder layers here).
 LAYER_TASKS = {
     "layer_0": ("mask",),
@@ -94,7 +96,7 @@ def _softmax(x, axis):
 
 def random_targets(rng: np.random.Generator, batch: int, *, padded_node_targets: bool = True, n_particles=None) -> dict:
     """CLIC-like targets. ``padded_node_targets`` keeps random True mask targets at padded nodes (like the
-    dummy dataset, which makes torch mask_bce inf); False zeroes them (like real data).
+    dummy dataset; before org a4263c1 this made torch mask_bce inf); False zeroes them (like real data).
     """
     n_nodes = rng.integers(50, N, size=batch)
     n_part = rng.integers(10, P, size=batch) if n_particles is None else np.asarray(n_particles)

@@ -27,13 +27,6 @@ from hepattn.models.wrapper import ModelWrapper
 
 from .objective_utils import SCALE_DICT, assert_close_same_nonfinite, flatten, to_numpy, torch_tasks
 
-# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict, so the marker fails once the named lane fixes the test.
-R1_XFAIL = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="R1: pins the objective semantics before org a4263c1 (per-event mask loss) and PR #3 (logits in the class cost)",
-)
-
 DIM = 32
 COST_TOL = {"atol": 1e-5, "rtol": 1e-5}
 LOSS_TOL = {"atol": 1e-4, "rtol": 1e-3}
@@ -99,7 +92,6 @@ def _real_like(targets: dict) -> dict:
 
 
 @pytest.mark.parametrize(("seed", "num_events", "real_like"), [(31, 2, False), (32, 4, False), (33, 4, True)])
-@R1_XFAIL
 def test_maskformer_loss_equals_torch(seed, num_events, real_like):
     model = _torch_model(seed)
     inputs, targets_t = _dummy_batch(num_events, seed)
@@ -126,24 +118,15 @@ def test_maskformer_loss_equals_torch(seed, num_events, real_like):
     flat_n = {k: np.asarray(v) for k, v in flatten(losses).items()}
     assert set(flat_t) == set(flat_n), set(flat_t) ^ set(flat_n)
     assert len(flat_t) == 10, sorted(flat_t)
-    n_inf = 0
     for key in sorted(flat_t):
         r, g = flat_t[key], flat_n[key]
-        if not np.isfinite(r):
-            assert np.array_equal(r, g), f"non-finite {key}: torch {r} vs native {g}"
-            n_inf += 1
-            print(f"[seed {seed}, B={num_events}] loss {key}: torch {r}, native {g}")
-            continue
+        # dummy data puts target 1 at padded nodes; since org a4263c1 mask_bce stays finite there (was inf)
+        assert np.isfinite(r), f"{key}: torch {r}"
         abs_err, rel_err = assert_close_same_nonfinite(r, g, **LOSS_TOL, what=key)
         print(f"[seed {seed}, B={num_events}] loss {key}: {float(r):.6f}, max abs {abs_err:.2e}, max rel {rel_err:.2e}")
-    # dummy data puts target 1 at padded nodes: torch mask_bce is inf at all 3 mask layers; real-like data is finite
-    assert n_inf == (0 if real_like else 3)
-    assert np.isfinite(float(total)) == real_like
     # the scalar S5 trains on equals the hybrid's total (ModelWrapper.aggregate_losses, logging stubbed out)
     total_t = ModelWrapper.aggregate_losses(SimpleNamespace(model=model, log=lambda *_a, **_k: None), losses_t, stage="train").numpy()
-    if real_like:
-        abs_err, rel_err = assert_close_same_nonfinite(total_t, np.asarray(total), **LOSS_TOL, what="total loss")
-        print(f"[seed {seed}, B={num_events}] total loss {float(total_t):.6f}: max abs {abs_err:.2e}, max rel {rel_err:.2e}")
-    else:
-        assert np.array_equal(total_t, np.asarray(total)), (total_t, total)
+    assert np.isfinite(total_t)
+    abs_err, rel_err = assert_close_same_nonfinite(total_t, np.asarray(total), **LOSS_TOL, what="total loss")
+    print(f"[seed {seed}, B={num_events}] total loss {float(total_t):.6f}: max abs {abs_err:.2e}, max rel {rel_err:.2e}")
     assert all(np.asarray(v).shape == (num_events, 150) for v in idx.values())
