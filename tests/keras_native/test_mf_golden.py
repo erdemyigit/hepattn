@@ -48,8 +48,14 @@ def gated(mode: str, key: str) -> bool:
 
 ROWS = [(case, mode, False) for case in MF_CASES for mode in MF_MODES] + [(case, mode, True) for case, mode in sorted(JIT_ROWS)]
 
+# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict, so the marker fails once the named lane fixes the test.
+R5_XFAIL = pytest.mark.xfail(
+    strict=True, reason="R5: the torch reference passes linformer_proj_dim, which org Attention rejects since PR #9; goldens regenerate in R5"
+)
+XROWS = [pytest.param(*row, marks=R5_XFAIL) if row[0] == "mf_lin" else row for row in ROWS]
 
-@pytest.mark.parametrize(("case", "mode", "jit"), ROWS, ids=[f"{c}-{m}{'-jit' if j else ''}" for c, m, j in ROWS])
+
+@pytest.mark.parametrize(("case", "mode", "jit"), XROWS, ids=[f"{c}-{m}{'-jit' if j else ''}" for c, m, j in ROWS])
 def test_mf_golden_parity(case, mode, jit):
     """Eager rows, and the jitted forward (as training runs it) for JIT_ROWS: XLA may fuse ops, so its rounding at
     quantizer boundaries can differ from eager (measured: high layer-0 mask logits up to 1.2e-3 apart, jit vs eager).
@@ -72,7 +78,7 @@ def test_mf_golden_parity(case, mode, jit):
 
 
 @pytest.mark.parametrize("mode", [m for m in MF_MODES if m != "float"])
-@pytest.mark.parametrize("case", list(MF_CASES))
+@pytest.mark.parametrize("case", [pytest.param(c, marks=R5_XFAIL) if c == "mf_lin" else c for c in MF_CASES])
 def test_quant_losses_match_hybrid_per_layer(case, mode):
     """The training-mode HGQ2 loss terms of ``stateless_call(return_losses=True)`` are the hybrid's, each layer once.
 

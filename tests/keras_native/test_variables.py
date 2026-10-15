@@ -20,6 +20,11 @@ from hepattn.keras_native.factory import LayerFactory
 from .golden.cases import CASES, modes, torch_module
 from .golden_utils import build_native, golden_meta, inputs_of, load_golden, native_leaves, native_module
 
+# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict, so the marker fails once the named lane fixes the test.
+R3_XFAIL = pytest.mark.xfail(
+    strict=True, reason="R3 (after the R2 merge): the torch reference passes linformer_proj_dim, which org Attention rejects since PR #9"
+)
+
 PARAMETER_NAMES = {"kernel", "bias"}  # leaf variables that are torch parameters; the rest is quantizer state
 # torch parameters without a gradient: the unused qkv norms / value-residual mix of a Linformer Attention wrapper
 DEAD_IN_TORCH = {"enc_lin": re.compile(r"layers\.\d+\.attn\.fn\.(q_norm|k_norm|v_norm|value_residual_mix\.0)\.(weight|bias)")}
@@ -62,7 +67,10 @@ def split_variables(module):
     return leaf_ids, non_leaf
 
 
-@pytest.mark.parametrize(("case", "mode"), [(case, mode) for case in CASES for mode in modes(case)])
+@pytest.mark.parametrize(
+    ("case", "mode"),
+    [pytest.param(case, mode, marks=R3_XFAIL) if case == "enc_lin" else (case, mode) for case in CASES for mode in modes(case)],
+)
 def test_trainable_variables_match_torch_and_hybrid(case, mode):
     golden = load_golden(case)
     module, _ = build_native(case, mode, golden)

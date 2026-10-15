@@ -31,6 +31,12 @@ MEASURED = {
 TOLERANCE = {key: 2.0 * value for key, value in MEASURED.items()}
 CASE_MODES = [(case, mode) for case in CASES for mode in modes(case)]
 
+# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict, so the marker fails once the named lane fixes the test.
+R5_XFAIL = pytest.mark.xfail(
+    strict=True, reason="R5: the torch reference passes linformer_proj_dim, which org Attention rejects since PR #9; goldens regenerate in R5"
+)
+XCASE_MODES = [pytest.param(*row, marks=R5_XFAIL) if row[0] == "enc_lin" else row for row in CASE_MODES]
+
 # The hybrid oracle itself separates a single Linformer layer by only 5.3x (self) / 8.5x (cross): at 4-bit the
 # attention output underflows and the layer returns its quantized bias, so the low delta is capped by the
 # output scale (~0.3). There the native ratio must equal the hybrid's instead (see docs/hgq/port_log/S2.md).
@@ -72,7 +78,7 @@ def test_init_quantizer_state_matches_hybrid(case, mode):
     assert not mismatches, f"{case}/{mode}: initial quantizer state differs from the hybrid at {mismatches[:8]}"
 
 
-@pytest.mark.parametrize(("case", "mode"), CASE_MODES)
+@pytest.mark.parametrize(("case", "mode"), XCASE_MODES)
 def test_golden_parity(native_outputs, case, mode):
     golden, outs = native_outputs(case)
     ref = golden[f"{mode}::out"].astype(np.float64)
@@ -83,7 +89,7 @@ def test_golden_parity(native_outputs, case, mode):
     assert diff.max() <= tol, f"{case}/{mode}: max |native - hybrid| = {diff.max():.3e} > {tol:.3e} ({int((diff > tol).sum())} elements)"
 
 
-@pytest.mark.parametrize("case", list(CASES))
+@pytest.mark.parametrize("case", [pytest.param(c, marks=R5_XFAIL) if c == "enc_lin" else c for c in CASES])
 def test_paired_delta(native_outputs, case):
     """High bitwidth stays near float, low bitwidth does not: separation >= 10x (inert quantizers give 0 / 0).
 

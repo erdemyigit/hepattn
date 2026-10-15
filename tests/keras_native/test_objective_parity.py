@@ -25,6 +25,11 @@ from .objective_utils import (
 COST_TOL = {"atol": 1e-5, "rtol": 1e-5}  # plan gate S4: each task cost to 1e-5
 LOSS_TOL = {"atol": 1e-4, "rtol": 1e-3}  # PARITY.md maskformer.loss rows
 
+# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict, so the marker fails once the named lane fixes the test.
+R1_XFAIL = pytest.mark.xfail(
+    strict=True, reason="R1: pins the objective semantics before org a4263c1 (per-event mask loss) and PR #3 (logits in the class cost)"
+)
+
 
 @pytest.fixture(scope="module")
 def tasks():
@@ -41,6 +46,7 @@ def _np(x):
 
 
 @pytest.mark.parametrize(("seed", "batch"), [(0, 1), (1, 3), (2, 4)])
+@R1_XFAIL
 def test_task_costs_equal_torch(tasks, specs, seed, batch):
     rng = np.random.default_rng(seed)
     targets = random_targets(rng, batch)
@@ -62,6 +68,7 @@ def test_task_costs_equal_torch(tasks, specs, seed, batch):
 
 
 @pytest.mark.parametrize("padded_node_targets", [False, True], ids=["real-like", "dummy-like"])
+@R1_XFAIL
 def test_task_losses_equal_torch(tasks, specs, padded_node_targets):
     """Losses on unpermuted outputs (the matching is tested separately). ``dummy-like`` reproduces mask_bce = inf."""
     rng = np.random.default_rng(10)
@@ -93,6 +100,7 @@ def _per_event_mask_bce(logits, targets, object_valid, pad):
     return per[object_valid].mean()
 
 
+@R1_XFAIL
 def test_mask_losses_use_the_torch_cross_event_broadcast():
     """Torch weights each valid object by EVERY event's node mask. A per-event port would differ (control)."""
     rng = np.random.default_rng(3)
@@ -141,6 +149,7 @@ def test_weighted_ce_equals_torch_and_is_not_the_plain_mean():
     assert abs(got - wrong_norm) > 0.1 * got, (got, wrong_norm)
 
 
+@R1_XFAIL
 def test_no_valid_object_gives_zero_where_torch_gives_nan(specs):
     """Documented deviation: torch's mean over an empty selection is NaN; the static-shape port returns 0."""
     rng = np.random.default_rng(5)
@@ -260,6 +269,7 @@ def test_total_loss_is_the_sum_of_every_leaf():
     assert float(O.total_loss(leaves)) == 127.0
 
 
+@R1_XFAIL
 def test_mask_bce_sample_weight_with_non_unit_null_weight_equals_torch():
     """null_weight != 1 weights the BCE of target-0 entries; CLIC uses 1.0, so this path needs its own case."""
     rng = np.random.default_rng(11)

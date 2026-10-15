@@ -16,6 +16,9 @@ import pytest
 from .golden.cases import CASES
 from .golden_utils import build_from_golden, inputs_of, native_leaves
 
+# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict, so the marker fails once the named lane fixes the test.
+R2_XFAIL = pytest.mark.xfail(strict=True, reason="R2: the torch reference passes linformer_proj_dim, which org Attention rejects since PR #9")
+
 MODE = "high"
 
 
@@ -60,7 +63,7 @@ def ebops_indices(module) -> dict[str, list[int]]:
     return out
 
 
-@pytest.mark.parametrize("case", list(CASES))
+@pytest.mark.parametrize("case", [pytest.param(c, marks=R2_XFAIL) if c == "enc_lin" else c for c in CASES])
 def test_layer_trains_under_jit(case):
     module, _, golden = build_from_golden(case, MODE)
     inputs = inputs_of(golden)
@@ -91,7 +94,7 @@ def test_layer_trains_under_jit(case):
 UINT32_MAX = 2**32 - 1
 
 
-@pytest.mark.parametrize("case", ["dense_ffn", "innet", "attn_cross", "enc_lin"])
+@pytest.mark.parametrize("case", ["dense_ffn", "innet", "attn_cross", pytest.param("enc_lin", marks=R2_XFAIL)])
 def test_ebops_loss_term(case):
     """The train-mode losses carry beta x EBOPs on top of the eval-mode (non-EBOPs) terms.
 

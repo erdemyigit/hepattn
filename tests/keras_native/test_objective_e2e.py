@@ -27,6 +27,11 @@ from hepattn.models.wrapper import ModelWrapper
 
 from .objective_utils import SCALE_DICT, assert_close_same_nonfinite, flatten, to_numpy, torch_tasks
 
+# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict, so the marker fails once the named lane fixes the test.
+R1_XFAIL = pytest.mark.xfail(
+    strict=True, reason="R1: pins the objective semantics before org a4263c1 (per-event mask loss) and PR #3 (logits in the class cost)"
+)
+
 DIM = 32
 COST_TOL = {"atol": 1e-5, "rtol": 1e-5}
 LOSS_TOL = {"atol": 1e-4, "rtol": 1e-3}
@@ -92,6 +97,7 @@ def _real_like(targets: dict) -> dict:
 
 
 @pytest.mark.parametrize(("seed", "num_events", "real_like"), [(31, 2, False), (32, 4, False), (33, 4, True)])
+@R1_XFAIL
 def test_maskformer_loss_equals_torch(seed, num_events, real_like):
     model = _torch_model(seed)
     inputs, targets_t = _dummy_batch(num_events, seed)
