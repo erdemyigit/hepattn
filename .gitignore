@@ -121,6 +121,8 @@ tmp/
 *.csv
 *.npy
 *.npz
+# S2 golden files (hybrid oracle outputs, 4.8 MB) are test data and must be tracked
+!tests/keras_native/golden/*.npz
 
 # Log files
 src/hepattn/experiments/cld/plots/

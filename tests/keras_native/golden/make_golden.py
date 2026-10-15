@@ -6,7 +6,8 @@ For every case in ``cases.CASES`` it builds the pure-torch reference module (see
 float/high/low, ports it into the hybrid twin with ``hepattn.keras.porting`` and runs it in eval mode. One
 compressed ``<case>.npz`` per case holds: the inputs (``in::<name>``), the torch reference state
 (``src::<state_dict key>``, shared by the modes), and per mode the output (``<mode>::out``) and every variable of
-every named keras leaf in tracking order (``<mode>::kv::<leaf>::<idx>::<var name>``), plus ``meta`` (json).
+every named keras leaf in tracking order (``<mode>::kv::<leaf>::<idx>::<var name>``), plus ``meta`` (json; per
+mode the leaf names, the output abs max and each leaf variable's ``trainable`` flag).
 """
 
 import copy
@@ -131,7 +132,11 @@ def main() -> None:
             for leaf in leaf_list:
                 for i, var in enumerate(leaf.variables):
                     arrays[f"{mode}::kv::{leaf.name}::{i:03d}::{var.name}"] = keras.ops.convert_to_numpy(var.value).astype(var.dtype)
-            meta[mode] = {"leaves": [leaf.name for leaf in leaf_list], "out_absmax": float(np.abs(out).max())}
+            meta[mode] = {
+                "leaves": [leaf.name for leaf in leaf_list],
+                "out_absmax": float(np.abs(out).max()),
+                "trainable": {leaf.name: [bool(var.trainable) for var in leaf.variables] for leaf in leaf_list},
+            }
         arrays["meta"] = np.array(json.dumps(meta))
         path = HERE / golden_file(case)
         np.savez_compressed(path, **arrays)

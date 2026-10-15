@@ -30,7 +30,12 @@ LEAF_TYPES = (QDense, QEinsum, QSoftmax, keras.layers.Dense, EinsumOp, SoftmaxOp
 
 
 def load_golden(case: str) -> dict[str, np.ndarray]:
-    with np.load(GOLDEN_DIR / golden_file(case)) as data:
+    path = GOLDEN_DIR / golden_file(case)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"{path} is missing: it is tracked in git (see .gitignore); regenerate with golden/make_golden.py in the hybrid torch env"
+        )
+    with np.load(path) as data:
         return {key: data[key] for key in data.files}
 
 
