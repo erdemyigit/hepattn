@@ -1,0 +1,14 @@
+[as is] -> NotImplementedError: input sorting is not ported to keras_native
+[drop input_sort_field] -> TypeError: Encoder.__init__() missing 1 required positional argument: 'num_layers'
+[unwrap encoder class_path/init_args] -> TypeError: hepattn.keras_native.encoder.Encoder() got multiple values for keyword argument 'dim'
+[drop encoder.dim (dup of MaskFormer dim)] -> ValueError: Unrecognized keyword arguments passed to EncoderLayer: {'dense_norm_placement': 'legacy'}
+[drop encoder.dense_norm_placement] -> NotImplementedError: norm 'FastLayerNorm' is not ported to keras_native (supported: ['LayerNorm', 'CustomLayerNorm'])
+[encoder.norm FastLayerNorm->LayerNorm] -> ValueError: Unrecognized keyword arguments passed to MaskFormerDecoderLayer: {'dense_norm_placement': 'legacy', 'query_update_order': 'ca_sa_dense', 'self_attn_norm_kv': Tr
+[drop decoder dense_norm_placement] -> ValueError: Unrecognized keyword arguments passed to MaskFormerDecoderLayer: {'query_update_order': 'ca_sa_dense', 'self_attn_norm_kv': True}
+[drop decoder query_update_order] -> ValueError: Unrecognized keyword arguments passed to MaskFormerDecoderLayer: {'self_attn_norm_kv': True}
+[drop decoder self_attn_norm_kv] -> NotImplementedError: norm 'FastLayerNorm' is not ported to keras_native (supported: ['LayerNorm', 'CustomLayerNorm'])
+[decoder norm FastLayerNorm->LayerNorm] -> FileNotFoundError: [Errno 2] No such file or directory: 'configs/clic_var_transform.yaml'
+[quant] -> NotImplementedError: SwiGLU is not supported in quantized mode (not used by the CLIC config)
+specs_from_config OK: ['classification', 'mask', 'incidence', 'regression']
+[matcher] -> NotImplementedError: only default_solver=scipy with adaptive_solver=false is supported, got {'default_solver': 'lap1015_late', 'adaptive_solver': False, 'parallel_solver': True, 'n_jobs': 16}
+built after patches; encoder attn: LinformerAttention seq_len 168 k 256 | decoder q_ca: LinformerAttention seq_len 160 k 256

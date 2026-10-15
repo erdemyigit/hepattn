@@ -1,0 +1,119 @@
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:431: UserWarning: `build()` was called on layer 'attend_E', however the layer does not have a `build()` method implemented and it looks like it has unbuilt state. This will cause the layer to be marked as built, despite not being actually built, which may cause failures down the line. Make sure to implement a proper `build()` method.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:431: UserWarning: `build()` was called on layer 'attend_F', however the layer does not have a `build()` method implemented and it looks like it has unbuilt state. This will cause the layer to be marked as built, despite not being actually built, which may cause failures down the line. Make sure to implement a proper `build()` method.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:431: UserWarning: `build()` was called on layer 'project_E', however the layer does not have a `build()` method implemented and it looks like it has unbuilt state. This will cause the layer to be marked as built, despite not being actually built, which may cause failures down the line. Make sure to implement a proper `build()` method.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:431: UserWarning: `build()` was called on layer 'project_F', however the layer does not have a `build()` method implemented and it looks like it has unbuilt state. This will cause the layer to be marked as built, despite not being actually built, which may cause failures down the line. Make sure to implement a proper `build()` method.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:431: UserWarning: `build()` was called on layer 'explicit_E', however the layer does not have a `build()` method implemented and it looks like it has unbuilt state. This will cause the layer to be marked as built, despite not being actually built, which may cause failures down the line. Make sure to implement a proper `build()` method.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:431: UserWarning: `build()` was called on layer 'explicit_F', however the layer does not have a `build()` method implemented and it looks like it has unbuilt state. This will cause the layer to be marked as built, despite not being actually built, which may cause failures down the line. Make sure to implement a proper `build()` method.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:431: UserWarning: `build()` was called on layer 'attend_attend_E', however the layer does not have a `build()` method implemented and it looks like it has unbuilt state. This will cause the layer to be marked as built, despite not being actually built, which may cause failures down the line. Make sure to implement a proper `build()` method.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:431: UserWarning: `build()` was called on layer 'attend_attend_F', however the layer does not have a `build()` method implemented and it looks like it has unbuilt state. This will cause the layer to be marked as built, despite not being actually built, which may cause failures down the line. Make sure to implement a proper `build()` method.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:431: UserWarning: `build()` was called on layer 'project_project_E', however the layer does not have a `build()` method implemented and it looks like it has unbuilt state. This will cause the layer to be marked as built, despite not being actually built, which may cause failures down the line. Make sure to implement a proper `build()` method.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:431: UserWarning: `build()` was called on layer 'project_project_F', however the layer does not have a `build()` method implemented and it looks like it has unbuilt state. This will cause the layer to be marked as built, despite not being actually built, which may cause failures down the line. Make sure to implement a proper `build()` method.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_90' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_45' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'dense_values' (of type QEinsum) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+shape=prod: B=1 dim=256 heads=16 head_dim=16 nq=150 n=160 seq_len=160 k=64
+[1] float leaves vs masked_linformer (torch), NaN in padded k/v rows, all-False query rows
+  attend core vs masked_linformer.attend: max|diff|              5.364e-07  [OK, tol 1e-04]
+  attend core: all-False query rows |out| max                    0.000e+00  [OK, tol 0e+00]
+  project core vs project(k,v,kv_mask)+SDPA: max|diff|           6.557e-07  [OK, tol 1e-04]
+  project core, mask None (E[:n], no renorm): max|diff|          1.490e-07  [OK, tol 1e-04]
+  explicit per-query form vs attend(renorm=False): max|diff|     1.937e-07  [OK, tol 1e-04]
+  AttendCore(renorm=False) vs attend(renorm=False): max|diff|    1.341e-07  [OK, tol 1e-04]
+[2] HGQ2 leaves at the 'high' spec vs masked_linformer (no NaN; quantization error only)
+    [2a] renorm LUT/energy lanes at the deployment precision {'lut_in_f': 12, 'lut_out_i': 7, 'lut_out_f': 8, 'w_f': 12}
+  attend core vs masked_linformer.attend: max|diff|              6.963e-03  [OK, tol 1e-02]
+  attend core: all-False query rows |out| max                    0.000e+00  [OK, tol 1e-02]
+  project core vs project(k,v,kv_mask)+SDPA: max|diff|           5.123e-03  [OK, tol 1e-02]
+  project core, mask None (E[:n], no renorm): max|diff|          3.754e-04  [OK, tol 1e-02]
+    [2b] renorm lanes raised (parity only; a 2^20-entry table exceeds hls4ml's 1e6 cap) {'lut_in_f': 19, 'lut_out_i': 7, 'lut_out_f': 16, 'w_f': 20}
+  attend core vs masked_linformer.attend: max|diff|              6.066e-04  [OK, tol 1e-03]
+  attend core: all-False query rows |out| max                    0.000e+00  [OK, tol 1e-03]
+  project core vs project(k,v,kv_mask)+SDPA: max|diff|           3.935e-04  [OK, tol 1e-03]
+  project core, mask None (E[:n], no renorm): max|diff|          4.116e-04  [OK, tol 1e-03]
+[3] cores only (q/k/v given), prod spec: implemented attend vs explicit per-query projection form
+  attend(renorm=False)   total 6.5147e+09: qk=8.847e+08, E_proj=2.359e+09, F_proj=2.359e+09, softmax=2.663e+07, pv=8.847e+08
+  explicit per-query     total 7.6232e+10: E_proj=3.775e+10, F_proj=3.775e+10, qk=3.539e+08, softmax=2.663e+07, av=3.539e+08
+[4] prod spec (pflow_hgq.yaml): eager train-mode EBOPs per leaf, jit value_and_grad
+  --- attend: total EBOPs (float, eager) = 1.0501e+10; jit losses sum = 1.0501e+10; jit cache size after 2 calls = 1; 58 trainables, zero-grad: 0 []; grads finite=True
+      attend_attend_E_proj                   2.3593e+09   22.47%  (uint32 var 2359296000)
+      attend_attend_F_proj                   2.3593e+09   22.47%  (uint32 var 2359296000)
+      attend_k_proj                          1.0070e+09    9.59%  (uint32 var 1006960640)
+      attend_v_proj                          1.0070e+09    9.59%  (uint32 var 1006960640)
+      attend_q_proj                          9.4403e+08    8.99%  (uint32 var 944025536)
+      attend_out_proj                        9.4403e+08    8.99%  (uint32 var 944025536)
+      attend_attend_pv                       8.8474e+08    8.43%  (uint32 var 884736000)
+      attend_attend_qk                       8.8474e+08    8.43%  (uint32 var 884736000)
+      attend_attend_softmax                  2.6625e+07    0.25%  (uint32 var 26625345)
+      attend_attend_mul_v                    2.2155e+07    0.21%  (uint32 var 22155264)
+      attend_attend_mul_k                    2.2155e+07    0.21%  (uint32 var 22155264)
+      attend_attend_kept_v                   1.9968e+07    0.19%  (uint32 var 19968000)
+      attend_attend_kept_k                   1.9968e+07    0.19%  (uint32 var 19968000)
+      attend_attend_rsqrt_v                  1.1796e+05    0.00%  (uint32 var 117964)
+      attend_attend_rsqrt_k                  1.1796e+05    0.00%  (uint32 var 117964)
+      MACs/event (core, excl. q/k/v/out proj): {'dxd': 12595200, 'dxp': 49152000, 'mask x table': 3072000}
+  --- project: total EBOPs (float, eager) = 5.1446e+09; jit losses sum = 5.1446e+09; jit cache size after 2 calls = 1; 58 trainables, zero-grad: 0 []; grads finite=True
+      project_k_proj                         1.0070e+09   19.57%  (uint32 var 1006960640)
+      project_v_proj                         1.0070e+09   19.57%  (uint32 var 1006960640)
+      project_q_proj                         9.4403e+08   18.35%  (uint32 var 944025536)
+      project_out_proj                       9.4403e+08   18.35%  (uint32 var 944025536)
+      project_project_av                     3.5389e+08    6.88%  (uint32 var 353894400)
+      project_project_qk                     3.5389e+08    6.88%  (uint32 var 353894400)
+      project_project_F_proj                 2.5166e+08    4.89%  (uint32 var 251658240)
+      project_project_E_proj                 2.5166e+08    4.89%  (uint32 var 251658240)
+      project_project_softmax                2.6578e+07    0.52%  (uint32 var 26578159)
+      project_project_mul_v                  2.3593e+06    0.05%  (uint32 var 2359296)
+      project_project_mul_k                  2.3593e+06    0.05%  (uint32 var 2359296)
+      project_project_kept_v                 1.3312e+05    0.00%  (uint32 var 133120)
+      project_project_kept_k                 1.3312e+05    0.00%  (uint32 var 133120)
+      project_project_rsqrt_v                7.8643e+02    0.00%  (uint32 var 786)
+      project_project_rsqrt_k                7.8643e+02    0.00%  (uint32 var 786)
+      MACs/event (core, excl. q/k/v/out proj): {'dxd': 4947968, 'dxp': 5242880, 'mask x table': 20480}
+  --- helen: total EBOPs (float, eager) = 5.3903e+09; jit losses sum = 5.3903e+09; jit cache size after 2 calls = 1; 34 trainables, zero-grad: 0 []; grads finite=True
+      helen_to_k                             1.0066e+09   18.67%  (uint32 var 1006632960)
+      helen_to_v                             1.0066e+09   18.67%  (uint32 var 1006632960)
+      helen_to_out                           9.4403e+08   17.51%  (uint32 var 944025536)
+      helen_to_q                             9.4372e+08   17.51%  (uint32 var 943718400)
+      helen_seqproj_k                        3.7749e+08    7.00%  (uint32 var 377487360)
+      helen_seqproj_v                        3.7749e+08    7.00%  (uint32 var 377487360)
+      helen_values                           3.5389e+08    6.57%  (uint32 var 353894400)
+      helen_scores                           3.5389e+08    6.57%  (uint32 var 353894400)
+      helen_softmax                          2.6555e+07    0.49%  (uint32 var 26554566)
+      MACs/event (core, excl. q/k/v/out proj): {'dxd': 4915200, 'dxp': 5242880}
+  --- dense: total EBOPs (float, eager) = 1.2667e+14; jit losses sum = 1.2667e+14; jit cache size after 2 calls = 1; 34 trainables, zero-grad: 0 []; grads finite=True
+      dense_softmax                          1.2666e+14  100.00%  (uint32 var 74514384)
+      dense_k_proj                           1.0070e+09    0.00%  (uint32 var 1006960640)
+      dense_v_proj                           1.0070e+09    0.00%  (uint32 var 1006960640)
+      dense_q_proj                           9.4403e+08    0.00%  (uint32 var 944025536)
+      dense_out_proj                         9.4403e+08    0.00%  (uint32 var 944025536)
+      dense_values                           8.8474e+08    0.00%  (uint32 var 884736000)
+      dense_scores                           8.8474e+08    0.00%  (uint32 var 884736000)
+      MACs/event (core, excl. q/k/v/out proj): {'dxd': 12288000}
+  --- dense_nomask: total EBOPs (float, eager) = 5.7379e+09; jit losses sum = 5.7379e+09; jit cache size after 2 calls = 1; 34 trainables, zero-grad: 0 []; grads finite=True
+      dense_nomask_k_proj                    1.0070e+09   17.55%  (uint32 var 1006960640)
+      dense_nomask_v_proj                    1.0070e+09   17.55%  (uint32 var 1006960640)
+      dense_nomask_q_proj                    9.4403e+08   16.45%  (uint32 var 944025536)
+      dense_nomask_out_proj                  9.4403e+08   16.45%  (uint32 var 944025536)
+      dense_nomask_values                    8.8474e+08   15.42%  (uint32 var 884736000)
+      dense_nomask_scores                    8.8474e+08   15.42%  (uint32 var 884736000)
+      dense_nomask_softmax                   6.6418e+07    1.16%  (uint32 var 66417821)
+      MACs/event (core, excl. q/k/v/out proj): {'dxd': 12288000}
+  EBOPs relative to quadratic attention WITHOUT a softmax mask (same q/k/v/out projections):
+      attend     1.0501e+10  x1.830
+      project    5.1446e+09  x0.897
+      helen      5.3903e+09  x0.939
+      dense      1.2667e+14  x22076.076
+      dense_nomask   5.7379e+09  x1.000
+ALL OK

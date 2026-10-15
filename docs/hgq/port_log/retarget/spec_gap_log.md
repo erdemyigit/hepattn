@@ -1,0 +1,14 @@
+# spec+gap log (org/main ac0da8f linformer.yaml vs keras_native @37ff127)
+- org/main snapshot extracted: scratchpad/orgmain ; masked-linformer @ dce2e15 (pin from org pyproject:42) at scratchpad/masked-linformer
+- attention.py org: linformer = packed in_proj (xavier, bias0) + out_proj; unmasked: project(k,E,kv_mask) zero+renorm then SDPA; masked: attend(q,k,v,E,F, attn_mask&kv_mask); kv_sort_idx gathers k,v,masks first (L320-331)
+- native linformer.py = Helen's (to_q/k/v no bias, masks ignored, attn_mask in rank-k space, key linformer_proj_dim) -> DIFFERENT
+- org spec read: maskformer(L116-135 sort), encoder(L22-26 sort_index, L219-296), attention(L317-331), decoder(L251-317 loop, L451-493 layer), norm(L68-99 hybrid cfg), task(cls 95-289, mask 482-627, inc 1297-1379, regr 1382-1640), loss.py, matcher.py, wrapper aggregate 46-63
+- effective cfg: overlay keys are supersets of base keys -> merge vs replace moot
+- PR#5 bug present org/main pflow_data.py:240-241 (also keras-jax :240); PR #5 OPEN
+- masked_linformer@dce2e15: project L39-53, _rescale L56-63, attend L66-87
+- native probes (specgap/probe_chain.py): from_config blockers in order: input_sort_field; encoder class_path unwrap; dup dim; dense_norm_placement; FastLayerNorm; decoder query_update_order/self_attn_norm_kv; quant SwiGLU; matcher lap1015_late. linformer_k silently ignored -> k=256 (build_attention pops linformer_proj_dim only)
+- native losses keep pre-a4263c1 cross-event mask_bce/dice + pre-#3 double softmax (losses.py docstring L8-17, objective.py L130-133)
+- next: run org/main torch forward with tracing to measure call-site masks
+- MEASURED org/main forward (specgap/orgmain_forward.out): call sites enc.sa project+sdpa kv_mask(B,168); q_ca attend attn_mask(B,150,160)+kv_mask+kv_sort_idx; q_sa project+sdpa no masks; kv_ca attend attn_mask(B,160,150) no kv_mask. Norm placement legacy measured per depth. Tasks run: cls+mask layers0-3, inc+regr final only.
+- MEASURED loss gaps (probe_losses.py): mask_bce org 1.4038 (=numpy per-event ref) vs native 1.309; dice 0.89392 vs 0.89237; object_ce_cost native(probs) range 0.187 vs org 0.881
+- MEASURED attention: org padding leak 0.0, exact per-query mask 0.0 (+ positive control True); native padding leak 130.75; native masked CA k=64 raises ValueError

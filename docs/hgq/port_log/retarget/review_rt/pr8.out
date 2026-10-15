@@ -1,0 +1,12 @@
+decoder depth 0: matched PR8 cfg  max|dq|,max|dkv| = (7.152557373046875e-07, 4.76837158203125e-07)
+decoder depth 0: keras w/o PR8 options (discrimination) = port refused: post_norm mismatch
+encoder depth 0: matched PR8 cfg  max|dy| = 4.76837158203125e-07
+encoder depth 0: keras w/o legacy placement (discrimination) = port refused: post_norm mismatch
+decoder depth 1: matched PR8 cfg  max|dq|,max|dkv| = (4.76837158203125e-07, 3.5762786865234375e-07)
+decoder depth 1: keras w/o PR8 options (discrimination) = port refused: post_norm mismatch
+encoder depth 1: matched PR8 cfg  max|dy| = 4.76837158203125e-07
+encoder depth 1: keras w/o legacy placement (discrimination) = port refused: post_norm mismatch
+decoder depth 0: keras order=ca_dense_sa (discrimination) = (0.4069945812225342, 0.1214103102684021)
+decoder depth 0: keras self_attn_norm_kv=False (discrimination) = (0.13458514213562012, 0.0351371169090271)
+decoder depth 1: keras order=ca_dense_sa (discrimination) = (0.2076805830001831, 0.06413447856903076)
+decoder depth 1: keras self_attn_norm_kv=False (discrimination) = (4.76837158203125e-07, 3.5762786865234375e-07)

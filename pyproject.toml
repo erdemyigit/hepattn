@@ -139,6 +139,10 @@ cmd = "pytest tests/experiments/ -m 'not gpu and not requiresdata' --cov=src --c
 [tool.ruff]
 src = ["src"]
 line-length = 150
+# verbatim scoping probes kept as evidence (docs/hgq/RETARGET_ORG_MAIN.md section 2); force-exclude also applies it to
+# the file names that pre-commit passes
+extend-exclude = ["docs/hgq/port_log/retarget"]
+force-exclude = true
 preview = true
 #format.skip-magic-trailing-comma = true
 

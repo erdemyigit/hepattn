@@ -1,0 +1,15 @@
+E quantized to step 0.015625: 5.9% of entries are 0, min nonzero |E| 0.0156
+renorm precision {'lut_in_f': 12, 'lut_out_i': 7, 'lut_out_f': 8, 'w_f': 12}
+  valid keys    1: exact r in [  6.75,    63.53]  rel err median 5.38e-03  max 1.85e-01
+  valid keys    2: exact r in [  4.91,    63.03]  rel err median 3.15e-03  max 1.85e-01
+  valid keys    5: exact r in [  3.35,    26.15]  rel err median 2.01e-03  max 7.79e-02
+  valid keys   20: exact r in [  2.07,     4.60]  rel err median 1.34e-03  max 9.32e-03
+  valid keys   80: exact r in [  1.27,     1.63]  rel err median 1.29e-03  max 6.61e-03
+  valid keys  160: exact r in [  1.00,     1.00]  rel err median 0.00e+00  max 3.91e-03
+renorm precision {'lut_in_f': 16, 'lut_out_i': 7, 'lut_out_f': 12, 'w_f': 16}
+  valid keys    1: exact r in [  6.75,    63.53]  rel err median 3.34e-04  max 1.54e-02
+  valid keys    2: exact r in [  4.91,    63.49]  rel err median 2.05e-04  max 1.54e-02
+  valid keys    5: exact r in [  3.60,    26.21]  rel err median 1.38e-04  max 3.80e-03
+  valid keys   20: exact r in [  2.13,     4.93]  rel err median 9.60e-05  max 8.08e-04
+  valid keys   80: exact r in [  1.25,     1.63]  rel err median 8.68e-05  max 5.39e-04
+  valid keys  160: exact r in [  1.00,     1.00]  rel err median 0.00e+00  max 4.88e-04

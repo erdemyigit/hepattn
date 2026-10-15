@@ -1,3 +1,6 @@
+# verbatim evidence logs and probes; the whitespace fixers would edit them
+exclude: ^docs/hgq/port_log/retarget/
+
 repos:
   - repo: https://github.com/charliermarsh/ruff-pre-commit
     rev: "v0.13.0"

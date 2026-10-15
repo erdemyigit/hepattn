@@ -1,0 +1,9 @@
+OK    E_proj  QEinsumDense bhqn,nk->bhqk                             -> ['Input', 'EinsumDense']
+OK    F_proj  QEinsumDense bhqk,nk->bhqn                             -> ['Input', 'EinsumDense']
+OK    mul_k   QEinsum bhqk,bqk->bhqk                                 -> ['Input', 'Input', 'Einsum']
+OK    kept    QEinsumDense bqn,nk->bqk (1-bit mask lane, W kernel)   -> ['Input', 'EinsumDense']
+OK    rsqrt   QUnaryFunctionLUT rank-2, homogeneous                  -> ['Input', 'UnaryLUT']
+OK    softmax QSoftmax over k, no mask                               -> ['Input', 'Softmax']
+FAIL  rsqrt   QUnaryFunctionLUT rank-3 (b, nq, k)                    -> RuntimeError: Exception encountered when calling Quantizer.call().
+
+[1mexpand(torch.FloatTensor{[1, 1, 1]}, size=[1, 8192]): the number of sizes provided (2) must be greater or equal to the number of dimensions in
