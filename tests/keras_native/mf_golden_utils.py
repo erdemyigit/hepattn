@@ -211,3 +211,25 @@ def qloss_terms(model, golden: dict, mode: str) -> tuple[np.ndarray, np.ndarray]
     _, _, losses = model.stateless_call(tv, ntv, mf_inputs(golden), training=True, return_losses=True)
     native = np.sort(np.array([float(keras.ops.convert_to_numpy(x)) for x in losses]))
     return native, np.sort(golden[f"{mode}::qlosses"])
+
+
+def mf_init_state_mismatches(model, golden: dict, mode: str) -> list[str]:
+    """Stored leaf variables (quantizer state, not kernel/bias) whose INITIAL native value differs from the hybrid's.
+
+    The hybrid ran only eval-mode forwards before its variables were stored, so the stored quantizer state is its
+    initial state. Loading the golden values (``assign_mf_leaves``) would hide a layer built outside the HGQ2 scopes
+    (S2 mutation M13); this compares a freshly built model instead.
+    """
+    meta = mf_meta(golden)[mode]
+    leaves = native_leaves(model)
+    bad = []
+    for name in meta["leaves"]:
+        for i, var in enumerate(leaves[name].variables):
+            key = f"{name}::{i:03d}::{var.name}"
+            if key in meta["digests"]:
+                continue
+            ref = golden[f"{mode}::kv::{key}"]
+            value = keras.ops.convert_to_numpy(var.value)
+            if ref.shape != value.shape or not np.array_equal(ref, value):
+                bad.append(key)
+    return bad

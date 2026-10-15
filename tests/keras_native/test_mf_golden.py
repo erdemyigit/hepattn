@@ -17,7 +17,21 @@ import pytest
 
 from .golden.cases import QUANT_SPECS
 from .golden.mf_cases import clic_dummy_batch, torch_model
-from .mf_golden_utils import GOLDEN_DIR, JIT_ROWS, LAYER0_LOGIT, MF_CASES, MF_MODES, build_mf, build_mf_from_golden, compare_mf, mf_meta, qloss_terms
+from .mf_golden_utils import (
+    GOLDEN_DIR,
+    JIT_ROWS,
+    LAYER0_LOGIT,
+    MF_CASES,
+    MF_MODES,
+    build_mf,
+    build_mf_from_golden,
+    compare_mf,
+    load_mf_golden,
+    mf_init_state_mismatches,
+    mf_inputs,
+    mf_meta,
+    qloss_terms,
+)
 from .parity_utils import record_measurement
 from .porting import port_maskformer
 
@@ -86,6 +100,16 @@ def test_quant_losses_match_hybrid_per_layer(case, mode):
     assert q["n_layers_raw"] - q["n_layers_unique"] == n_task_leaves, q
     # counts, not sums: quant_losses() sums in float32, whose rounding at ~3e12 (high mode) hides the doubled terms
     assert q["n_terms_raw"] > hybrid.size, "hybrid quant_losses() no longer double counts: revisit S3.md"
+
+
+@pytest.mark.parametrize("mode", [m for m in MF_MODES if m != "float"])
+@pytest.mark.parametrize("case", list(MF_CASES))
+def test_init_quantizer_state_matches_hybrid(case, mode):
+    """A freshly built native model has the hybrid's initial quantizer state (all scopes applied), bit for bit."""
+    golden = load_mf_golden(case)
+    model = build_mf(MF_CASES[case], mf_meta(golden)[mode]["quant"], mf_inputs(golden))
+    bad = mf_init_state_mismatches(model, golden, mode)
+    assert not bad, f"{len(bad)} leaf variables differ from the hybrid's initial state, e.g. {bad[:5]}"
 
 
 def test_chaotic_mode_is_really_wrap():
