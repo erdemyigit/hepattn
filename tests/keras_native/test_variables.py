@@ -25,7 +25,7 @@ from .golden_utils import build_native, golden_meta, inputs_of, load_golden, nat
 CASES_LIN_XFAIL = pytest.mark.xfail(
     strict=True,
     raises=TypeError,
-    reason="blocked on golden/cases.py LIN_KWARGS (R5-owned): it passes linformer_proj_dim, which org Attention rejects since PR #9",
+    reason="blocked on the enc_lin attn_kwargs in golden/cases.py (R5-owned): they pass linformer_proj_dim, which org Attention rejects since PR #9",
 )
 
 PARAMETER_NAMES = {"kernel", "bias"}  # leaf variables that are torch parameters; the rest is quantizer state

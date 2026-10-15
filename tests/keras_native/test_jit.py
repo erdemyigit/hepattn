@@ -21,7 +21,7 @@ from .golden_utils import build_from_golden, inputs_of, native_leaves
 CASES_LIN_XFAIL = pytest.mark.xfail(
     strict=True,
     raises=TypeError,
-    reason="blocked on golden/cases.py LIN_KWARGS (R5-owned): it passes linformer_proj_dim, which org Attention rejects since PR #9",
+    reason="blocked on the enc_lin attn_kwargs in golden/cases.py (R5-owned): they pass linformer_proj_dim, which org Attention rejects since PR #9",
 )
 
 MODE = "high"
