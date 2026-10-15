@@ -138,3 +138,49 @@ def perturb_affine_params(module: nn.Module, seed: int) -> None:
         leaf = name.rsplit(".", 1)[-1]
         if leaf in {"bias", "in_proj_bias", "gamma"} or (leaf == "weight" and param.dim() == 1):
             param.add_(0.1 * torch.randn(param.shape, generator=gen))
+
+
+@torch.no_grad()
+def port_decoder(tdec, ndec) -> None:
+    """Torch MaskFormerDecoder -> native MaskFormerDecoder (initial queries + every layer's residual blocks)."""
+    assert len(tdec.decoder_layers) == len(ndec.layers), "decoder depth mismatch"
+    ndec.initial_queries.assign(_np(tdec.initial_queries))
+    for tlayer, nlayer in zip(tdec.decoder_layers, ndec.layers, strict=True):
+        port_residual(tlayer.q_ca, nlayer.q_ca, port_any_attention)
+        port_residual(tlayer.q_sa, nlayer.q_sa, port_any_attention)
+        port_residual(tlayer.q_dense, nlayer.q_dense, port_dense)
+        assert tlayer.bidirectional_ca == nlayer.bidirectional_ca, "bidirectional_ca mismatch"
+        if tlayer.bidirectional_ca:
+            port_residual(tlayer.kv_ca, nlayer.kv_ca, port_any_attention)
+            port_residual(tlayer.kv_dense, nlayer.kv_dense, port_dense)
+
+
+TASK_NETS = ("net", "object_net", "constituent_net", "node_net")
+
+
+@torch.no_grad()
+def port_task(ttask, ntask) -> int:
+    """Port every Dense head of a task (by attribute name); returns the number ported."""
+    count = 0
+    for attr in TASK_NETS:
+        tnet = getattr(ttask, attr, None)
+        nnet = getattr(ntask, attr, None)
+        if isinstance(tnet, nn.Identity):
+            tnet = None
+        assert (tnet is None) == (nnet is None), f"{attr}: presence differs (torch {tnet is not None}, native {nnet is not None})"
+        if tnet is not None:
+            port_dense(tnet, nnet)
+            count += 1
+    return count
+
+
+@torch.no_grad()
+def port_maskformer(tmodel, nmodel) -> None:
+    """Torch MaskFormer -> native MaskFormer (built). Task order and names must match."""
+    for tnet, nnet in zip(tmodel.input_nets, nmodel.input_nets, strict=True):
+        port_input_net(tnet, nnet)
+    port_encoder(tmodel.encoder, nmodel.encoder)
+    port_decoder(tmodel.decoder, nmodel.decoder)
+    for ttask, ntask in zip(tmodel.tasks, nmodel.tasks, strict=True):
+        assert ttask.name == ntask.task_name, f"task order differs: {ttask.name} vs {ntask.task_name}"
+        assert port_task(ttask, ntask) > 0, f"task {ttask.name}: no Dense ported"
