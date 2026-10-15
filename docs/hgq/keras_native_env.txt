@@ -31,6 +31,7 @@ lightning-utilities==0.15.3
 lion-pytorch==0.2.3
 markdown-it-py==4.2.0
 markupsafe==3.0.4
+masked-linformer @ git+https://github.com/compressed-maskformer-reco/masked-linformer@dce2e151e9d25cefd85454b3dffd5c83ec217097
 matplotlib==3.10.8
 mdurl==0.1.2
 ml-dtypes==0.6.0

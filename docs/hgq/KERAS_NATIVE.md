@@ -43,6 +43,33 @@ uv pip install --python .venv-jax/bin/python "lion-pytorch==0.2.3" "torchjd==0.7
   "jsonargparse[signatures]==4.40.1" "matplotlib==3.10.8" "torch==2.10.0" "numpy==2.3.5"
 ```
 
+The retarget to org/main `ac0da8f` (stage R0, `docs/hgq/RETARGET_ORG_MAIN.md` section 2) added masked-linformer
+`dce2e15`, which org `src/hepattn/models/attention.py` imports. It is installed in `.venv-jax` and in the hybrid env
+`hepattn/.venv`. `--no-deps` keeps torch 2.10.0 (masked-linformer only requires `torch>=2.0`):
+
+```bash
+for venv in .venv-jax ../hepattn/.venv; do
+  uv pip install --python $venv/bin/python --no-deps \
+    "masked-linformer @ https://github.com/compressed-maskformer-reco/masked-linformer/archive/dce2e151e9d25cefd85454b3dffd5c83ec217097.tar.gz"
+done
+```
+
+On Polaris (one time; the login node needs outbound HTTPS to GitHub):
+
+```bash
+# Hybrid env: a separate clone, because running jobs use $WORK_ROOT/hepattn on keras-hgq2 (01_setup_env.sh:38-41).
+# uv.lock pins masked-linformer; --locked fails loudly if uv.lock is stale.
+git clone --branch keras-jax https://github.com/erdemyigit/hepattn.git $WORK_ROOT/hepattn-kj && cd $WORK_ROOT/hepattn-kj && \
+  uv venv --python 3.12.0 .venv && uv sync --group hgq --no-install-project --locked --python .venv/bin/python
+# .venv-jax: the KERAS_JAX_PLAN.md section 5.1 line, then masked-linformer (needed only for the torch parity tests):
+uv pip install --python .venv-jax/bin/python --no-deps \
+  "masked-linformer @ https://github.com/compressed-maskformer-reco/masked-linformer/archive/dce2e151e9d25cefd85454b3dffd5c83ec217097.tar.gz"
+```
+
+`--no-install-project` leaves `lap1015` unbuilt: `import lap1015` gives an empty namespace package, and the org
+default solver `lap1015_late` fails at the first match (`AttributeError: ... lap_late`). Use `default_solver: scipy`
+until lane R4 makes the generated Polaris config do so.
+
 With these, every module of `hepattn.models` and `hepattn.utils`, plus `hepattn.experiments.clic.lightning_module`
 and `pflow_data`, imports under `KERAS_BACKEND=jax` (41 modules, 0 failures, measured 2026-10-14).
 
