@@ -193,12 +193,12 @@ net["encoder"] = {
     "hybrid_norm": True,
     "value_residual": True,
     "num_register_tokens": 8,
-    "attn_kwargs": {"num_heads": 16, "linformer_seq_len": 256, "linformer_proj_dim": 256},
+    "attn_kwargs": {"num_heads": 16, "linformer_seq_len": 256, "linformer_k": 256},
 }
 net["decoder"]["decoder_layer_config"]["attn_kwargs"].update({
     "attn_type": "linformer",
     "linformer_seq_len": 256,
-    "linformer_proj_dim": 256,
+    "linformer_k": 256,
 })
 
 # HGQ2 quantization spec. q_type/place are SELECTORS in HGQ2 scopes; the type is

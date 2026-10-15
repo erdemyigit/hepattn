@@ -31,6 +31,9 @@ class KerasMaskFormerDecoderLayer(MaskFormerDecoderLayer):
         bidirectional_ca: bool = True,
         qkv_norm: bool = False,
         hybrid_norm: bool = False,
+        dense_norm_placement: Literal["hybridnorm", "legacy"] = "hybridnorm",
+        query_update_order: Literal["ca_dense_sa", "ca_sa_dense"] = "ca_dense_sa",
+        self_attn_norm_kv: bool = False,
         cross_attn_mode: Literal["softmax", "kmeans"] = "softmax",
         kmeans_kwargs: dict | None = None,
         factory: LayerFactory | None = None,
@@ -42,19 +45,25 @@ class KerasMaskFormerDecoderLayer(MaskFormerDecoderLayer):
 
         Raises:
             NotImplementedError: If cross_attn_mode="kmeans" is requested.
+            ValueError: If query_update_order is not a known order.
         """
         if cross_attn_mode != "softmax":
             raise NotImplementedError("KerasMaskFormerDecoderLayer supports cross_attn_mode='softmax' only")
 
         # skip MaskFormerDecoderLayer.__init__ (it would build torch Attention/Dense); replicate its body
         nn.Module.__init__(self)
+        if query_update_order not in {"ca_dense_sa", "ca_sa_dense"}:
+            raise ValueError(f"Unsupported query_update_order: {query_update_order}. Must be 'ca_dense_sa' or 'ca_sa_dense'.")
         factory = factory or LayerFactory()
 
         self.dim = dim
         self.bidirectional_ca = bidirectional_ca
         self.cross_attn_mode = cross_attn_mode
+        # read by the inherited MaskFormerDecoderLayer.forward
+        self.query_update_order = query_update_order
+        self.self_attn_norm_kv = self_attn_norm_kv
 
-        attn_norm, dense_post_norm, qkv_norm = get_hybrid_norm_config(norm, depth, hybrid_norm, qkv_norm)
+        attn_norm, dense_post_norm, qkv_norm = get_hybrid_norm_config(norm, depth, hybrid_norm, qkv_norm, dense_norm_placement)
 
         attn_kwargs = dict(attn_kwargs or {})
         attn_type = attn_kwargs.pop("attn_type", "torch")

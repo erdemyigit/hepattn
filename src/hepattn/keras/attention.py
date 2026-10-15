@@ -197,6 +197,8 @@ def build_keras_attention(dim: int, attn_type: str = "torch", *, factory: "Layer
         from hepattn.keras.linformer import KerasLinformerAttention  # noqa: PLC0415  (avoids an import cycle)
 
         seq_len = attn_kwargs.pop("linformer_seq_len", 256)
-        k = attn_kwargs.pop("linformer_proj_dim", 256)
+        # linformer_k is the torch Attention's name since org PR #9; linformer_proj_dim is the older spelling
+        k = attn_kwargs.pop("linformer_k", None) or attn_kwargs.pop("linformer_proj_dim", 256)
+        attn_kwargs.pop("linformer_proj_dim", None)
         return KerasLinformerAttention(dim, seq_len=seq_len, k=k, factory=factory, name=name, **attn_kwargs)
     return KerasAttention(dim, attn_type=attn_type, factory=factory, name=name, **attn_kwargs)

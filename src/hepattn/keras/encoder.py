@@ -13,6 +13,7 @@ so configs written for the GPU model can be ported directly.
 
 import warnings
 from functools import partial
+from typing import Literal
 
 import torch
 from torch import Tensor, nn
@@ -40,6 +41,7 @@ class KerasEncoderLayer(nn.Module):
         value_residual: bool = False,
         qkv_norm: bool = False,
         hybrid_norm: bool = False,
+        dense_norm_placement: Literal["hybridnorm", "legacy"] = "hybridnorm",
         dense_kwargs: dict | None = None,
         attn_kwargs: dict | None = None,
         attn_type: str = "torch",
@@ -53,7 +55,7 @@ class KerasEncoderLayer(nn.Module):
         attn_kwargs = dict(attn_kwargs or {})
         dense_kwargs = dict(dense_kwargs or {})
 
-        attn_norm, dense_post_norm, qkv_norm = get_hybrid_norm_config(norm, depth, hybrid_norm, qkv_norm)
+        attn_norm, dense_post_norm, qkv_norm = get_hybrid_norm_config(norm, depth, hybrid_norm, qkv_norm, dense_norm_placement)
 
         attn_kwargs["value_residual"] = value_residual
         attn_kwargs["is_first_layer"] = depth == 0
