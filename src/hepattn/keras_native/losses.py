@@ -163,7 +163,9 @@ def kl_div_loss(pred, true, mask, eps=DEFAULT_EPS):
 def regr_l1_loss(pred, target, object_valid_mask):
     """``F.l1_loss(pred[mask], target[mask])``: the mean over valid objects AND fields. pred, target [B, P, F].
 
-    ``target`` must be finite: replace NaN padding before calling (``where`` alone still gives NaN gradients).
+    ``target`` should be finite (callers replace NaN padding first). For this l1 form JAX would still give
+    finite gradients with NaN targets, because the ``abs`` JVP is a select (``jax/_src/lax/lax.py``
+    ``_abs_jvp_rule``); the replacement protects residual-weighted losses, which give NaN gradients.
     """
     diff = ops.abs(f32(pred) - f32(target))
     mask = ops.broadcast_to(ops.expand_dims(object_valid_mask, -1), diff.shape)

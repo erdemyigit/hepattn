@@ -14,7 +14,9 @@ supported; anything else raises (``specs_from_config``).
 Interface (B batch, P = 150 queries, T = 150 target particles, N = 160 nodes, registers already removed)
 -----------------------------------------------------------------------------------------------------------
 ``outputs``: ``{layer_name: {task_name: {key: array}}}``. ``layer_name`` is ``"layer_0"`` ...
-``"layer_{L-1}"`` and ``"final"``. An ``"encoder"`` entry, if present, is ignored. A task contributes
+``"layer_{L-1}"`` and ``"final"``. An ``"encoder"`` entry must be absent or empty: in torch it holds only
+encoder-task outputs and the dynamic-query ``query_mask`` (``maskformer.py:150-156``, ``decoder.py:223-232``),
+neither of which is ported, so a non-empty one raises. A task contributes
 costs and losses at a layer exactly when its name is a key of that layer (as in torch; the decoder decides
 this with ``has_intermediate_loss`` / ``has_first_layer_loss``). Other keys of a layer dict are passed
 through unchanged. Keys per task (CLIC names, ``output_object = "pflow"``):
@@ -44,9 +46,13 @@ key                         shape, dtype
 
 ``query_mask`` (dynamic queries) is not supported and raises. Outputs may be any float dtype; every
 cost and loss is computed in float32 (this replaces the ``torch.autocast(enabled=False)`` blocks).
-NaN regression targets are replaced by 0 BEFORE the loss: ``where(mask, |out - nan|, 0)`` has a finite
-value but a NaN gradient. The costs keep the torch NaN columns (they are under ``stop_gradient``, and the
-matcher reads only the valid target rows).
+NaN regression targets are replaced by 0 BEFORE the loss. For the l1 loss in JAX this is not strictly
+needed (the ``abs`` JVP is a select, so ``where(mask, |out - nan|, 0)`` has a finite gradient), but any
+residual-weighted loss (l2, smooth_l1, a mask-multiply form) gives NaN gradients without it
+(``docs/hgq/port_log/S4.md`` finding 2). The matcher settings are read from the YAML matcher block with
+``matcher_n_jobs_from_config`` (``pflow_hgq.yaml`` uses 16 threads; the default here is 1). The costs
+keep the torch NaN columns (they are under ``stop_gradient``, and the matcher reads only the valid target
+rows).
 """
 
 from dataclasses import dataclass
@@ -68,6 +74,14 @@ def _nan_to_zero(x):
 def _check_targets(targets: dict) -> None:
     if "query_mask" in targets:
         raise NotImplementedError("query_mask (dynamic queries) is not supported by keras_native")
+
+
+def _check_encoder_outputs(outputs: dict) -> None:
+    encoder = outputs.get(ENCODER_KEY) or {}
+    if encoder:
+        raise NotImplementedError(
+            f"outputs[{ENCODER_KEY!r}] has {sorted(encoder)}: encoder tasks and query_mask (dynamic queries) are not supported by keras_native"
+        )
 
 
 def _require(names, supported: set[str], what: str) -> None:
@@ -332,7 +346,28 @@ def specs_from_config(task_entries: list[dict[str, Any]]) -> list[TaskSpec]:
     return [spec_from_config(e["class_path"], e.get("init_args", {})) for e in task_entries]
 
 
+def matcher_n_jobs_from_config(matcher_entry: dict[str, Any]) -> int:
+    """Host-matching threads from the YAML ``matcher`` block (``class_path`` + ``init_args``).
+
+    Only the ``pflow_hgq.yaml`` matcher is supported (``Matcher`` with the scipy solver and no adaptive
+    solver); anything else raises ``NotImplementedError``. Returns ``n_jobs`` (torch default 8) when
+    ``parallel_solver`` is set, else 1.
+    """
+    kind = matcher_entry.get("class_path", "").rsplit(".", 1)[-1]
+    args = matcher_entry.get("init_args", {})
+    if kind != "Matcher":
+        raise NotImplementedError(f"matcher {matcher_entry.get('class_path')!r} is not supported by keras_native")
+    if args.get("default_solver", "scipy") != "scipy" or args.get("adaptive_solver", True):
+        raise NotImplementedError(f"only default_solver=scipy with adaptive_solver=false is supported, got {args}")
+    # parallel_backend (thread/process) and adaptive_check_interval do not change the assignment
+    unknown = set(args) - {"default_solver", "adaptive_solver", "adaptive_check_interval", "parallel_solver", "parallel_backend", "n_jobs", "verbose"}
+    if unknown:
+        raise NotImplementedError(f"unsupported matcher options {sorted(unknown)}")
+    return int(args.get("n_jobs", 8)) if args.get("parallel_solver", False) else 1
+
+
 def _decoder_layers(outputs: dict) -> list[str]:
+    _check_encoder_outputs(outputs)
     return [name for name in outputs if name != ENCODER_KEY]
 
 
