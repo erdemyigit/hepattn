@@ -174,7 +174,9 @@ def compare_mf(model, golden: dict, mode: str, jit: bool = False) -> dict:
     - ``free``: the native model runs on its own (mask feedback included). ``free.flips.<layer>`` counts attention-mask
       elements that differ; ``free.<output>`` is the max abs difference.
     - ``forced``: the hybrid's attention masks are injected per layer (``attn_masks``), so a threshold flip in one layer
-      cannot amplify into the next; ``forced.<output>`` is the max abs difference.
+      cannot amplify into the next; ``forced.<output>`` is the max abs difference. The forced run returns the injected
+      masks as its ``attn_mask`` outputs, so they are asserted equal (structural: teacher forcing took effect) and are
+      not a parity metric; the mask-equality evidence is ``free.flips``.
     Non-finite / sentinel (finfo.min) elements must match exactly (asserted). Regression rows whose proxy depends on
     top-k tie-breaking (``regression_tie_rows``) are excluded and counted in ``tie_rows``.
     """
@@ -192,7 +194,10 @@ def compare_mf(model, golden: dict, mode: str, jit: bool = False) -> dict:
             cand = out[key]
             assert cand.shape == value.shape, f"{run}.{key}: shape {cand.shape} vs {value.shape}"
             if value.dtype == bool:
-                metrics[f"{run}.flips.{key}"] = int((cand != value).sum())
+                if run == "forced":
+                    assert np.array_equal(cand, value), f"forced.{key}: the injected hybrid mask was not used"
+                else:
+                    metrics[f"{run}.flips.{key}"] = int((cand != value).sum())
                 continue
             special = ~np.isfinite(value) | (np.abs(value) > SENTINEL)
             if run == "forced" or key == LAYER0_LOGIT:
