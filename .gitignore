@@ -135,3 +135,5 @@ data/clic/
 # Polaris kit: site-specific settings (never commit)
 polaris/env.sh
 polaris_hgq.yaml
+# S3 measured golden maxima (test tolerances are 2x these)
+!tests/keras_native/golden/mf_measured.json
