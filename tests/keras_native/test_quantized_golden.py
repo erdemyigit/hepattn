@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from .golden.cases import CASES, QUANT_SPECS
-from .golden_utils import build_from_golden, inputs_of, load_golden, run
+from .golden_utils import build_from_golden, build_native, init_state_mismatches, inputs_of, load_golden, run
 from .parity_utils import record_measurement
 
 # measured max |native - hybrid| per (case, mode); tolerance = 2x
@@ -56,6 +56,20 @@ def native_outputs():
 
 def test_tolerance_table_covers_every_golden_case():
     assert set(MEASURED) == {(case, mode) for case in CASES for mode in QUANT_SPECS}
+
+
+@pytest.mark.parametrize("mode", ["high", "low"])
+@pytest.mark.parametrize("case", list(CASES))
+def test_init_quantizer_state_matches_hybrid(case, mode):
+    """Built in the same HGQ2 scopes, the native leaves start from the hybrid's quantizer state, bit for bit.
+
+    The parity test below overwrites all leaf variables, so on its own it cannot see a native layer that
+    ignores the config scopes; this test can (every non-kernel/bias variable is compared before loading).
+    """
+    golden = load_golden(case)
+    module, _ = build_native(case, mode, golden)
+    mismatches = init_state_mismatches(module, golden, mode)
+    assert not mismatches, f"{case}/{mode}: initial quantizer state differs from the hybrid at {mismatches[:8]}"
 
 
 @pytest.mark.parametrize("mode", list(QUANT_SPECS))

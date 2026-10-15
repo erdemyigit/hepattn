@@ -115,13 +115,37 @@ def assign_leaf_variables(module, golden: dict, mode: str) -> int:
     return count
 
 
-def build_from_golden(case: str, mode: str, golden: dict | None = None):
-    """A native twin of ``case`` in ``mode`` holding the hybrid golden weights; returns (module, factory, golden)."""
-    golden = load_golden(case) if golden is None else golden
+def build_native(case: str, mode: str, golden: dict):
+    """A freshly initialised native twin, built inside the mode's HGQ2 scopes by one eager call (no weights loaded)."""
     factory = LayerFactory(QUANT_SPECS[mode])
     with factory.scopes():
         module = native_module(case, factory)
         run(case, module, inputs_of(golden))  # eager build from the static shapes
+    return module, factory
+
+
+RANDOM_INIT = {"kernel", "bias"}  # leaf variables whose initial value is random (all others come from the config)
+
+
+def init_state_mismatches(module, golden: dict, mode: str) -> list[str]:
+    """Leaf variables (except kernel/bias) whose native INITIAL value differs from the hybrid's golden value."""
+    prefix = f"{mode}::kv::"
+    bad = []
+    for leaf_name, layer in native_leaves(module).items():
+        for i, var in enumerate(layer.variables):
+            if var.name in RANDOM_INIT:
+                continue
+            ref = golden.get(f"{prefix}{leaf_name}::{i:03d}::{var.name}")
+            value = keras.ops.convert_to_numpy(var.value)
+            if ref is None or ref.shape != value.shape or not np.array_equal(ref, value):
+                bad.append(f"{leaf_name}/{i}:{var.name}")
+    return bad
+
+
+def build_from_golden(case: str, mode: str, golden: dict | None = None):
+    """A native twin of ``case`` in ``mode`` holding the hybrid golden weights; returns (module, factory, golden)."""
+    golden = load_golden(case) if golden is None else golden
+    module, factory = build_native(case, mode, golden)
     port_reference(case, module, golden)
     assign_leaf_variables(module, golden, mode)
     return module, factory, golden
