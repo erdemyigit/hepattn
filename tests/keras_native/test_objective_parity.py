@@ -9,6 +9,7 @@ import yaml
 from hepattn.keras_native import losses as L
 from hepattn.keras_native import objective as O
 from hepattn.models import loss as torch_loss
+from hepattn.models.matcher import Matcher
 
 from .objective_utils import (
     CLIC_YAML,
@@ -246,3 +247,111 @@ def test_max_errors_helper_discriminates():
     inf_ref[3] = np.inf
     with pytest.raises(AssertionError, match="inf"):
         assert_close_same_nonfinite(inf_ref, np.where(np.arange(100) == 3, -np.inf, ref), atol=1, rtol=1)
+
+
+def test_total_loss_is_the_sum_of_every_leaf():
+    """Distinct powers of two: dropping, doubling or zeroing any leaf changes the total exactly."""
+    losses = {
+        "layer_0": {"mask": {"mask_bce": 1.0, "mask_dice": 2.0}},
+        "layer_1": {"classification": {"object_ce": 4.0}, "mask": {"mask_bce": 8.0, "mask_dice": 16.0}},
+        "final": {"classification": {"object_ce": 32.0}, "regression": {"l1": 64.0}},
+    }
+    leaves = keras.tree.map_structure(lambda v: keras.ops.convert_to_tensor(v, "float32"), losses)
+    assert float(O.total_loss(leaves)) == 127.0
+
+
+def test_mask_bce_sample_weight_with_non_unit_null_weight_equals_torch():
+    """null_weight != 1 weights the BCE of target-0 entries; CLIC uses 1.0, so this path needs its own case."""
+    rng = np.random.default_rng(11)
+    targets = random_targets(rng, 3, padded_node_targets=False)
+    outputs = random_outputs(rng, targets["node_valid"])["final"]["mask"]
+    task = torch_tasks()[1]
+    assert task.name == "mask"
+    values = {}
+    for null_weight in (0.5, 1.0):
+        task.null_weight = null_weight
+        spec = O.ObjectHitMaskSpec(
+            name="mask",
+            input_constituent="node",
+            output_object="pflow",
+            target_object="particle",
+            losses={"mask_bce": 5.0, "mask_dice": 1.0},
+            costs={"mask_dice": 1.0},
+            null_weight=null_weight,
+        )
+        ref = task.loss(to_torch(outputs), to_torch(targets))
+        got = spec.loss(outputs, targets)
+        for key in ref:
+            assert_close_same_nonfinite(ref[key].numpy(), _np(got[key]), **LOSS_TOL, what=f"null_weight={null_weight} {key}")
+        values[null_weight] = float(got["mask_bce"])
+    print(f"mask_bce: null_weight 0.5 -> {values[0.5]:.6f}, 1.0 -> {values[1.0]:.6f}")
+    assert abs(values[0.5] - values[1.0]) > 0.1 * values[1.0], values  # control: the weight matters
+
+
+def test_mask_dice_cost_with_finite_logits_at_padded_nodes_equals_torch(tasks, specs):
+    """The model sets finfo.min at padded nodes; here they are finite, so only the pad multiply removes them."""
+    rng = np.random.default_rng(12)
+    targets = random_targets(rng, 3, padded_node_targets=False)
+    logits = (3.0 * rng.normal(size=(3, 150, 160))).astype(np.float32)
+    ref = tasks["mask"].cost({"pflow_node_logit": torch.from_numpy(logits)}, to_torch(targets))["mask_dice"].numpy()
+    got = _np(specs["mask"].cost({"pflow_node_logit": logits}, targets)["mask_dice"])
+    assert_close_same_nonfinite(ref, got, **COST_TOL, what="mask_dice cost, finite padded logits")
+    unmasked = torch_loss.mask_dice_cost(torch.from_numpy(logits), torch.from_numpy(targets["particle_node_valid"]).float()).numpy()
+    assert np.abs(unmasked - ref).max() > 1e-2  # control: the padded nodes would change the cost
+
+
+def test_kl_div_with_zero_prediction_at_a_target_entry_equals_torch(tasks, specs):
+    """Pred == 0 where true > 0: torch adds eps and stays finite (-true * log(1e-8)); without eps it is inf."""
+    rng = np.random.default_rng(13)
+    targets = random_targets(rng, 2, padded_node_targets=False)
+    outputs = random_outputs(rng, targets["node_valid"])["final"]["incidence"]
+    pred = outputs["pflow_incidence"].copy()
+    pred[:, :5, :20] = 0.0  # valid objects (>= 10 per event) and valid nodes (>= 50 per event)
+    assert (targets["particle_incidence"][:, :5, :20] > 0).all()
+    out = {"pflow_incidence": pred}
+    targets_t = to_torch(targets)
+    for kind in ("cost", "loss"):
+        ref = getattr(tasks["incidence"], kind)(to_torch(out), targets_t)["kl_div"].numpy()
+        got = _np(getattr(specs["incidence"], kind)(out, targets)["kl_div"])
+        assert np.isfinite(ref).all(), kind
+        tol = COST_TOL if kind == "cost" else LOSS_TOL
+        abs_err, rel_err = assert_close_same_nonfinite(ref, got, **tol, what=f"kl_div {kind} with zero predictions")
+        print(f"kl_div {kind} with pred=0 entries: max abs {abs_err:.2e}, max rel {rel_err:.2e}")
+
+
+def test_non_empty_encoder_outputs_raise(specs):
+    rng = np.random.default_rng(14)
+    targets = random_targets(rng, 1, padded_node_targets=False)
+    outputs = random_outputs(rng, targets["node_valid"])
+    spec_list = list(specs.values())
+    O.model_costs({**outputs, "encoder": {}}, targets, spec_list)  # torch always emits an empty one
+    for encoder in ({"query_mask": np.ones((1, 150), dtype=bool)}, {"hit_filter": {"node_logit": np.zeros((1, 160), np.float32)}}):
+        with pytest.raises(NotImplementedError, match="encoder"):
+            O.model_costs({**outputs, "encoder": encoder}, targets, spec_list)
+        with pytest.raises(NotImplementedError, match="encoder"):
+            O.model_losses({**outputs, "encoder": encoder}, targets, spec_list)
+
+
+def test_matcher_n_jobs_from_pflow_hgq_yaml_equals_torch_matcher():
+    cfg = yaml.safe_load(CLIC_YAML.read_text())
+    entry = cfg["model"]["model"]["init_args"]["matcher"]
+    torch_matcher = Matcher(**entry["init_args"])
+    assert torch_matcher.parallel_solver
+    assert O.matcher_n_jobs_from_config(entry) == torch_matcher.n_jobs == 16
+    base = {"class_path": entry["class_path"], "init_args": {"adaptive_solver": False}}
+    assert O.matcher_n_jobs_from_config(base) == 1  # torch default parallel_solver=False
+    assert O.matcher_n_jobs_from_config({**base, "init_args": {"adaptive_solver": False, "parallel_solver": True}}) == Matcher().n_jobs
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"class_path": "hepattn.models.matcher.Matcher", "init_args": {}},  # torch default adaptive_solver=True
+        {"class_path": "hepattn.models.matcher.Matcher", "init_args": {"adaptive_solver": False, "default_solver": "lap1015"}},
+        {"class_path": "hepattn.models.matcher.Matcher", "init_args": {"adaptive_solver": False, "unknown": 1}},
+        {"class_path": "my.OtherMatcher", "init_args": {"adaptive_solver": False}},
+    ],
+)
+def test_unsupported_matcher_configs_raise(entry):
+    with pytest.raises(NotImplementedError):
+        O.matcher_n_jobs_from_config(entry)

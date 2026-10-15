@@ -6,6 +6,8 @@ outputs are copied to numpy BEFORE ``MaskFormer.loss`` (which permutes them in p
 costs, one host matching call, the permutation and the losses run in one ``jax.jit``.
 """
 
+from types import SimpleNamespace
+
 import jax
 import numpy as np
 import pytest
@@ -21,6 +23,7 @@ from hepattn.models.input import InputNet
 from hepattn.models.maskformer import MaskFormer
 from hepattn.models.matcher import Matcher
 from hepattn.models.posenc import FourierPositionEncoder
+from hepattn.models.wrapper import ModelWrapper
 
 from .objective_utils import SCALE_DICT, assert_close_same_nonfinite, flatten, to_numpy, torch_tasks
 
@@ -128,4 +131,11 @@ def test_maskformer_loss_equals_torch(seed, num_events, real_like):
     # dummy data puts target 1 at padded nodes: torch mask_bce is inf at all 3 mask layers; real-like data is finite
     assert n_inf == (0 if real_like else 3)
     assert np.isfinite(float(total)) == real_like
+    # the scalar S5 trains on equals the hybrid's total (ModelWrapper.aggregate_losses, logging stubbed out)
+    total_t = ModelWrapper.aggregate_losses(SimpleNamespace(model=model, log=lambda *_a, **_k: None), losses_t, stage="train").numpy()
+    if real_like:
+        abs_err, rel_err = assert_close_same_nonfinite(total_t, np.asarray(total), **LOSS_TOL, what="total loss")
+        print(f"[seed {seed}, B={num_events}] total loss {float(total_t):.6f}: max abs {abs_err:.2e}, max rel {rel_err:.2e}")
+    else:
+        assert np.array_equal(total_t, np.asarray(total)), (total_t, total)
     assert all(np.asarray(v).shape == (num_events, 150) for v in idx.values())

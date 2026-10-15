@@ -157,8 +157,16 @@ def _fixed_index_loss(params, feats, targets, idx):
     return O.total_loss(O.model_losses(O.permute_outputs(outputs, idx, O.clic_specs()), targets, O.clic_specs()))
 
 
+def _assert_finite_tree(tree, what):
+    for path, leaf in jax.tree_util.tree_leaves_with_path(tree):
+        assert np.isfinite(np.asarray(leaf)).all(), f"{what}: non-finite gradient at {jax.tree_util.keystr(path)}"
+
+
 def _max_tree_diff(a, b):
-    return max(float(jnp.max(jnp.abs(x - y))) for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b), strict=True))
+    """Max abs difference over all leaves; NaN-safe (Python max/min would silently drop a NaN)."""
+    diff = max(float(jnp.max(jnp.abs(x - y))) for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b), strict=True))
+    assert not np.isnan(diff), "NaN in a gradient difference"
+    return diff
 
 
 def test_callback_step_gradients_equal_fixed_index_reference():
@@ -191,10 +199,13 @@ def test_callback_step_gradients_equal_fixed_index_reference():
         for layer, c in eager_costs.items():
             np.testing.assert_array_equal(idx[layer], matching.host_match(np.asarray(c), targets["particle_valid"]))
         ref_loss, ref_grads = reference(params, feats, targets, idx)
+        _assert_finite_tree(grads, "callback step")
+        _assert_finite_tree(ref_grads, "fixed-index reference")
         worst_grad = max(worst_grad, _max_tree_diff(grads, ref_grads))
         worst_loss = max(worst_loss, abs(float(loss) - float(ref_loss)))
         identity = {k: np.broadcast_to(np.arange(P, dtype=np.int32), v.shape) for k, v in idx.items()}
         ctrl_loss, ctrl_grads = reference(params, feats, targets, identity)
+        _assert_finite_tree(ctrl_grads, "identity control")
         min_control = min(min_control, _max_tree_diff(grads, ctrl_grads))
         assert abs(float(ctrl_loss) - float(loss)) > 1e-2
         params = jax.tree.map(lambda w, g: w - 0.5 * g, params, grads)
