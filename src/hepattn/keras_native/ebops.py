@@ -17,6 +17,14 @@ one term per trainable weight that has a regularizer (``keras/src/layers/layer.p
 ``split_losses`` drops them before the division. The native model calls no other ``add_loss``, so every term in front is
 an EBOPs term (``tests/keras_native/test_ebops.py`` checks both facts).
 
+One term per leaf, also for leaves called several times per forward (the task heads run once per decoder layer for the
+intermediate losses; org test model: 429 ``add_loss`` calls on 377 leaves, 377 terms). Every call adds a term, but
+``stateless_call`` runs ``self.call``, not ``__call__``, so each sublayer called from the model's ``call`` opens its own
+call context, and ``Layer._get_call_context`` then runs ``_clear_losses`` on it, which removes that layer's earlier terms
+(and its sublayers') from the scope. Only the last call's terms remain. A leaf called twice inside ONE other layer's call
+keeps both terms. The hybrid gets the same result: each keras layer called from torch code is an entry layer too. The
+test counts the calls, so a Keras or model change that breaks this fails there.
+
 ``EbopsLeaves.enabled(on)`` sets ``_enable_ebops`` on every leaf while a step is traced. HGQ2 reads that Python bool at
 trace time, so a step jitted with a static ``ebops_on`` argument has one executable per value (PeriodicEBOPs).
 """

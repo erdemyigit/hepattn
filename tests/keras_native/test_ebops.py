@@ -4,13 +4,16 @@
   G1 spike graph (``polaris/14_backend_spike.py``, identical weights and inputs in both backends), in total and per leaf.
   Control: the JAX ``_ebops`` variables of the softmax exp tables read 4294967295, and their sum misses most of the total.
 - The loss list of ``stateless_call``: every term before the regularizer tail is an EBOPs term (with EBOPs off exactly the
-  regularizer terms remain, equal to the tail of the EBOPs-on list), so ``split_losses`` is exact.
+  regularizer terms remain, equal to the tail of the EBOPs-on list), so ``split_losses`` is exact. Leaves called several
+  times per forward (the task heads of the intermediate losses) add one term per call, but one term per leaf remains:
+  the test counts the ``add_loss`` calls (more than the terms), so a Keras change to the clearing is caught.
 - PeriodicEBOPs reproduces ``tests/keras/test_periodic_ebops.py`` on the hybrid's own golden model (``mf_torch``, prod spec,
   beta 1e-12): active 804.9105 vs skipped 0.33496 (the regularizer sum). The plan's 804.96 / 0.381 are the hybrid's
   pre-S5 double count; the deduplicated hybrid ``quant_losses()`` measures 804.9104 / 0.33496 on the same model.
 - ``read_beta`` refuses mixed betas; ``ebops_readout`` refuses beta <= 0.
 """
 
+import collections
 import json
 import os
 import subprocess
@@ -121,7 +124,7 @@ def org_model():
     return build_mf("org", QUANT_SPECS["high"], inputs), inputs
 
 
-def test_loss_list_is_ebops_terms_then_regularizers(org_model):
+def test_loss_list_is_ebops_terms_then_regularizers(org_model, monkeypatch):
     model, inputs = org_model
     el = EbopsLeaves(model)
     tv = [v.value for v in model.trainable_variables]
@@ -131,7 +134,26 @@ def test_loss_list_is_ebops_terms_then_regularizers(org_model):
         with el.enabled(on):
             return jax.jit(lambda tv, ntv: model.stateless_call(tv, ntv, inputs, training=True, return_losses=True)[2])(tv, ntv)
 
-    on, off = losses(True), losses(False)
+    calls = collections.Counter()
+
+    def counting(leaf):
+        original = leaf.add_loss
+
+        def add_loss(loss):
+            calls[id(leaf)] += 1
+            return original(loss)
+
+        return add_loss
+
+    for leaf in el.leaves:
+        monkeypatch.setattr(leaf, "add_loss", counting(leaf))
+    on = losses(True)
+    monkeypatch.undo()
+    off = losses(False)
+    repeated = sum(1 for n in calls.values() if n > 1)
+    print(f"MEASURED add_loss: {sum(calls.values())} calls on {len(calls)} leaves ({repeated} called more than once)")
+    # measured: 429 calls, 377 leaves, 13 leaves called 5 times; every call adds a term, one per leaf survives
+    assert len(calls) == len(el) and repeated > 0 and sum(calls.values()) > len(el), (sum(calls.values()), len(calls), repeated)
     assert el.n_regularizers > 0, "no regularized weights: the tail split is untested"
     assert len(off) == el.n_regularizers
     pen, reg = el.split_losses(on)
