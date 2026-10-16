@@ -212,10 +212,24 @@ NO_JAX_RUN = textwrap.dedent(
                 attn.build((None, 6, 32), (None, 8, 32))
             out = keras.ops.convert_to_numpy(attn(q, kv, kv, attn_mask=mask))
             ran[mode] = [list(out.shape), bool(np.isfinite(out).all()), type(attn.core).__name__]
+            # self-attention with a kv_mask: ProjectCore with renorm, rsqrt table and tail rows (6 tokens, seq_len 10)
+            with factory.scopes():
+                sa = Attention(32, num_heads=4, attn_type="linformer", linformer_seq_len=10, linformer_k=4, factory=factory)
+                sa.build((None, 6, 32))
+            out = keras.ops.convert_to_numpy(sa(q, kv_mask=np.arange(6)[None] < np.array([[6], [4]])))
+            ran[mode + "_self"] = [list(out.shape), bool(np.isfinite(out).all()), type(sa.core).__name__, sa.core.E.tail is not None]
     print(json.dumps({"backend": keras.backend.backend() if not failed else None, "failed": failed, "ran": ran,
                       "jax": sorted(m for m in sys.modules if m.split(".")[0] in {"jax", "jaxlib"})}))
     """
 )
+
+
+EXPECTED_RUN = {
+    "float": [[2, 6, 32], True, "AttendCore"],
+    "quantized": [[2, 6, 32], True, "AttendCore"],
+    "float_self": [[2, 6, 32], True, "ProjectCore", True],
+    "quantized_self": [[2, 6, 32], True, "ProjectCore", True],
+}
 
 
 def run_without_jax(python: str, modules: list[str], block: bool) -> dict:
@@ -231,7 +245,7 @@ def test_masked_linformer_core_runs_under_torch_with_jax_blocked():
     assert out["failed"] == {}, out["failed"]
     assert out["backend"] == "torch"
     assert out["jax"] == []
-    assert out["ran"] == {"float": [[2, 6, 32], True, "AttendCore"], "quantized": [[2, 6, 32], True, "AttendCore"]}
+    assert out["ran"] == EXPECTED_RUN
 
 
 def test_control_the_jax_blocker_stops_a_jax_import():
@@ -254,4 +268,4 @@ def test_masked_linformer_core_runs_in_the_hybrid_env_without_jax():
     assert probe.stdout.strip() == "True", "the hybrid env has jax installed; this test needs an env without it"
     out = run_without_jax(str(HYBRID_PYTHON), CORE_MODULES, block=False)
     assert out["failed"] == {} and out["backend"] == "torch" and out["jax"] == []
-    assert out["ran"] == {"float": [[2, 6, 32], True, "AttendCore"], "quantized": [[2, 6, 32], True, "AttendCore"]}
+    assert out["ran"] == EXPECTED_RUN

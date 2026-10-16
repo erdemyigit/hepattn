@@ -259,7 +259,7 @@ def test_project_core_equals_project_then_unmasked_attention(shape):
 
 # ------------------------------------------------------------------------------ float: Attention vs org/main
 # measured max |native - org|: q_ca 6.258e-7, kv_ca 5.960e-7, enc 6.258e-7, enc_short 5.364e-7, q_sa 5.662e-7;
-# q_ca sorted 5.364e-7; batch of one 4.321e-7
+# q_ca sorted 5.364e-7; batch of one 4.321e-7; distinct k and v: q_ca 4.768e-7, kv_ca 4.619e-7
 ATTN_TOL = 1.25e-6
 SORT_SHAPES = {"q_ca": True}
 
@@ -272,6 +272,22 @@ def test_linformer_attention_equals_org(shape):
     assert nattn.core_kind == SHAPES[shape][3]
     x = make_inputs(shape, 6, sort=SORT_SHAPES.get(shape, False))
     assert_parity("attention.linformer", shape, torch_out(tattn, x), native_out(nattn, x), atol=ATTN_TOL, rtol=0.0)
+
+
+@pytest.mark.parametrize("shape", ["q_ca", "kv_ca"])
+def test_linformer_cross_attention_with_distinct_values_equals_org(shape):
+    """As the decoder calls them: q_ca(q_pe, k=kv_pe, v=kv), kv_ca(kv_pe, k=q_pe, v=q), so k and v differ."""
+    tattn = torch_attention(shape, 25)
+    nattn = native_attention(shape, tattn)
+    x = make_inputs(shape, 26, sort=SORT_SHAPES.get(shape, False))
+    v = np.random.default_rng(27).standard_normal(x["kv"].shape).astype(np.float32)
+    masks = {"kv_mask": x["kv_mask"], "attn_mask": x["attn_mask"], "kv_sort_idx": x["kv_sort_idx"]}
+    with torch.no_grad():
+        ref = tattn(t(x["q"]), t(x["kv"]), t(v), **{key: t(val) for key, val in masks.items()}).numpy()
+    got = n(nattn(x["q"], x["kv"], v, **masks))
+    assert_parity("attention.linformer_distinct_v", shape, ref, got, atol=ATTN_TOL, rtol=0.0)
+    same = n(nattn(x["q"], x["kv"], x["kv"], **masks))
+    assert np.abs(same - ref).max() > 1e3 * ATTN_TOL  # control, v = k: measured 0.326 (q_ca), 0.334 (kv_ca)
 
 
 def test_kv_sort_idx_gathers_keys_masks_and_attn_mask_columns():
@@ -396,6 +412,29 @@ def test_key_outside_a_query_mask_does_not_reach_that_query(mode):
 
 
 # ---------------------------------------------------------------------------------------------- quantized
+def kif_bits(quantizer) -> set[tuple[int, int, int]]:
+    """The distinct (k, i, f) of a KIF quantizer's elements."""
+    z = quantizer.quantizer
+    k, i, f = (np.broadcast_to(n(x), np.broadcast_shapes(*(np.shape(n(y)) for y in (z.k, z.i, z.f)))).ravel() for x in (z.k, z.i, z.f))
+    return {(int(a), int(b), int(c)) for a, b, c in zip(k, i, f, strict=True)}
+
+
+def test_core_leaves_take_the_spec_when_built_outside_the_scopes():
+    """Attention.build creates the core leaves and enters the factory scopes again, so a build outside the caller's
+    scopes still gives them the spec (HGQ2's defaults would give E f = 6 and qk inputs (i, f) = (2, 6)).
+    """
+    spec = QUANT_SPECS["high"]  # E f0 min(18, cap 7) = 7; datalane (i, f) = (8, 16)
+    factory = LayerFactory(spec)
+    with factory.scopes():
+        nattn = NAttention(DIM, num_heads=HEADS, attn_type="linformer", linformer_seq_len=160, linformer_k=K, factory=factory, name="os")
+    nattn.build((None, 160, DIM), (None, 150, DIM))
+    core = nattn.core
+    for quantizer in (core.E.proj.kq, core.E.tail_q, core.F.proj.kq, core.F.tail_q):
+        assert {f for _, _, f in kif_bits(quantizer)} == {7}
+    for lane in core.qk.iq:
+        assert {(i, f) for _, i, f in kif_bits(lane)} == {(8, 16)}
+
+
 def test_projection_fractional_bits_are_capped_and_the_table_fits_hls4ml():
     """E/F (head and tail) start and stay at <= seq_proj_frac_cap fractional bits; the renorm lanes are sized for the cap."""
     spec = QUANT_SPECS["high"]  # weight b0=20, i0=2: f0 = 18 before the cap
@@ -407,8 +446,15 @@ def test_projection_fractional_bits_are_capped_and_the_table_fits_hls4ml():
             f = quantizer.quantizer._f  # noqa: SLF001
             assert float(np.max(n(f.value))) == cap
             assert float(np.max(n(f.constraint(np.full(f.shape, 12.0))))) == cap  # an optimizer step cannot pass the cap
-    lane_in = nattn.core.lut_k.iq.quantizer
-    assert float(np.max(n(lane_in.i))) + float(np.max(n(lane_in.f))) == 1 + 2 * cap + 4
+    bits = nml.renorm_bits(cap)
+    assert bits == {"lane": (1, 2 * cap + 4), "lut_out": (cap + 3, 2 * cap)}
+    for part in ("k", "v"):
+        lut, kept = getattr(nattn.core, f"lut_{part}"), getattr(nattn.core, f"kept_{part}")
+        assert kif_bits(lut.iq) == {(0, *bits["lane"])}
+        assert kif_bits(lut.oq) == {(0, *bits["lut_out"])}
+        mask_lane, table_lane = kept.iq
+        assert kif_bits(mask_lane) == {(0, 1, 0)}  # the plan's 1-bit unsigned mask lane
+        assert kif_bits(table_lane) == {(0, *bits["lane"])}
     assert nml.lut_entries(cap) == 2**19 <= 1_000_000
     assert nml.lut_entries(cap + 1) > 1_000_000  # 7 is the largest deployable cap
     # control: the q/k/v projections keep the spec's 18 fractional bits (the cap is local to E and F)
@@ -452,6 +498,92 @@ def test_renorm_precision_bound_at_one_valid_key():
     assert err <= RENORM_REL_TOL
     # control: the prototype's 12-bit lanes (QML 18.5%) exceed the bound by >= 10x
     assert renorm_rel_error(lane=(1, 12), lut_out=(7, 8)) >= 10 * RENORM_REL_TOL
+
+
+def quantize_kif_rnd(x: np.ndarray, quantizer) -> np.ndarray:
+    """Numpy model of an HGQ2 KIF quantizer with round mode RND, for values inside its range (asserted)."""
+    z = quantizer.quantizer
+    assert (z.round_mode, z.overflow_mode) == ("RND", "SAT_SYM"), (z.round_mode, z.overflow_mode)
+    i, f = n(z.i).astype(np.float64), n(z.f).astype(np.float64)
+    assert np.all(np.abs(x) < 2.0**i - 2.0**-f)  # no saturation, so rounding is the whole quantizer
+    return np.floor(x.astype(np.float64) * 2.0**f + 0.5) * 2.0**-f
+
+
+# measured max |energy() - numpy| over E/F: kv_ca 1.432e-9, enc_short 1.520e-9 (energies up to 0.022). Controls: float-E
+# energy 2.4e-3 to 2.7e-3 off, float-tail energy 1.0e-4 to 4.5e-4 off
+ENERGY_TOL = 3.04e-9
+# measured max |core - masked_linformer on the dequantized rows| at FINE_E_SPEC: kv_ca 6.332e-4, enc_short 4.763e-4.
+# Controls: float rows 0.120 / 0.114, float tail rows only 7.453e-3 / 1.780e-2
+QUANT_E_CORE_TOL = {"kv_ca": 1.27e-3, "enc_short": 9.53e-4}
+# E/F at the production 6 fractional bits (off-grid at init); every other lane fine, so E's rounding dominates
+FINE_E_SPEC = {
+    "weight": {"default_q_type": "kbi", "b0": 8, "i0": 2},
+    "datalane": {"default_q_type": "kif", "i0": 8, "f0": 16},
+    "table": {"default_q_type": "kif", "i0": 2, "f0": 16},
+}
+
+
+@pytest.mark.parametrize("shape", ["kv_ca", "enc_short"])
+def test_renorm_and_projection_use_the_quantized_rows(shape):
+    """Plan 5.6 leaf table: the renorm weights W = E^2 / sum_rows E^2 come from the QUANTIZED rows, head and tail.
+
+    E/F keep their default (off-grid) init. (1) ``energy()`` equals W of the numpy-quantized rows; the float-E and
+    float-tail energies are far outside the tolerance. (2) The whole core equals masked_linformer on the dequantized
+    rows and is far from it on the float rows or with a float tail.
+    """
+    q_len, kv_len, seq_len, kind = SHAPES[shape]
+    keras.utils.set_random_seed(0)
+    factory = LayerFactory(FINE_E_SPEC)
+    with factory.scopes():
+        if kind == "attend":
+            core = nml.AttendCore(factory, HEADS, HEAD_DIM, q_len, kv_len, seq_len, K, name="qe")
+        else:
+            core = nml.ProjectCore(factory, HEADS, HEAD_DIM, q_len, kv_len, seq_len, K, name="qe")
+    core.build()
+    rows, gaps = {}, {}
+    for label, proj in (("E", core.E), ("F", core.F)):
+        head, tail = n(proj.proj.kernel), n(proj.tail)
+        assert tail.shape == (seq_len - kv_len, K)
+        hq, tq = quantize_kif_rnd(head, proj.proj.kq), quantize_kif_rnd(tail, proj.tail_q)
+        assert np.mean(hq != head) > 0.9 and np.mean(tq != tail) > 0.9  # off-grid: quantized != float
+        want = hq**2 / ((hq**2).sum(0) + (tq**2).sum(0))
+        got = n(proj.energy(training=False)).astype(np.float64)
+        assert_parity("masked_linformer.energy", f"{shape}.{label}", want, got, atol=ENERGY_TOL, rtol=0.0)
+        head64, tail64 = head.astype(np.float64), tail.astype(np.float64)
+        float_e = head64**2 / ((head64**2).sum(0) + (tail64**2).sum(0))
+        float_tail = hq**2 / ((hq**2).sum(0) + (tail64**2).sum(0))
+        gaps[label] = (np.abs(float_e - want).max(), np.abs(float_tail - want).max())
+        rows[label] = {
+            "quantized": np.concatenate([hq, tq]).astype(np.float32),
+            "float": np.concatenate([head, tail]),
+            "float tail": np.concatenate([hq, tail]).astype(np.float32),
+        }
+    for float_gap, tail_gap in gaps.values():  # controls
+        assert float_gap > 1e5 * ENERGY_TOL and tail_gap > 1e4 * ENERGY_TOL, gaps
+
+    rng = np.random.default_rng(1)
+    q = rng.standard_normal((B, HEADS, q_len, HEAD_DIM)).astype(np.float32)
+    k, v = (rng.standard_normal((B, HEADS, kv_len, HEAD_DIM)).astype(np.float32) for _ in range(2))
+    kv_mask = np.ones((B, kv_len), bool)
+    kv_mask[0, -7:] = False
+    if kind == "attend":
+        mask = (rng.random((B, q_len, kv_len)) < 0.4) & kv_mask[:, None]
+
+        def reference(e, f):
+            return ml.attend(t(q), t(k), t(v), t(e), t(f), t(mask)).numpy()
+
+    else:
+        mask = kv_mask
+
+        def reference(e, f):
+            return F.scaled_dot_product_attention(t(q), ml.project(t(k), t(e), t(mask)), ml.project(t(v), t(f), t(mask))).numpy()
+
+    got = n(core(q, k, v, mask, training=False))
+    refs = {variant: reference(rows["E"][variant], rows["F"][variant]) for variant in ("quantized", "float", "float tail")}
+    tol = QUANT_E_CORE_TOL[shape]
+    assert_parity("masked_linformer.quantized_rows", shape, refs["quantized"], got, atol=tol, rtol=0.0)
+    for variant in ("float", "float tail"):  # controls
+        assert np.abs(got - refs[variant]).max() > 2 * tol, variant
 
 
 EXPECTED_LEAVES = {
@@ -635,7 +767,8 @@ def test_core_choice_and_call_mismatches():
         return attn
 
     assert build().core_kind == "attend"
-    assert build(same_shape=True, kv_len=150).core_kind == "project"  # (q, q, q): the decoder's q_sa build
+    # build(s, s, s) with ONE shape object; a keras auto-build of call(x, x, x) passes distinct tuples and gives attend
+    assert build(same_shape=True, kv_len=150).core_kind == "project"
     selfbuilt = NAttention(DIM, num_heads=HEADS, attn_type="linformer", linformer_seq_len=168, linformer_k=K)
     selfbuilt.build((None, 168, DIM))
     assert selfbuilt.core_kind == "project"
