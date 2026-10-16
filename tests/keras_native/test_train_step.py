@@ -249,13 +249,15 @@ def small_model_and_loss():
     return model, loss_fn
 
 
-@pytest.mark.parametrize("donate", [True, False])
+@pytest.mark.parametrize("donate", [None, True, False])
 def test_state_donation_and_model_variables(donate):
+    """``None``: the default, which must donate (Keras' trainer does; S5.md "G1 speed gap")."""
     model, loss_fn = small_model_and_loss()
     rng = np.random.default_rng(0)
     batch = (rng.normal(size=(5, 4)).astype(np.float32), rng.normal(size=(5, 3)).astype(np.float32))
     opt = build_optimizer(model, optimizer="AdamW", lrs_config=LRS, total_steps=100)
-    steps = TrainStep(model, opt, loss_fn, donate=donate)
+    steps = TrainStep(model, opt, loss_fn) if donate is None else TrainStep(model, opt, loss_fn, donate=donate)
+    donate = True if donate is None else donate
     old = steps.init_state()
     new, _ = steps.train_step(old, batch)
     deleted = [x.is_deleted() for x in old.tv + old.ov]
