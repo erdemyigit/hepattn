@@ -1,11 +1,12 @@
 """Lightning callbacks for HGQ2 housekeeping (ports of the keras-native utilities)."""
 
 import csv
-import math
 from pathlib import Path
 
 import torch
 from lightning import Callback, LightningModule, Trainer
+
+from hepattn.keras_native.beta_control import BetaPIDController, ramp_beta
 
 
 def quantized_leaves(model) -> list:
@@ -201,8 +202,7 @@ class BetaScheduler(Callback):
         self.warmup_steps = warmup_steps
 
     def on_train_batch_start(self, trainer: Trainer, pl_module: LightningModule, batch, batch_idx: int) -> None:
-        fraction = min(1.0, trainer.global_step / max(1, self.warmup_steps))
-        beta = self.beta_start + fraction * (self.beta_end - self.beta_start)
+        beta = ramp_beta(trainer.global_step, self.beta_start, self.beta_end, self.warmup_steps)
         write_beta(pl_module.model, beta)
         pl_module.log("train/quant_beta", beta, sync_dist=True)
 
@@ -284,29 +284,19 @@ class BetaPID(Callback):
         min_beta: float = 0.0,
         damp_beta_on_target: float = 0.0,
     ):
-        # Coerce BEFORE comparing. YAML 1.1 requires a sign in the exponent, so a config
-        # writing `target_ebops: 1.0e15` yields the *string* "1.0e15" and every numeric
-        # comparison below would raise TypeError instead of validating. Configs here use
-        # `1.0e+15`, but accepting the other spelling costs nothing and the failure mode
-        # is otherwise a TypeError several hours into a run.
-        target_ebops, init_beta = float(target_ebops), float(init_beta)
-        p, i, d = float(p), float(i), float(d)
-        if target_ebops <= 0:
-            raise ValueError(f"target_ebops must be > 0, got {target_ebops}")
-        if i <= 0:
-            raise ValueError(f"integral gain must be > 0 (the integral seeding divides by it), got {i}")
-        if init_beta <= 0:
-            raise ValueError(f"init_beta must be > 0 (the controller works in log space), got {init_beta}")
-        self.target_ebops = target_ebops
-        self.init_beta = init_beta
-        self.p, self.i, self.d = p, i, d
-        self.warmup_epochs = int(warmup_epochs)
-        self.max_beta, self.min_beta = float(max_beta), float(min_beta)
-        self.damp_beta_on_target = float(damp_beta_on_target)
-        self.integral = 0.0
-        self.prev_error = 0.0
-        self.beta = float(init_beta)
-        self._seeded = False
+        # The control law and its state live in the torch-free controller, shared with the native JAX driver.
+        # It coerces to float BEFORE validating: YAML 1.1 reads `target_ebops: 1.0e15` (no exponent sign) as a string.
+        self.controller = BetaPIDController(
+            target_ebops=target_ebops,
+            init_beta=init_beta,
+            p=p,
+            i=i,
+            d=d,
+            warmup_epochs=warmup_epochs,
+            max_beta=max_beta,
+            min_beta=min_beta,
+            damp_beta_on_target=damp_beta_on_target,
+        )
 
     def setup(self, trainer: Trainer, pl_module: LightningModule, stage: str) -> None:
         clashing = [c for c in trainer.callbacks if isinstance(c, BetaScheduler)]
@@ -325,42 +315,48 @@ class BetaPID(Callback):
         write_beta(pl_module.model, beta)
 
     def step(self, ebops: float) -> float:
-        """Advance the controller one epoch and return the new beta.
+        """Advance the controller one epoch and return the new beta (``BetaPIDController.step``).
 
         Split out from the Lightning hook so the control law can be tested against
         HGQ2's implementation without constructing a model.
         """
-        if not self._seeded:
-            # Seed the integral so this first call reproduces init_beta exactly:
-            # the call below does integral += err, after which
-            #   p*err + i*integral == log10(init_beta).
-            err = math.log10(ebops / self.target_ebops + 1e-9)
-            self.integral = (math.log10(self.beta) - self.p * err) / self.i - err
-            self._seeded = True
-
-        error = math.log10(ebops / self.target_ebops)
-        self.integral += error
-        derivative = error - self.prev_error
-        self.prev_error = error
-
-        beta = 10.0 ** (self.p * error + self.i * self.integral + self.d * derivative)
-        if ebops < self.target_ebops:
-            beta *= 1.0 - self.damp_beta_on_target
-        self.beta = max(min(beta, self.max_beta), self.min_beta)
-        return self.beta
+        return self.controller.step(ebops)
 
     def on_train_epoch_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        # warm-up: init_beta; no EBOPs reading yet (ebops <= 0, log10 would fail): hold; else one controller step
         ebops = self.read_ebops(pl_module)
-
-        if trainer.current_epoch < self.warmup_epochs:
-            self.write_beta(pl_module, self.init_beta)
-        elif ebops <= 0.0:
-            # No training-mode forward has populated the trackers yet (or EBOPs is
-            # switched off). log10 would blow up; hold and try again next epoch.
-            self.write_beta(pl_module, self.beta)
-        else:
-            self.write_beta(pl_module, self.step(ebops))
+        self.write_beta(pl_module, self.controller.on_epoch_start(trainer.current_epoch, ebops))
 
         pl_module.log("train/quant_beta", self.beta, sync_dist=True)
         pl_module.log("train/pid_ebops", ebops, sync_dist=True)
-        pl_module.log("train/pid_saturated", float(self.beta >= self.max_beta), sync_dist=True)
+        pl_module.log("train/pid_saturated", float(self.controller.saturated), sync_dist=True)
+
+
+def _delegate(name: str, attr: str | None = None) -> property:
+    attr = attr or name
+
+    def get(self):
+        return getattr(self.controller, attr)
+
+    def set_(self, value):
+        setattr(self.controller, attr, value)
+
+    return property(get, set_, doc=f"``BetaPIDController.{attr}``")
+
+
+for _name in (
+    "target_ebops",
+    "init_beta",
+    "p",
+    "i",
+    "d",
+    "warmup_epochs",
+    "max_beta",
+    "min_beta",
+    "damp_beta_on_target",
+    "integral",
+    "prev_error",
+    "beta",
+):
+    setattr(BetaPID, _name, _delegate(_name))
+BetaPID._seeded = _delegate("_seeded", "seeded")  # noqa: SLF001
