@@ -23,10 +23,11 @@ from test_maskformer_parity import flatten_outputs  # ty: ignore [unresolved-imp
 
 from hepattn.keras.porting import port_maskformer
 
-# Error metric: max over elements of |hybrid - torch| / (1 + |torch|), finite slots. Measured at R4a (macOS arm64,
-# torch 2.10.0, CPU, dense attention, max over seeds 0-3): outputs 1.18e-5 (final mask logits), losses 1.70e-7.
-# Tolerances are 2x. The rows run seeds 0 and 1.
-OUT_TOL = 2.4e-5
+# Error metric: max over elements of |hybrid - torch| / (1 + |torch|), finite slots. Measured (macOS arm64, torch
+# 2.10.0, CPU, dense attention, max over seeds 0-7, R4a and its fix round): outputs 1.65e-5 (seed 6, final mask
+# logits), losses 1.70e-7 (the loss maximum moves between runs of the same seed, 5e-8 .. 1.7e-7). Tolerances are 2x.
+# The rows run seeds 0 and 1. Re-measure on the first Linux/GPU run (carried gate).
+OUT_TOL = 3.3e-5
 LOSS_TOL = 3.4e-7
 SEEDS = [0, 1]
 R4B = "R4b: the hybrid masked-Linformer branch (RETARGET_ORG_MAIN.md section 4); Helen's KerasLinformerAttention has no q_proj"
@@ -143,6 +144,14 @@ def relations(hyb: torch.Tensor, ref: torch.Tensor) -> str | None:
     return None
 
 
+def region(rel: str):
+    """Index of the torch tensor part that a relation covers: all of it, or the rows of chunk j of n."""
+    if rel in {"same", "T"}:
+        return ...
+    j, n = map(int, rel.removeprefix("chunk").removesuffix(".T").split("/"))
+    return (j, n)
+
+
 def unique_state(model) -> dict[str, torch.Tensor]:
     """state_dict without the decoder's alias of the tasks (MaskFormer registers them under tasks. and decoder.tasks.)."""
     return {k: v for k, v in model.state_dict().items() if not k.startswith("decoder.tasks.")}
@@ -152,7 +161,9 @@ def state_map(org: dict, hyb: dict, quantized: bool) -> tuple[dict, dict, list]:
     """Trace every hybrid state_dict entry to the torch entry it was ported from, by value.
 
     Every torch floating tensor is first refilled with distinct random values, so equal values identify the source.
-    Returns (hybrid key -> (torch key, relation), torch key -> covered element count, unmatched hybrid keys).
+    Returns (hybrid key -> (torch key, relation), torch key -> per-element cover count, unmatched hybrid keys).
+    The cover count is kept per element, so a chunk ported twice and its sibling never is shows as 2 and 0, not as a
+    full element total.
     """
     torch.manual_seed(0)
     tmodel = U.instantiate(org)
@@ -170,7 +181,7 @@ def state_map(org: dict, hyb: dict, quantized: bool) -> tuple[dict, dict, list]:
     port_maskformer(tmodel, kmodel)
     tsd, ksd = unique_state(tmodel), unique_state(kmodel)
     mapping, unmatched = {}, []
-    covered = dict.fromkeys(tsd, 0)
+    covered = {key: torch.zeros(tensor.shape, dtype=torch.int32) for key, tensor in tsd.items()}
     for hkey, htensor in ksd.items():
         hits = [
             (tkey, rel)
@@ -183,8 +194,13 @@ def state_map(org: dict, hyb: dict, quantized: bool) -> tuple[dict, dict, list]:
             unmatched.append((hkey, hits))
             continue
         mapping[hkey] = hits[0]
-        covered[hits[0][0]] += htensor.numel()
-    return mapping, {k: (covered[k], tsd[k].numel()) for k in tsd}, unmatched
+        tkey, rel = hits[0]
+        part = region(rel)
+        if part is ...:
+            covered[tkey][...] += 1
+        else:
+            covered[tkey].chunk(part[1], dim=0)[part[0]].add_(1)  # chunk is a view: counts land in covered[tkey]
+    return mapping, covered, unmatched
 
 
 def check_state_map(mapping: dict, covered: dict, unmatched: list, quantized: bool) -> None:
@@ -194,8 +210,9 @@ def check_state_map(mapping: dict, covered: dict, unmatched: list, quantized: bo
             assert hkey == tkey and rel == "same", f"reused torch module state moved: {tkey} -> {hkey} ({rel})"
         else:
             assert hkey.startswith(own + "."), f"{tkey} ported outside its module: {hkey}"
-    partial = {k: c for k, c in covered.items() if c[0] != c[1]}
-    assert not partial, f"torch entries not covered exactly once (covered, numel): {partial}"
+    # (elements never covered, elements covered more than once) per torch entry that is not covered exactly once
+    bad = {k: (int((c == 0).sum()), int((c > 1).sum())) for k, c in covered.items() if not bool((c == 1).all())}
+    assert not bad, f"torch entries not covered exactly once (uncovered, multiply covered elements): {bad}"
     if quantized:  # the HGQ2 state has no torch source: quantizer variables (k, i, f, b, i_decay_speed), beta, ebops
         quantizer_state = ("/k", "/i", "/f", "/b", "/i_decay_speed")
         unmatched = [(k, h) for k, h in unmatched if not (("quantizer" in k and k.endswith(quantizer_state)) or k.endswith(("/beta", "/ebops")))]
@@ -215,4 +232,6 @@ def check_state_map(mapping: dict, covered: dict, unmatched: list, quantized: bo
 def test_state_dict_keys_and_shapes_match_torch(configs, attn, quantized):
     mapping, covered, unmatched = state_map(*configs[attn], quantized=quantized)
     assert len(covered) > 150, len(covered)  # the full model (184 torch entries, 292 hybrid ones): not a vacuous map
+    # the packed tensors are checked chunk by chunk: SwiGLU halves (2) and attention q/k/v (3)
+    assert {rel for _, rel in mapping.values()} >= {"chunk0/2.T", "chunk1/2.T", "chunk0/3.T", "chunk1/3.T", "chunk2/3.T"}
     check_state_map(mapping, covered, unmatched, quantized)
