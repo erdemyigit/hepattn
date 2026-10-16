@@ -27,11 +27,23 @@ TRANSFORM_CONFIGS = [
 
 
 @pytest.mark.parametrize(
-    ("norm", "depth", "hybrid_norm", "qkv_norm"), itertools.product([None, "LayerNorm"], [0, 1, 3], [False, True], [False, True])
+    ("norm", "depth", "hybrid_norm", "qkv_norm", "placement"),
+    itertools.product([None, "LayerNorm", "FastLayerNorm"], [0, 1, 3], [False, True], [False, True], ["hybridnorm", "legacy"]),
 )
-def test_hybrid_norm_config_equals_torch(norm, depth, hybrid_norm, qkv_norm):
-    args = (norm, depth, hybrid_norm, qkv_norm)
+def test_hybrid_norm_config_equals_torch(norm, depth, hybrid_norm, qkv_norm, placement):
+    args = (norm, depth, hybrid_norm, qkv_norm, placement)
     assert native_norm.get_hybrid_norm_config(*args) == torch_norm.get_hybrid_norm_config(*args)
+
+
+def test_dense_norm_placement_default_and_unknown():
+    """The default is "hybridnorm" on both sides, and the placements differ where they should (non-vacuous rows)."""
+    assert native_norm.get_hybrid_norm_config("LayerNorm", 0, True, False) == torch_norm.get_hybrid_norm_config("LayerNorm", 0, True, False)
+    legacy = [native_norm.get_hybrid_norm_config("LayerNorm", d, True, False, "legacy")[1] for d in (0, 1)]
+    hybrid = [native_norm.get_hybrid_norm_config("LayerNorm", d, True, False, "hybridnorm")[1] for d in (0, 1)]
+    assert legacy == [True, False] and hybrid == [False, True]
+    for impl in (native_norm, torch_norm):
+        with pytest.raises(ValueError, match="dense_norm_placement"):
+            impl.get_hybrid_norm_config("LayerNorm", 0, True, False, "pre")
 
 
 @pytest.mark.parametrize("config", TRANSFORM_CONFIGS, ids=lambda c: f"{c['type']}-{c['fn']}")
