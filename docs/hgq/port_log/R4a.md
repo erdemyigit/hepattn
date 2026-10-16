@@ -18,6 +18,7 @@ branch `rt/r4` from R0 `5db27a8`. Date 2026-10-15, macOS arm64, CPU only, torch 
 | `316cdb3` | `docs/hgq/USAGE.md`. |
 | `921d87b` | `test_default_is_the_linformer_model` (mutant m6 survived `test_polaris_config.py` before it). |
 | `a214354`..`a07ed1e` | Fix round 1 (section "Fix round 1" below). |
+| `072433b`..`25d8b36` | Fix round 2 (section "Fix round 2" below). |
 
 ## Gates
 
@@ -28,17 +29,17 @@ The R1-R3 lanes ran their suites on the same machine at the same time, so wall t
 
 | Gate | Result | Control (makes it fail) |
 |---|---|---|
-| Hybrid float parity vs org torch, full model (2x measured) | **pass** for dense attention, seeds 0 and 1: outputs <= 3.3e-5 (fix round 1; was 2.4e-5), losses <= 3.4e-7 (metric and numbers below), 4/4 attention-mask booleans equal. Linformer rows: strict xfail (`AttributeError`), R4b (deviation 1) | PR #8 controls at model level: `ca_dense_sa` 15.6 / 3.49e-2, `self_attn_norm_kv=False` 5.35 / 3.27e-3 (>= 10x), `hybridnorm` refused. Mutants m1, m2 |
-| Quantized-SwiGLU paired delta | **pass**, 3 org shapes: high <= 2.6e-2 (measured <= 1.30e-2), low >= 10x high (11x-62x), low/float corr > 0.5; leaf classes `QDense, QDense, QEinsum`; each leaf's input quantizer live (>= 5.86e-2); EBOPs > 0 and differentiable per leaf; zero-bias high spec <= 8.6e-5 (measured <= 4.27e-5, fix round 1); at model level all 18 product leaves are in `keras_layers()`, the optimizer groups and `quant_losses()` (fix round 1) | m2 (silu on x1), m11 (product not through the einsum: 4 rows fail), f2, f5 |
+| Hybrid float parity vs org torch, full model (2x measured) | **pass** for dense attention, seeds 0 and 1: outputs <= 3.7e-5, losses <= 5.5e-7 (fix round 2; were 3.3e-5 / 3.4e-7, and 2.4e-5 at R4a) (metric and numbers below), 4/4 attention-mask booleans equal. Linformer rows: strict xfail (`AttributeError`), R4b (deviation 1) | PR #8 controls at model level: `ca_dense_sa` 15.6 / 3.49e-2, `self_attn_norm_kv=False` 5.35 / 3.27e-3 (>= 10x), `hybridnorm` refused. Mutants m1, m2 |
+| Quantized-SwiGLU paired delta | **pass**, 3 org shapes: high <= 2.6e-2 (measured <= 1.30e-2), low >= 10x high (11x-62x), low/float corr > 0.5; leaf classes `QDense, QDense, QEinsum`; each leaf's input quantizer live (>= 5.86e-2); per leaf `leaf.ebops > 0` and a differentiable loss term equal to `beta * ebops` (fix round 2); zero-bias high spec <= 8.6e-5 (measured <= 4.27e-5, fix round 1); at model level all 18 product leaves are in `keras_layers()`, the optimizer groups and `quant_losses()`, and each counts EBOPs in a training forward (fix rounds 1 and 2) | m2 (silu on x1), m11 (product not through the einsum: 4 rows fail), f2, f5, g1 |
 | Generated Polaris config builds, float and quantized | **pass**, `linformer` and `torch`: built by jsonargparse with `MPflowHGQ` (as `main_hgq.py`); `proj_k` shapes {(168, 64), (160, 64)} (R0 carried gate); FastLayerNorm, `ca_sa_dense`, `self_attn_norm_kv`, phi sort, scipy solver, SwiGLU leaves. The YAML equals the org model section up to the documented edits; the default is the Linformer model | R0's generator (`5db27a8`): 11/11 rows fail (`$S/r4a/mut/m13.log`). Mutants m5, m6, m7, m8 |
-| Generated config forward + matched loss | **pass** for `HGQ_ATTN=torch`, float and quantized: 17 finite loss terms (layer_0-3 and final). **deferred to R4b** for the default `linformer` config: strict xfail (`AssertionError`, Helen's layer refuses k=64 < 160 keys under the decoder mask) | — |
-| torch/hybrid state_dict key + shape check | **pass** (dense, float and quantized): 184 torch entries, every element covered exactly once by 292 hybrid entries (counted per element since fix round 1); quantized adds only quantizer/beta/ebops entries (deviation 5). Linformer rows strict xfail (R4b) | m12 (final linear not ported), f1 (x2 ported from the x1 chunk): both rows fail |
+| Generated config forward + matched loss | **pass** for `HGQ_ATTN=torch` and for the default config with dense attention (phi sort on, fix round 2), float and quantized: 17 finite loss terms (layer_0-3 and final). **deferred to R4b** for the default `linformer` config: strict xfail (`AssertionError`, Helen's layer refuses k=64 < 160 keys under the decoder mask) | — |
+| torch/hybrid state_dict key + shape check | **pass** (dense, float and quantized): 184 torch entries, every element covered exactly once by 292 hybrid entries (counted per element since fix round 1); quantized adds only quantizer/beta/ebops entries (deviation 5). every relation must be the one its hybrid key name implies (fix round 2). Linformer rows strict xfail (R4b) | m12 (final linear not ported), f1 (x2 ported from the x1 chunk), g8, g9, g10: both rows fail |
 | Sorting mechanics | **pass**: round trip exact on a non-identity sort; position-stub encoder parity 7.15e-7 (tol 1.43e-6), with prefix padding and with padding between valid tokens (fix round 1); `kv_sort_idx` = torch `sort_index` at every `q_ca`, `None` at `q_sa`/`kv_ca`, in hybrid and torch | unsorted hybrid 2.54 / 2.60; no `input_sort_field` gives `None`; m3, m4, m5, f3 |
-| `HEPATTN_BRANCH` | **pass**: `repo_dir.sh` defaults/overrides; all `.pbs` parse and use `$HEPATTN_DIR`; setup refuses to switch an existing clone's branch (run offline on a copy with a stub `uv`) | the right-branch control passes the guard; m9, m10 |
-| `tests/keras` + `tests/polaris` (hybrid env) | **pass**: fix round 1 (`af84706`, `$S/r4a/logs/fix1.hybrid.log`) 177 passed, 8 skipped, 6 xfailed, 0 failed, 0 xpassed; `a07ed1e` only reorders two asserts (state_dict rows re-run: 2 passed, 2 xfailed). R4a final (`921d87b`) 169; R0 119 / 8 | strict xfails: a premature R4b pass would be `XPASS(strict)` = FAILED |
+| `HEPATTN_BRANCH` | **pass**: `repo_dir.sh` defaults (the branch of its own clone since fix round 2) and overrides; `env.sh.example` keeps a command-line branch; all `.pbs` parse and use `$HEPATTN_DIR`; setup (run offline from a local origin with a stub `uv`) refuses to switch an existing clone's branch, refuses a clone its jobs would not run in, leaves the keras-hgq2 clone alone, runs `uv sync --locked` except on keras-hgq2, and requires masked_linformer except on keras-hgq2 | the right-branch control passes the guard; m9, m10, g2-g7 |
+| `tests/keras` + `tests/polaris` (hybrid env) | **pass**: fix round 2 (`25d8b36`, `$S/r4a/logs/fix2.hybrid.log`) 188 passed, 8 skipped, 6 xfailed, 0 failed, 0 xpassed; fix round 1 (`af84706`) 177 passed, 8 skipped, 6 xfailed, 0 failed, 0 xpassed; `a07ed1e` only reorders two asserts (state_dict rows re-run: 2 passed, 2 xfailed). R4a final (`921d87b`) 169; R0 119 / 8 | strict xfails: a premature R4b pass would be `XPASS(strict)` = FAILED |
 | `tests/keras/test_pr8_layer_options.py` (carried from R0) | **pass** (part of the suite) | — |
-| Native `tests/keras_native` (not changed by this lane) | 314 passed, 1 skipped, 41 xfailed, 0 xpassed: same as R0 (fix round 1 re-run: same) | — |
-| Torch `tests/models tests/polaris tests/loss` | 522 passed, 173 skipped, 0 failed: same as R0 (fix round 1 re-run: same) | — |
+| Native `tests/keras_native` (not changed by this lane) | 314 passed, 1 skipped, 41 xfailed, 0 xpassed: same as R0 (fix rounds 1 and 2 re-run: same) | — |
+| Torch `tests/models tests/polaris tests/loss` | 522 passed, 173 skipped, 0 failed: same as R0 (fix rounds 1 and 2 re-run: same) | — |
 | `prek run --files <changed>` | pass | — |
 
 ## Mutation check
@@ -129,6 +130,33 @@ Evidence in `$S/r4a_fix/` (`LOG.md`, `probes/`, `logs/`, `mut/`). Mutants were a
 | (minor) `15_g2_forward.py --mode jax` ignores `--linformer-k` until R2 | `check_native_linformer_k` raises `SystemExit` when a native `LinformerAttention` has another `k`; it finds nothing once R2 removes that class | probe in `.venv-jax` (`$S/r4a_fix/logs/g2_k_guard.out`): `--linformer-k 256` accepted; `--linformer-k 64` refused, the native model has k = 256 |
 | (minor) BetaPID setpoint describes the old model | `03_make_config.py`: comment and `OLD_MODEL_EBOPS`; the printout says the 1.6755e15 reference is pre-retarget and, for the Linformer config, warns that the setpoint is not re-derived | open issue below |
 
+## Fix round 2 (second review of R4a)
+
+Evidence in `$S/r4a_fix2/` (`LOG.md`, `probes/`, `logs/`, `mut/`). Mutants g1-g13 were applied to a `git archive` copy
+of `25d8b36` by `$S/r4a_fix2/mut/run_mutants.sh`, which also re-ran m1-m12 and f1-f5 there: all 30 are killed
+(m6 now lists `test_default_is_the_linformer_model`, which fails; the `test_sorting.py` fixture error remains).
+Results: `$S/r4a_fix2/mut/results.txt`. All 10 review items were verified (the reviewer's probes and mutants re-read)
+and fixed; none were pushed back.
+
+| Review issue | Change | Proof that the test now discriminates |
+|---|---|---|
+| (major) SwiGLU EBOPs checks pass without EBOPs: `leaf.losses` also holds quantizer regularizer terms (3.3e-3 each) | `ebops_term(leaf)` requires `leaf.ebops > 0`, `beta > 0` and exactly one loss term equal to `beta * ebops` (rel 1e-5). Per-leaf test: x1, x2, product and final leaves. Model walk: beta is first set to 1e-6 on every `keras_layers()` entry, as `BetaScheduler`/`BetaPID` do (the generated config has `beta0: 0`, so the term would be 0), then every one of the 18 products must count EBOPs | g1 (the review's x1: product called without `training=`): both tests fail, `ffn_hidden0_glu: ebops 0.0` and `innet0_net_hidden0_glu: ebops 0.0`. Before: 12 passed (review) |
+| (major) `env.sh.example` set `HEPATTN_BRANCH=keras-hgq2` unconditionally, so a command-line `keras-jax` became keras-hgq2 and setup pulled and rebuilt `$WORK_ROOT/hepattn`; jobs (no `qsub -v`) read only `env.sh` | `repo_dir.sh`: when `HEPATTN_BRANCH` is unset, it is the branch of the clone that holds `repo_dir.sh` (`git symbolic-ref`, only if `.git` exists at that root), else keras-hgq2. `env.sh.example` no longer sets it (a commented `${HEPATTN_BRANCH:-...}` form). `01_setup_env.sh` checks, before rebuilding the venv, that `$REPO/polaris/env.sh` + `repo_dir.sh` with an empty environment resolve to `$REPO`, and stops otherwise. Header comments, `USAGE.md`, `polaris/README.md` say that jobs read only the clone's `env.sh` | g2 (the old example line restored): 4 rows fail, including the review's row (example `env.sh`, `HEPATTN_BRANCH=keras-jax`) and the setup rows that assert the keras-hgq2 clone gets no `env.sh` copy. g3 (no derivation): 5 rows. g4 (no job-clone check): 3 rows |
+| (minor) `--locked` and the masked_linformer check untested | `run_setup` now clones from a local bare origin, so setup passes `git pull`; the stub `uv` records its argv and its `venv` makes a python that runs the real verification heredoc on fake `torch`/`keras`/`hgq`/`hepattn` modules (`-S`, no site-packages), with or without a fake `masked_linformer` | g5 (never `--locked`, the review's g_no_locked): 4 rows; g6 (`if False:` around the re-raise): 1 row; g7 (always `--locked`): the keras-hgq2 row |
+| (minor) LOSS_TOL headroom 1.24x | Seeds 0-15, 3 runs in one process and 1 in another (`$S/r4a_fix2/logs/loss_seeds.out`, `loss_seeds_proc2.out`): every repeat gives the same value to 4 digits; max outputs 1.855e-5, losses 2.75e-7 (both seed 12). OUT_TOL 3.7e-5, LOSS_TOL 5.5e-7 (2x) | controls: `ca_dense_sa` 15.6 / 3.49e-2 and `self_attn_norm_kv=False` 5.35 / 3.27e-3 stay >= 10x both tolerances |
+| (minor) state_dict check accepts any chunk relation | `expected_relation(hkey)`: `_x1`/`_x2` -> chunk 0/1 of 2, `_q_proj`/`_k_proj`/`_v_proj` -> chunk 0/1/2 of 3, `/kernel` transposed, `/bias` and non-keras state the same | g8 (the review's x4, bias halves swapped), g9 (q and k swapped in `port_attention`), g10 (square `out_proj` kernel not transposed): each fails both dense rows with a named key; per-element coverage alone passes all three |
+| (minor) generated quant values not tested | `QUANT_SPEC` pinned in `test_generated_model_is_the_org_model` (unchanged since `5db27a8`) | g11 (the review's x13, weight b0 8 -> 4): 2 rows fail |
+| (minor) USAGE.md said `HGQ_ATTN=torch` "trains" | now "builds and runs a forward pass and the matched loss"; no optimizer step is tested | doc only |
+| (minor) no quantized forward + loss with phi sorting | `test_generated_config_forward_and_matched_loss[linformer_dense_attn-*]`: the default config with `to_dense_attention`, float and quantized, asserts `input_sort_field == "phi"` and 17 finite terms | g13 (sort gather broken): both new rows fail, the `torch` rows pass |
+| (minor) 07_profile / 15_g2_forward describe the pre-retarget model | docstring note in both; open issue below | doc only |
+| (minor) deep merge equals LightningCLI's replace rule only while the overlay repeats every base key | `test_overlay_dicts_that_replace_repeat_every_base_key`: each overlay dict must be classified as merged (class specs, `init_args`, `decoder`) or replaced (`encoder.init_args.attn_kwargs`, `decoder.decoder_layer_config`), and a replaced dict must hold every base key | g12 (a new key in base `decoder_layer_config`): this test fails; `test_generator_merge_is_a_deep_overlay` still passes, as the review said |
+
+Deviation (fix round 2): the plan says `HEPATTN_BRANCH` defaults to `keras-hgq2`. It now defaults to the branch of the
+checkout the script runs from, with keras-hgq2 as the fallback. Reason: the new setup and job scripts exist only on
+keras-jax and later, so with a fixed keras-hgq2 default a plain `bash polaris/01_setup_env.sh` from a keras-jax
+checkout updates and rebuilds the production clone (the review's failure mode), and a job submitted from a keras-jax
+clone runs in the keras-hgq2 clone. A keras-hgq2 checkout (or no clone) still resolves to `$WORK_ROOT/hepattn`.
+
 ## Open issues
 
 - **R4b**: turn on the 6 strict xfails (`test_org_model_parity.py`: 2 parity, 2 state_dict; `test_polaris_config.py`:
@@ -148,8 +176,13 @@ Evidence in `$S/r4a_fix/` (`LOG.md`, `probes/`, `logs/`, `mut/`). Mutants were a
   or committed checkpoint uses SwiGLU (`grep` of `tests/keras_native/golden/*.py`); quantized-SwiGLU golden cases
   (plan section 6) should use these names or map them.
 - `export.build_functional_dense` still refuses SwiGLU nets (S7).
-- `HEPATTN_BRANCH` must be set in `polaris/env.sh` (or exported) for both setup and job submission; jobs read it
-  from the `env.sh` in `PBS_O_WORKDIR`.
+- Jobs get no environment from `qsub`: they resolve the clone from `polaris/env.sh` and `repo_dir.sh` in
+  `PBS_O_WORKDIR`, so submit from the clone the setup made. A custom `HEPATTN_DIR` must be in `env.sh` (setup stops
+  otherwise). `repo_dir.sh` calls `git` in jobs; not yet run on a Polaris compute node.
+- `polaris/07_profile.py` and `15_g2_forward.py` still build the pre-retarget model (no SwiGLU, no FastLayerNorm,
+  k = seq_len = 256, no sorting); their numbers do not describe the org/main model until R5 or G2 updates them.
+- The verification heredoc of `01_setup_env.sh` is tested with fake packages only (import lines and the
+  masked_linformer rule), not with a real venv.
 - The HGQ2 default bias quantizer bounds the high-spec error (about 1.3e-2 on a Dense(256)); the factory scopes do
   not configure `place="bias"`. Not changed here (R2 owns the factory).
 - Evidence (`$S/r4a/`: probes, mutant copies and logs) is in `/private/tmp`, which is not durable; R5 may copy it
@@ -160,5 +193,6 @@ Evidence in `$S/r4a_fix/` (`LOG.md`, `probes/`, `logs/`, `mut/`). Mutants were a
 - **G2 (`15_g2_forward.py`)**: `--mode jax` with `--linformer-k` other than 256 exits until R2 makes native
   `build_attention` read `linformer_k`. Default runs (k = 256) are unaffected.
 - **Carried gate**: re-measure the full-model `OUT_TOL`/`LOSS_TOL` (and the SwiGLU zero-bias tolerance) on the first
-  Linux/GPU run; the loss maximum varies between runs on the same seed (up to 3x).
+  Linux/GPU run. Fix round 2 could not reproduce the earlier report of run-to-run variation on one seed: 4 runs of
+  seeds 0-15 in 2 processes gave the same values to 4 digits (the earlier 5.3e-8 for seed 0 came from the R4a tree).
 - Nothing was pushed; no Polaris job was launched; the `hepattn` main working tree was not touched.
