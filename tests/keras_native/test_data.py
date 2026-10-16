@@ -143,6 +143,15 @@ def test_int64_out_of_int32_range_raises():
     assert collect(HostBatches(ok, 2, pad_to_batch=False, device_put=False))[0].inputs["x_big"].dtype == np.int32
 
 
+def test_float64_is_cast_to_float32_on_the_host():
+    """Without ``device_put`` (where jax's x64-off downcast does not apply) the adapter itself casts float64."""
+    loader = [({"x_valid": np.ones((2, 3), bool), "x_e": np.full((2, 3), 0.1, np.float64)}, {"t": np.zeros(2, np.float64)})]
+    batch = collect(HostBatches(loader, 2, pad_to_batch=False, device_put=False))[0]
+    assert batch.inputs["x_e"].dtype == batch.targets["t"].dtype == np.float32
+    assert batch.inputs["x_e"][0, 0] == np.float32(0.1)
+    assert batch.inputs["x_valid"].dtype == np.bool_  # other dtypes pass through
+
+
 def test_a_new_batch_shape_raises():
     loader = [({"x": np.zeros((2, 3), np.float32)}, {}), ({"x": np.zeros((2, 4), np.float32)}, {})]
     with pytest.raises(ValueError, match="new compile"):
