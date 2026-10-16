@@ -182,6 +182,17 @@ def test_unresponsive_metric_saturates_at_max_beta_and_stops(impl):
     assert max(unclamped) > 1e-5, f"clamp test is vacuous; unclamped max was {max(unclamped):.3e}"
 
 
+def test_min_beta_floor_binds_and_matches_hgq2(impl):
+    """The production config sets min_beta > 0 (HGQ_MIN_BETA). Below target with damping, the floor binds."""
+    min_beta = 3e-10  # the unfloored trajectory ends at 4.2e-11 (measured)
+    seq = SEQUENCES["below_target"]
+    ours = drive_port(seq, min_beta=min_beta, damp=0.5, impl=impl)
+    assert ours == pytest.approx(drive_reference(seq, min_beta=min_beta, damp=0.5), rel=1e-12, abs=0)
+    assert ours.count(min_beta) >= 3 and min(ours) == min_beta, ours
+    unfloored = drive_port(seq, damp=0.5, impl=impl)  # control: the floor is doing work
+    assert min(unfloored) < min_beta / 5, unfloored
+
+
 def test_warmup_holds_init_beta(impl):
     betas = drive_port([1.6755e15] * 6, warmup=4, impl=impl)
     assert betas[:4] == [INIT_BETA] * 4

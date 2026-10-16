@@ -3,8 +3,11 @@
 - ``BetaPIDController`` reproduces HGQ2's own ``hgq.utils.sugar.BetaPID`` (log mode) over the EBOPs sequences of
   ``tests/keras/test_beta_pid.py``, to rel 1e-12; perturbing any gain, the target, init beta or the warm-up, or skipping
   the integral seeding, breaks the agreement (the comparison is not vacuous).
+- The ``min_beta`` floor (production ``HGQ_MIN_BETA`` > 0) binds on a below-target sequence with damping and matches
+  HGQ2; control: the same run without the floor goes below it.
 - The epoch hook: warm-up holds ``init_beta``; no reading (``ebops <= 0``) holds and does not seed; a checkpointed
-  controller (``state_dict``) continues the trajectory exactly, a fresh one does not.
+  controller (``state_dict``) continues the trajectory exactly, a fresh one does not. The resume runs with d > 0, so the
+  checkpointed ``prev_error`` is load-bearing (control: resuming with ``prev_error`` 0 differs).
 - The module imports no keras, jax, torch or lightning (it is shared with the torch-backend hybrid).
 The same control-law tests run against the Lightning wrapper in ``tests/keras/test_beta_pid.py`` (torch env).
 """
@@ -31,11 +34,20 @@ SEQUENCES = {
 }
 
 
-def drive_reference(seq, target=TARGET, init_beta=INIT_BETA, warmup=WARMUP, p=1.0, i=0.5, d=0.0, max_beta=1e-7, damp=0.0):
+def drive_reference(seq, target=TARGET, init_beta=INIT_BETA, warmup=WARMUP, p=1.0, i=0.5, d=0.0, max_beta=1e-7, damp=0.0, min_beta=0.0):
     """HGQ2's BetaPID with ``get_ebops`` / ``set_beta`` stubbed (as in tests/keras/test_beta_pid.py)."""
     hgq_pid = pytest.importorskip("hgq.utils.sugar.beta_pid")
     cb = hgq_pid.BetaPID(
-        target_ebops=target, init_beta=init_beta, p=p, i=i, d=d, warmup=warmup, log=True, max_beta=max_beta, min_beta=0.0, damp_beta_on_target=damp
+        target_ebops=target,
+        init_beta=init_beta,
+        p=p,
+        i=i,
+        d=d,
+        warmup=warmup,
+        log=True,
+        max_beta=max_beta,
+        min_beta=min_beta,
+        damp_beta_on_target=damp,
     )
     feed = iter(seq)
     current = {"ebops": next(feed)}
@@ -52,9 +64,17 @@ def drive_reference(seq, target=TARGET, init_beta=INIT_BETA, warmup=WARMUP, p=1.
     return out
 
 
-def drive_native(seq, target=TARGET, init_beta=INIT_BETA, warmup=WARMUP, p=1.0, i=0.5, d=0.0, max_beta=1e-7, damp=0.0):
+def drive_native(seq, target=TARGET, init_beta=INIT_BETA, warmup=WARMUP, p=1.0, i=0.5, d=0.0, max_beta=1e-7, damp=0.0, min_beta=0.0):
     ctl = BetaPIDController(
-        target_ebops=target, init_beta=init_beta, p=p, i=i, d=d, warmup_epochs=warmup, max_beta=max_beta, damp_beta_on_target=damp
+        target_ebops=target,
+        init_beta=init_beta,
+        p=p,
+        i=i,
+        d=d,
+        warmup_epochs=warmup,
+        max_beta=max_beta,
+        min_beta=min_beta,
+        damp_beta_on_target=damp,
     )
     return list(starmap(ctl.on_epoch_start, enumerate(seq)))
 
@@ -80,6 +100,19 @@ def test_comparison_is_discriminating(kwargs):
     assert drive_native(seq, **kwargs) != pytest.approx(ref, rel=1e-9, abs=0), f"{kwargs} did not change the trajectory"
 
 
+MIN_BETA = 3e-10  # between INIT_BETA and the end of the unfloored below_target/damp 0.5 trajectory (measured 4.2e-11)
+
+
+def test_min_beta_floor_binds_and_equals_hgq2():
+    seq = SEQUENCES["below_target"]
+    ref = drive_reference(seq, damp=0.5, min_beta=MIN_BETA)
+    ours = drive_native(seq, damp=0.5, min_beta=MIN_BETA)
+    assert ours == pytest.approx(ref, rel=1e-12, abs=0)
+    assert ours.count(MIN_BETA) >= 3 and min(ours) == MIN_BETA, ours  # the floor binds on several epochs
+    unfloored = drive_native(seq, damp=0.5)  # control: without the floor beta goes below MIN_BETA
+    assert min(unfloored) < MIN_BETA / 5, unfloored
+
+
 def test_integral_seeding_is_load_bearing():
     ctl = BetaPIDController(target_ebops=TARGET, init_beta=INIT_BETA, warmup_epochs=0)
     assert ctl.step(1.6755e15) == pytest.approx(INIT_BETA, rel=1e-9, abs=0)
@@ -99,19 +132,27 @@ def test_epoch_hook_warmup_and_missing_reading():
 
 
 def test_state_dict_resumes_the_trajectory():
-    seq = SEQUENCES["decaying"]
-    full = drive_native(seq)
-    first = BetaPIDController(target_ebops=TARGET, init_beta=INIT_BETA, warmup_epochs=WARMUP)
+    """D = 0.1 makes the derivative term (and so the checkpointed ``prev_error``) part of the trajectory."""
+    seq, d = SEQUENCES["decaying"], 0.1
+
+    def controller():
+        return BetaPIDController(target_ebops=TARGET, init_beta=INIT_BETA, d=d, warmup_epochs=WARMUP)
+
+    full = drive_native(seq, d=d)
+    first = controller()
     for epoch in range(5):
         first.on_epoch_start(epoch, seq[epoch])
     saved = json.loads(json.dumps(first.state_dict()))  # what a JSON checkpoint sidecar keeps
-    resumed = BetaPIDController(target_ebops=TARGET, init_beta=INIT_BETA, warmup_epochs=WARMUP)
+    assert saved["prev_error"] != 0.0
+    resumed, fresh, no_prev = controller(), controller(), controller()
     resumed.load_state_dict(saved)
-    fresh = BetaPIDController(target_ebops=TARGET, init_beta=INIT_BETA, warmup_epochs=WARMUP)
+    no_prev.load_state_dict({**saved, "prev_error": 0.0})
     tail = [resumed.on_epoch_start(e, seq[e]) for e in range(5, len(seq))]
-    control = [fresh.on_epoch_start(e, seq[e]) for e in range(5, len(seq))]
     assert tail == full[5:]
-    assert control != pytest.approx(full[5:], rel=1e-6, abs=0), "a fresh controller reproduced the resumed run: the state is not load-bearing"
+    # controls: a fresh controller, and one resumed without prev_error, do not reproduce the run
+    for name, ctl in (("fresh", fresh), ("prev_error 0", no_prev)):
+        control = [ctl.on_epoch_start(e, seq[e]) for e in range(5, len(seq))]
+        assert control != pytest.approx(full[5:], rel=1e-6, abs=0), f"{name} reproduced the resumed run: the state is not load-bearing"
 
 
 def test_ramp():
