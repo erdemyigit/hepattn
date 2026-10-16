@@ -326,6 +326,24 @@ class KerasAttention(nn.Module):
             out.append(torch.cat([row.detach() for row in rows], 0))
         return out[0], out[1]
 
+    # An unbuilt linformer layer has no proj_k/proj_v in its state (a ported pair waits in _pending_proj). Saving it
+    # would drop the projections, and loading into it would leave the core to build later from random ones; both
+    # look successful (a strict load of such a state reports all keys matched), so they raise instead.
+    def _require_core(self, action: str) -> None:
+        if self.attn_type == "linformer" and self.core is None:
+            raise RuntimeError(
+                f"{self.name}: {action} on an unbuilt linformer attention would drop proj_k/proj_v or leave them random; "
+                "the core builds at the first forward, so run KerasMaskFormer.materialize(inputs) first"
+            )
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars) -> None:
+        self._require_core("state_dict()")
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs) -> None:
+        self._require_core("load_state_dict()")
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+
 
 ATTENTION_KEYS = frozenset({
     "num_heads",

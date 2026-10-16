@@ -86,6 +86,20 @@ class KerasMaskFormer(MaskFormer):
         )
         self.factory = factory
 
+    @torch.no_grad()
+    def materialize(self, inputs: dict) -> "KerasMaskFormer":
+        """Run one eval-mode forward, so every lazily built layer exists: the quantized leaves, and the linformer
+        cores in float mode too (their shapes come from the call). Ported linformer projections are applied then.
+
+        Needed before ``state_dict()`` / ``load_state_dict()`` of a model that has not run a forward yet, which raise
+        otherwise (KerasAttention). ``MPflowHGQ.setup`` does the same before training.
+        """
+        was_training = self.training
+        self.eval()
+        self(inputs)
+        self.train(was_training)
+        return self
+
     def keras_layers(self):
         """Yield the top-level keras layers of the model (without descending into their sublayers)."""
 
