@@ -13,19 +13,33 @@
 - Gradient accumulation through the matched loss: one host call per micro-batch, one update per k micro-batches.
 - State handling (small Dense model): the donated state is consumed (control: ``donate=False``); the Keras variables stay
   valid, also after ``assign_to_model``, which round-trips exactly. Eval and predict compile once over 3 batches.
-- Matmul precision: the traced step requests HIGHEST precision dots (control: ``matmul_precision=None``).
+- Matmul precision: every dot of the traced step requests HIGHEST precision (control: ``matmul_precision=None``).
+- The non-trainable state the training forward updates (WRAP integer bits ``/i``, ``_ebops``) is kept: the returned
+  ``ntv`` equals a reference ``stateless_call(training=True)`` over 2 steps; control: predicting with the stale ``ntv``
+  differs.
+- eval and predict run the model with ``training=False``; control: ``training=True`` gives different outputs.
+- ``compile_counts`` counts traces, not dispatch-cache entries (numpy and ``jax.Array`` batches add a cache entry).
+- ``maskformer_loss_from_config`` on the generated Polaris config: the ``clic_specs()`` loss with ``n_jobs`` 16 from the
+  matcher block; control: no matcher block gives ``n_jobs`` 1.
 """
+
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import keras
 import numpy as np
 import pytest
+import yaml
 
+from hepattn.keras_native import matching
 from hepattn.keras_native.matching import host_match
 from hepattn.keras_native.objective import clic_specs, matched_loss, model_losses, permute_outputs, total_loss
 from hepattn.keras_native.optim import build_optimizer
-from hepattn.keras_native.train_step import TrainStep, maskformer_loss
+from hepattn.keras_native.train_step import TrainStep, maskformer_loss, maskformer_loss_from_config
 
 from .golden.cases import QUANT_SPECS
 from .golden.mf_cases import clic_dummy_batch
@@ -290,11 +304,13 @@ def test_steps_request_highest_matmul_precision(float_model, batches):
         opt = build_optimizer(float_model, optimizer="AdamW", lrs_config=LRS, total_steps=100)
         steps = TrainStep(float_model, opt, maskformer_loss(clic_specs()), matmul_precision=matmul_precision)
         text = steps._train.lower(steps.init_state(), batches[0], ebops_on=True).as_text()  # noqa: SLF001
-        return text.count("HIGHEST"), text.count("dot_general")
+        dots = [line for line in text.splitlines() if "dot_general" in line]
+        return dots, text.count("HIGHEST")
 
-    highest, n_dots = dot_precisions("highest")
-    default, _ = dot_precisions(None)
-    assert n_dots > 100 and highest >= n_dots, (highest, n_dots)
+    dots, _ = dot_precisions("highest")
+    loose = [line.strip()[:160] for line in dots if "precision = [HIGHEST, HIGHEST]" not in line]
+    assert len(dots) > 100 and not loose, (len(dots), loose[:3])
+    _, default = dot_precisions(None)
     assert default == 0, "the control already requests HIGHEST: the check is vacuous"
 
 
@@ -310,3 +326,107 @@ def test_grad_norm_is_optional():
     assert float(out.grad_norm) == pytest.approx(expected, rel=1e-6) and expected > 0
     _, out = TrainStep(model, opt, loss_fn).train_step(with_norm.init_state(), batch)
     assert np.isnan(float(out.grad_norm))
+
+
+def leaves(tree):
+    return [np.asarray(x) for x in jax.tree.leaves(tree)]
+
+
+def max_abs_diff(a, b):
+    return max(float(np.abs(x.astype(np.float64) - y.astype(np.float64)).max(initial=0.0)) for x, y in zip(leaves(a), leaves(b), strict=True))
+
+
+def test_train_step_keeps_the_updated_non_trainable_state(setup, batches, model):
+    """Plan 3.6: the WRAP integer-bit and ``_ebops`` assigns of the training forward come back in ``ntv``; the loop keeps them."""
+    steps, state0, _ = setup
+    paths = [v.path for v in model.non_trainable_variables]
+
+    @jax.jit
+    def reference_ntv(tv, ntv, inputs):
+        with steps.ebops_leaves.enabled(True), jax.default_matmul_precision("highest"):
+            return model.stateless_call(tv, ntv, inputs, training=True)[1]
+
+    state = copy_state(state0)
+    for step, b in enumerate(batches[:2]):
+        before = copy_state(state)
+        ref = reference_ntv(before.tv, before.ntv, b[0])
+        state, _ = steps.train_step(state, b, ebops_on=True)
+        diff = max_abs_diff(state.ntv, ref)
+        changed = [p for p, a, x in zip(paths, before.ntv, state.ntv, strict=True) if not np.array_equal(np.asarray(a), np.asarray(x))]
+        int_bits = [p for p in changed if p.endswith("/i")]
+        print(f"MEASURED step {step}: ntv vs reference max |diff| {diff:.3e}; {len(changed)} of {len(paths)} ntv changed, {len(int_bits)} '/i'")
+        assert diff == 0.0, diff  # measured 0: the step's forward is the reference program
+        assert int_bits and len(changed) > len(int_bits), (len(changed), len(int_bits))
+
+    # control: the stale ntv (dropping the updates) changes the inference outputs
+    stale = state._replace(ntv=copy_state(state0).ntv)
+    pdiff = max_abs_diff(steps.predict_step(state, batches[0][0]), steps.predict_step(stale, batches[0][0]))
+    print(f"MEASURED predict with kept vs stale ntv: max |diff| {pdiff:.3e}")
+    assert pdiff > 1e-5, pdiff
+
+
+def test_eval_and_predict_run_in_inference_mode(setup, batches):
+    """References are jitted too: eager vs jitted forwards differ by up to 5.7e-3 here (fixed-point rounding flips)."""
+    steps, state, _ = setup
+    inputs, targets = batches[1]
+
+    def forward(training):
+        @jax.jit
+        def fn(tv, ntv, x):
+            with steps.ebops_leaves.enabled(training), jax.default_matmul_precision("highest"):
+                return steps.model.stateless_call(tv, ntv, x, training=training)[0]
+
+        return fn(state.tv, state.ntv, inputs)
+
+    ref, train_mode = forward(False), forward(True)
+    ev = steps.eval_step(state, (inputs, targets))
+    pred = steps.predict_step(state, inputs)
+    d_eval, d_pred, d_ctrl = max_abs_diff(ev.outputs, ref), max_abs_diff(pred, ref), max_abs_diff(train_mode, ref)
+    print(f"MEASURED eval/predict vs jitted training=False: {d_eval:.3e} / {d_pred:.3e}; training=True control {d_ctrl:.3e}")
+    assert d_eval == 0.0 and d_pred == 0.0, (d_eval, d_pred)  # measured 0 (same program)
+    assert d_ctrl > 1e-4, d_ctrl
+
+
+def test_compile_counts_are_traces_not_dispatch_cache_entries():
+    model, loss_fn = small_model_and_loss()
+    rng = np.random.default_rng(2)
+    batch = (rng.normal(size=(5, 4)).astype(np.float32), rng.normal(size=(5, 3)).astype(np.float32))
+    opt = build_optimizer(model, optimizer="AdamW", lrs_config=LRS, total_steps=100)
+    steps = TrainStep(model, opt, loss_fn)
+    state, _ = steps.train_step(steps.init_state(), batch)
+    state, _ = steps.train_step(state, jax.device_put(batch))
+    state, _ = steps.train_step(state, batch)
+    assert steps.compile_counts()["train"] == 1, steps.compile_counts()
+    # control: jax.jit's dispatch cache has one entry per argument type, so it cannot serve as a compile count
+    assert steps._train._cache_size() == 2  # noqa: SLF001
+
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(scope="module")
+def generated_config(tmp_path_factory):
+    out = tmp_path_factory.mktemp("cfg") / "polaris_hgq.yaml"
+    env = {**os.environ, "HGQ_CONFIG_OUT": str(out)}
+    subprocess.run([sys.executable, str(REPO / "polaris/03_make_config.py")], env=env, check=True, capture_output=True, timeout=120)
+    return yaml.safe_load(out.read_text())
+
+
+def test_maskformer_loss_from_config_reads_the_tasks_and_the_matcher(setup, batches, generated_config, monkeypatch):
+    steps, state, _ = setup
+    inputs, targets = batches[0]
+    outputs = steps.predict_step(state, inputs)
+    seen = []
+
+    def recording_host_match(*args, n_jobs=1):
+        seen.append(n_jobs)
+        return host_match(*args, n_jobs=n_jobs)
+
+    monkeypatch.setattr(matching, "host_match", recording_host_match)
+    init_args = generated_config["model"]["model"]["init_args"]
+    expected = float(maskformer_loss(clic_specs())(outputs, targets)[0])
+    assert float(maskformer_loss_from_config(init_args)(outputs, targets)[0]) == expected
+    assert seen == [1, 16], seen
+    # control: without a matcher block the host matching runs in one thread
+    float(maskformer_loss_from_config({k: v for k, v in init_args.items() if k != "matcher"})(outputs, targets)[0])
+    assert seen == [1, 16, 1], seen
