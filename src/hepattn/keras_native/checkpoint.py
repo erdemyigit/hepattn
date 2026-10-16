@@ -3,9 +3,13 @@
 Format: one ``.npz`` file holds every array (``tv/<key>``, ``ntv/<key>``, ``ov/<key>``) and the metadata as JSON
 (``__meta__``: step, epoch, beta-controller state, data position, config hash, free-form extras). A JSON sidecar
 (same stem, ``.json``) repeats the metadata and the per-array shape / dtype, plus the sha256 of the ``.npz``. Both
-files are written to a temporary name in the target directory, flushed, fsynced and renamed (``os.replace``); the
-sidecar is renamed last, so it marks a complete checkpoint. ``load_checkpoint`` rejects a checkpoint whose sidecar is
-missing, whose ``.npz`` hash differs, or whose keys, shapes or dtypes differ from the freshly built model's.
+files are written to a temporary name in the target directory, flushed, fsynced and renamed (``os.replace``), and the
+directory is fsynced after each rename (so the rename survives a power loss); the sidecar is renamed last, so it marks
+a complete checkpoint. ``save_checkpoint`` does not replace an existing checkpoint unless asked (``overwrite``):
+between the two renames the new ``.npz`` would sit next to the old sidecar, a checkpoint that is rejected on load.
+``CheckpointManager`` therefore never overwrites; a second save at one step gets a new name. ``load_checkpoint``
+rejects a checkpoint whose sidecar is missing, whose ``.npz`` hash differs, or whose keys, shapes or dtypes differ
+from the freshly built model's.
 
 Keys. ``variable.path`` is not stable: HGQ2 quantizer sublayers are auto-named, so the same config built twice in one
 process gives ``.../fixed_point_quantizer_kif/f`` and ``.../fixed_point_quantizer_kif_580/f`` (S3 open issue,
@@ -43,6 +47,7 @@ FORMAT_VERSION = 1
 GROUPS = ("tv", "ntv", "ov")
 META_KEY = "__meta__"
 _AUTO_SUFFIX = re.compile(r"_\d+$")
+_STEP_FILE = re.compile(r"step-(?P<step>\d+)(?:-r(?P<rev>\d+))?\.npz")
 
 
 class CheckpointError(RuntimeError):
@@ -164,6 +169,19 @@ def _atomic(path: Path, mode: str = "wb"):
         with contextlib.suppress(FileNotFoundError):
             Path(tmp).unlink()
         raise
+    _fsync_directory(path.parent)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Make a rename in ``directory`` durable (POSIX); a no-op where directories cannot be opened (Windows)."""
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def sidecar_path(path: str | Path) -> Path:
@@ -176,6 +194,8 @@ def save_checkpoint(
     optimizer: keras.optimizers.Optimizer | None,
     state: Sequence,
     meta: dict | None = None,
+    *,
+    overwrite: bool = False,
 ) -> Path:
     """Write ``state = (tv, ntv, ov)`` and ``meta`` to ``path`` (``.npz``) and its JSON sidecar. Returns ``path``.
 
@@ -184,11 +204,14 @@ def save_checkpoint(
 
     Raises:
         ValueError: If ``path`` does not end in ``.npz``.
+        FileExistsError: If ``path`` or its sidecar exists and ``overwrite`` is False.
         CheckpointError: If a state group does not match the model's / optimizer's variable count.
     """
     path = Path(path)
     if path.suffix != ".npz":
         raise ValueError(f"checkpoint path must end in .npz, got {path}")
+    if not overwrite and (path.exists() or sidecar_path(path).exists()):
+        raise FileExistsError(f"{path} exists (a crash between the two renames of an overwrite leaves it unloadable)")
     keys = state_keys(model, optimizer)
     arrays: dict[str, np.ndarray] = {}
     layout: dict[str, dict[str, list]] = {}
@@ -359,16 +382,34 @@ class CheckpointManager:
             f.write(json.dumps({"file": target.name, **extra}, sort_keys=True, default=_json_default))
 
     def _remove(self, path: Path) -> None:
-        for p in (path, sidecar_path(path)):
+        for p in (sidecar_path(path), path):  # sidecar first: a half-removed checkpoint reads as incomplete
             with contextlib.suppress(FileNotFoundError):
                 p.unlink()
 
+    def _new_path(self, prefix: str, step: int) -> Path:
+        """``<prefix>-<step>.npz``, or ``<prefix>-<step>-r<n>.npz`` (next free ``n``) if a checkpoint of that step exists."""
+        path = self.directory / f"{prefix}-{step:09d}.npz"
+        revision = 0
+        while path.exists() or sidecar_path(path).exists():
+            revision += 1
+            path = self.directory / f"{prefix}-{step:09d}-r{revision}.npz"
+        return path
+
+    def _step_files(self) -> list[Path]:
+        """Step checkpoints, oldest first: by step, then revision."""
+        found = []
+        for path in self.directory.glob("step-*.npz"):
+            match = _STEP_FILE.fullmatch(path.name)
+            if match:
+                found.append(((int(match["step"]), int(match["rev"] or 0)), path))
+        return [path for _, path in sorted(found)]
+
     def save(self, step: int, model, optimizer, state, meta: dict) -> Path:
-        """Unconditionally write ``step-<step>.npz`` and point ``last`` at it; prune old step checkpoints."""
-        path = save_checkpoint(self.directory / f"step-{step:09d}.npz", model, optimizer, state, {**meta, "step": step})
+        """Write ``step-<step>.npz`` (a new name if it exists), point ``last`` at it, prune old step checkpoints."""
+        path = save_checkpoint(self._new_path("step", step), model, optimizer, state, {**meta, "step": step})
         self._set_pointer("last", path, step=step)
         protected = {p["file"] for p in (self._pointer("best"),) if p}
-        steps = sorted(self.directory.glob("step-*.npz"))
+        steps = self._step_files()
         for old in steps[: max(0, len(steps) - self.keep_last_k)]:
             if old.name not in protected and old != path:
                 self._remove(old)
@@ -384,7 +425,7 @@ class CheckpointManager:
         value = float(metrics[self.policy.monitor])
         previous = self._pointer("best")
         path = save_checkpoint(
-            self.directory / f"best-step-{step:09d}.npz",
+            self._new_path("best-step", step),
             model,
             optimizer,
             state,

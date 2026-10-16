@@ -8,13 +8,17 @@ Gates:
 - resume: one step from the loaded state equals the uninterrupted second step bitwise on CPU (plan S6 gate); the steps
   change every state group (non-vacuous), and a 1e-3 change of one loaded weight makes the comparison fail (control);
 - keys are equal for two independently built models, although ``variable.path`` differs (control);
-- a corrupted, truncated, partial (no sidecar), mismatched or foreign checkpoint is rejected; an interrupted write
-  leaves the previous checkpoint intact and no temporary file;
+- a corrupted, truncated, partial (no sidecar), mismatched or foreign checkpoint is rejected, as are a stored dtype
+  other than the model's and metadata other than the sidecar's; an interrupted write leaves the previous checkpoint
+  intact and no temporary file; an existing checkpoint is not overwritten unless asked; renames are followed by a
+  directory fsync;
+- optimizer slots of variables whose slot names are prefixes of each other map to their own variables;
 - export: ``.weights.h5`` of the state loads into a fresh model bit-exactly;
-- policy / manager: every N steps, last, best on ``val/loss``, retention.
+- policy / manager: every N steps, last, best on ``val/loss``, retention, a second save at one step under a new name.
 """
 
 import json
+import stat
 import zipfile
 
 import jax
@@ -265,11 +269,111 @@ def test_interrupted_write_keeps_the_previous_checkpoint(saved, uninterrupted, f
 
     monkeypatch.setattr(C.np, "savez", broken_savez)
     with pytest.raises(OSError, match="disk full"):
-        C.save_checkpoint(saved, run.model, run.optimizer, uninterrupted["s2"], META)
+        C.save_checkpoint(saved, run.model, run.optimizer, uninterrupted["s2"], META, overwrite=True)
     monkeypatch.undo()
     assert saved.read_bytes() == before
     assert sorted(p.name for p in saved.parent.iterdir()) == ["ck.json", "ck.npz"]
     C.load_checkpoint(saved, fresh.model, fresh.optimizer)
+
+
+def rewrite_npz(path, edit_arrays, edit_sidecar=None) -> None:
+    """Rewrite a checkpoint's arrays and keep its sidecar hash (and, with ``edit_sidecar``, more) consistent."""
+    with np.load(path) as data:
+        arrays = {name: data[name] for name in data.files}
+    edit_arrays(arrays)
+    with path.open("wb") as f:
+        np.savez(f, **arrays)
+    side = C.sidecar_path(path)
+    sidecar = json.loads(side.read_text())
+    sidecar["sha256"] = C._sha256(path)  # noqa: SLF001
+    if edit_sidecar is not None:
+        edit_sidecar(sidecar)
+    side.write_text(json.dumps(sidecar))
+
+
+def test_stored_dtype_other_than_the_models_is_rejected(saved, fresh):
+    """E.g. an fp32 checkpoint for a later bf16 model: same shape, another dtype, a consistent sidecar."""
+    name = f"tv/{C.state_keys(fresh.model)['tv'][0]}"
+
+    def cast(arrays):
+        arrays[name] = arrays[name].astype(np.float16)
+
+    def layout(sidecar):
+        group, key = name.split("/", 1)
+        sidecar["layout"][group][key][1] = np.dtype(np.float16).str
+
+    rewrite_npz(saved, cast, layout)
+    with pytest.raises(C.CheckpointError, match="float16"):
+        C.load_checkpoint(saved, fresh.model, fresh.optimizer)
+
+
+def test_metadata_other_than_the_sidecars_is_rejected(saved, fresh):
+    C.load_checkpoint(saved, fresh.model, fresh.optimizer)  # control: the rewrite alone keeps it loadable
+    rewrite_npz(saved, lambda _arrays: None)
+    C.load_checkpoint(saved, fresh.model, fresh.optimizer)
+
+    def other_step(arrays):
+        meta = json.loads(str(arrays[C.META_KEY]))
+        arrays[C.META_KEY] = np.array(json.dumps({**meta, "step": 99}, sort_keys=True))
+
+    rewrite_npz(saved, other_step)
+    with pytest.raises(C.CheckpointError, match="metadata differs"):
+        C.load_checkpoint(saved, fresh.model, fresh.optimizer)
+
+
+def test_save_does_not_overwrite_a_checkpoint(saved, uninterrupted, fresh):
+    run = uninterrupted["run"]
+    with pytest.raises(FileExistsError):
+        C.save_checkpoint(saved, run.model, run.optimizer, uninterrupted["s2"], META)
+    C.save_checkpoint(saved, run.model, run.optimizer, uninterrupted["s2"], {**META, "step": 2}, overwrite=True)
+    state, meta = C.load_checkpoint(saved, fresh.model, fresh.optimizer)
+    assert meta["step"] == 2 and first_difference(state, uninterrupted["s2"]) is None
+
+
+def test_renames_are_made_durable_by_a_directory_fsync(tmp_path, monkeypatch):
+    synced = []
+    real_fsync = C.os.fsync
+
+    def fsync(fd):
+        synced.append(stat.S_ISDIR(C.os.fstat(fd).st_mode))
+        real_fsync(fd)
+
+    monkeypatch.setattr(C.os, "fsync", fsync)
+    with C._atomic(tmp_path / "x.json", "w") as f:  # noqa: SLF001
+        f.write("{}")
+    assert synced == [False, True]  # the file, then its directory after the rename
+
+
+class TwoWeights(keras.layers.Layer):
+    """Weights ``b`` and ``b_c``: the optimizer slot name of ``b`` is a prefix of those of ``b_c``."""
+
+    def build(self, _):
+        self.b = self.add_weight(name="b", shape=(2,))
+        self.b_c = self.add_weight(name="b_c", shape=(3,))
+
+    def call(self, x):
+        return x * keras.ops.sum(self.b) + keras.ops.sum(self.b_c)
+
+
+class Tiny(keras.Model):
+    def __init__(self):
+        super().__init__(name="tiny")
+        self.inner = TwoWeights(name="a")
+
+    def call(self, x):
+        return self.inner(x)
+
+
+def test_optimizer_slots_take_the_longest_matching_variable():
+    model = Tiny()
+    model(np.zeros((1, 1), np.float32))
+    optimizer = keras.optimizers.AdamW()
+    optimizer.build(model.trainable_variables)
+    names = [v.name for v in optimizer.variables]
+    assert "tiny_a_b_c_momentum" in names and "tiny_a_b_momentum" in names  # keras' slot naming, a prefix pair
+    keys = C.state_keys(model, optimizer)["ov"]
+    slots = {k for k in keys if "::" in k}
+    assert slots == {f"tiny/a/{w}::{slot}" for w in ("b", "b_c") for slot in ("momentum", "velocity")}
 
 
 def test_export_weights_loads_into_a_fresh_model(tmp_path, uninterrupted, batches):
@@ -309,6 +413,12 @@ def test_manager_keeps_last_k_and_the_best(tmp_path, uninterrupted, fresh):
     assert manager.maybe_save_best(3100, {"val/loss": 4.5}, run.model, run.optimizer, state, {}) is None
     assert manager.maybe_save_best(3200, {"val/loss": 3.0}, run.model, run.optimizer, state, {}) is not None
     assert sorted(p.name for p in tmp_path.glob("best-*.npz")) == ["best-step-000003200.npz"]
+    again = manager.save(3000, run.model, run.optimizer, uninterrupted["s2"], {"epoch": 0})  # e.g. a walltime save
+    assert again == tmp_path / "step-000003000-r1.npz"
+    assert manager.last() == again
+    assert sorted(p.name for p in tmp_path.glob("step-*.npz")) == ["step-000003000-r1.npz"]  # keep_last_k=1: the older goes
+    _, meta = C.load_checkpoint(manager.last(), fresh.model, fresh.optimizer)
+    assert meta["step"] == 3000
     reopened = C.CheckpointManager(tmp_path)
     assert reopened.policy.best_value == 3.0
     assert reopened.best() == tmp_path / "best-step-000003200.npz"
