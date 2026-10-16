@@ -171,6 +171,42 @@ TARGETS |= {
 }
 TARGETS["m05_tail_dropped"].append("tests/keras_native/test_import_hygiene.py::test_masked_linformer_core_runs_under_torch_with_jax_blocked")
 
+# Fix round 2 (reviewer findings x1, x3, x08, x01 and the bias floor)
+RESCALE_FLAT = "    flat = ops.reshape(kept, (-1, math.prod(lead) * k))\n    return ops.reshape(lut(flat, training=training), (-1, *lead, k))"
+MUTANTS |= {
+    "m22_frac_bits_start_at_cap": [(FA, 'f0=min(base["f0"], max_frac_bits)', "f0=max_frac_bits")],
+    "m23_cap_hardcoded_7": [(ML, "cap = factory.quant.seq_proj_frac_cap if factory.quantize else None", "cap = 7 if factory.quantize else None")],
+    "m24_lut_rank3": [
+        (ML, RESCALE_FLAT, "    return lut(kept, training=training)"),
+        (
+            ML,
+            '                getattr(self, f"lut_{part}").build((None, nq * k))',
+            '                getattr(self, f"lut_{part}").build((None, nq, k))',
+        ),
+    ],
+    "m25_lut_rank3_call_only": [(ML, RESCALE_FLAT, "    return lut(kept, training=training)")],
+    "m26_lut_heterogeneous_input": [
+        (
+            FA,
+            '        iq = _fixed_config("datalane", *in_bits)',
+            '        iq = QuantizerConfig("kif", "datalane", k0=False, i0=in_bits[0], f0=in_bits[1], overflow_mode="SAT", trainable=False, homogeneous_axis=(0,))',
+        ),
+        (FA, "allow_heterogeneous_input=False", "allow_heterogeneous_input=True"),
+    ],
+    "m27_test_keeps_bias_floor": [
+        (T, "        tattn.in_proj_bias.zero_()\n        tattn.out_proj.bias.zero_()", "        pass"),
+        (T, "    assert not any(np.any(n(layer.bias)) for layer in", "    assert any(np.any(n(layer.bias)) for layer in"),
+    ],
+}
+TARGETS |= {
+    "m22_frac_bits_start_at_cap": [f"{T}::test_renorm_and_projection_use_the_quantized_rows"],
+    "m23_cap_hardcoded_7": [f"{T}::test_error_falls_monotonically_with_bitwidth"],
+    "m24_lut_rank3": [f"{T}::test_leaf_inventory_and_every_leaf_is_live"],
+    "m25_lut_rank3_call_only": [f"{T}::test_leaf_inventory_and_every_leaf_is_live"],
+    "m26_lut_heterogeneous_input": [f"{T}::test_projection_fractional_bits_are_capped_and_the_table_fits_hls4ml"],
+    "m27_test_keeps_bias_floor": [f"{T}::test_error_falls_monotonically_with_bitwidth"],
+}
+
 
 def run(scratch: Path, mutant: str) -> str:
     root = Path(__file__).resolve().parents[3]
@@ -189,6 +225,7 @@ def run(scratch: Path, mutant: str) -> str:
     env = {"KERAS_BACKEND": "jax", "PYTHONPATH": str(tree / "src"), "HEPATTN_PARITY_LEDGER": "0", "PATH": "/usr/bin:/bin"}
     cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rf", *TARGETS[mutant]]
     proc = subprocess.run(cmd, cwd=tree, env=env, capture_output=True, text=True, check=False)
+    (tree / "pytest.out").write_text(proc.stdout + proc.stderr)  # the failing assertions, for the stage log
     return proc.stdout.strip().splitlines()[-1]
 
 
