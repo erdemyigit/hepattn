@@ -15,7 +15,7 @@ fixtures generated in the hybrid env `hepattn/.venv` (lightning 2.5.2).
 | `src/hepattn/experiments/clic/native_data.py` | The torch side: `make_dataset` (`CLICDataset`), `EpochSampler` (permutation from `seed + epoch`, `start_batch` resume, `drop_last`), `make_loader`, `host_batches` (train drop_last, val/test padded). |
 | `src/hepattn/keras_native/metrics.py` | `MulticlassAccuracy` (micro/macro), `BinaryRecall`, `BinaryPrecision` (torchmetrics 1.8 reductions in float32), `MaskInference` and task-metric ports, `WeightedMean` (Lightning epoch reduction), `ClicMetrics` (the names `MPflow.log_metrics` logs). |
 | `src/hepattn/keras_native/predict_writer.py` | `predict(outputs, model.tasks)` in `keras.ops` (jit-able), `PredictionWriter` (the `PflowPredictionWriter` h5 layout with the same ftag `H5Writer` settings; padding events dropped), `output_path`. |
-| `tests/keras_native/test_{config,checkpoint,data,data_real,metrics,predict_writer}.py` | 71 tests + 4 `requiresdata` tests (below). |
+| `tests/keras_native/test_{config,checkpoint,data,data_real,metrics,predict_writer}.py` | First round 71 tests, fix round 1: 107, fix round 2: see Gates (plus 4 `requiresdata` tests). |
 | `tests/keras_native/s6_fixtures/` | Three jsonargparse-normalised run configs and their generator `make_normalised_configs.py` (LightningCLI `--print_config`, hybrid env). |
 | `docs/hgq/port_log/S6a_mutations.py` | Mutation runner (table below). |
 
@@ -48,9 +48,9 @@ fixtures generated in the hybrid env `hepattn/.venv` (lightning 2.5.2).
    (`lightning_module.py:20-24,45-53`), so Lightning logs the pooled value under each layer name. Measured with a
    minimal Lightning 2.5.2 validate run (scratch `lightning_shared_metric.py`): layer recalls 1.0 and 0.0 are both
    logged as 0.5. `ClicMetrics` keeps one object per layer (the intended value); `test_lightning_module_pools_layers_and_native_does_not`
-   pins the difference. Comparisons with hybrid runs must use the final layer or pooled values; fix round:
-   `ClicMetrics(pool_layers=True)` gives the pooled (Lightning) values, equal to a real `Trainer.validate` with two
-   layers. `ClicMetrics("train")` logs only the task metrics, as `MPflow.log_custom_metrics` (returns early for
+   pins the difference. Lightning logs the pooled value under every layer name, `final` included, so the native
+   per-layer `final` value is not the hybrid's `val/final_*`: compare with hybrid logs only through
+   `ClicMetrics(pool_layers=True)` (fix round 1), which equals a real `Trainer.validate` with two layers. `ClicMetrics("train")` logs only the task metrics, as `MPflow.log_custom_metrics` (returns early for
    train); Lightning logs train metrics per step, so the driver calls `reset` before each logged step.
 6. **Saved-config fixtures** are generated, not hand-written: `--print_config` is what `SaveConfig` writes. The Polaris
    one is `main_hgq fit --config <03_make_config output>`; its absolute paths are rewritten to `/polaris/home/hepattn`, so
@@ -77,6 +77,41 @@ fixtures generated in the hybrid env `hepattn/.venv` (lightning 2.5.2).
    unknown or missing required arguments. A test reads the hybrid constructor defaults from
    `hepattn/keras/callbacks.py` with `ast` (importing it needs lightning and the torch backend) and compares.
 
+9. **DataLoader workers are spawned, never forked** (fix round 2). With `num_workers > 0`, `make_loader` passes
+   `multiprocessing_context="spawn"` and `persistent_workers=True`, and refuses `fork`. Reason: once JAX has a backend
+   the process is multithreaded and JAX's at-fork hook warns that fork "will likely lead to a deadlock"
+   (`jax/_src/xla_bridge.py` `_at_fork`, registered at backend init, lines 799-801 of the installed jax); Python 3.12
+   forks by default on Linux (Polaris, `num_workers` 8) and spawns on macOS
+   (https://docs.python.org/3.12/library/multiprocessing.html#contexts-and-start-methods). `SplitBatches` holds one
+   loader per split for the run and moves `EpochSampler` with `set_epoch(epoch, start_batch)`; the sampler is iterated
+   in the main process, so persistent workers serve every epoch and a resume. Measured locally (dummy `CLICDataset`,
+   40 events, 2 workers, after JAX init): first batch 4.04 s in epoch 0 (worker start), 0.01 s in epoch 1; 0.00 s
+   without workers. Spawned workers receive the dataset pickled; the real `CLICDataset` holds all events in memory
+   (`load_data`, `pflow_data.py:89-100`), so each of 8 workers gets a copy: measure on Polaris (open issue).
+   `forkserver` would also be safe; spawn was chosen because it is the same on macOS and Linux.
+10. **Checkpoint policy = what the callbacks do** (fix round 2). The first round read `save_last: true` from
+   `base.yaml:61` / `pflow_hgq.yaml:62` and modelled "best on `val/loss`" (plan 3.9) as a single kept file. But
+   `hepattn.callbacks.Checkpoint` (`src/hepattn/callbacks/checkpoint.py:10,15`) passes `save_top_k=-1` (Lightning
+   2.5.2 `model_checkpoint.py:93`: all are saved) and its `setup` sets `save_last = False` and, for fit,
+   `dirpath = <log_dir>/ckpts`; with no trigger set Lightning uses `every_n_epochs=1` (`__init_triggers`,
+   lines 494-507), saving at each validation end. `CheckpointConfig` now has two `CheckpointCallback`s with the
+   effective values: `epoch` (hepattn `Checkpoint`: monitor `val/loss`, min, top-k -1, save_last False, every epoch,
+   dirpath None) and `step` (Polaris `ModelCheckpoint`: every 1000 steps, top-k 1 without a monitor, save_last True,
+   `CKPT_DIR`). `CheckpointManager.save_epoch` keeps every epoch checkpoint (`epoch-<E>-step-<N>.npz`) and moves the
+   `best` pointer without deleting (a NaN epoch is saved, never best; NaN is stored as `"nan"` so the metadata check
+   passes). `save_last` writes `last-<N>.npz` at a validation end unless `last` already holds that step (Lightning's
+   `_should_skip_saving_checkpoint`), and stale `last-*` files are removed. `maybe_save_best` (top-1 with a monitor)
+   stays for other configs and never removes an epoch checkpoint. The loader rejects `train_time_interval`,
+   `save_on_train_epoch_end`, both triggers at once and top-k > 1 without a monitor (Lightning rejects the last two).
+11. **Checkpoint file mode** (fix round 2). `mkstemp` creates 0o600 and the rename keeps it; files are now chmod-ed to
+   `0o666 & ~umask` before the rename, as a plain `open(..., "w")`, so collaborators can read checkpoints in the shared
+   project area.
+12. **Optimizer settings the torch wrapper implies** (fix round 2; `src/hepattn/models/wrapper.py:141-149`): the name
+   is matched case-insensitively and stored canonically (`AdamW` / `Lion`); a missing `lrs_config.weight_decay` raises
+   `ConfigError` (torch raises `KeyError`; the loader used to default to 0.0); `OptimizerConfig.epsilon = 1e-8` is
+   torch `AdamW`'s default, which the S6b builder must pass to keras `AdamW` (default 1e-7,
+   `keras/src/optimizers/adamw.py:59`). Lion: lion_pytorch betas (0.9, 0.99) are the keras Lion defaults.
+
 ## Gates
 
 Test runs (macOS CPU): `test_config` + `test_data` + `test_data_real` + `test_metrics` + `test_predict_writer` +
@@ -88,6 +123,33 @@ Fix round 2026-10-16 (`af0da5f`..`d063c99`): the 7 S6a test files + `test_import
 passed, 4 skipped (requiresdata) in 293 s (hepattn resolved to this worktree's `src`); `prek run` on the 8 changed files
 passes; mutants M29-M56 killed 28/28, the earlier checkpoint mutants M6, M8, M10, M11, M12 re-killed 5/5 (M11 still
 caught by the interrupted-write test, which now passes `overwrite=True`); tree clean afterwards.
+
+Fix round 2 2026-10-16 (`5db421e`..`5020a6d`): the 7 S6a test files + `test_import_hygiene.py` gave 131 passed,
+4 skipped (requiresdata) in 400 s (hepattn resolved to this worktree's `src`), before
+`test_hepattn_checkpoint_settings_overridden_by_its_setup_are_ignored` was added; at `5020a6d` (all code of the round):
+132 passed, 4 skipped in 399 s. `prek run` passes on all changed files. Mutants M57-M79 killed 23/23; the config
+mutants M29-M38 (M30, M31, M32, M36, M37 retargeted to the new code) and M12, M52, M53, M55 re-run: 14/14 killed.
+Tree clean after each run (the runner's `git diff --quiet`).
+
+New gate evidence (fix round 2):
+- workers: `test_workers_are_never_forked` (spawn, persistent; control: a `fork` context raises);
+  `test_spawned_workers_give_the_in_process_batches_without_a_fork_warning` (after `jax.device_put`: epochs 0, 1 and a
+  resume at epoch 1 batch 1 through one 2-worker loader equal `num_workers=0`, epochs differ, no warning mentions
+  fork); `test_control_forking_after_jax_init_warns` (a fork-context worker after JAX init records JAX's
+  "JAX is multithreaded" warning, so the previous test can see one);
+- `test_a_new_batch_shape_or_dtype_raises` x3 (shape; same shape with int32; with bool; control: an equal batch passes);
+- checkpoint: `test_checkpoint_of_another_optimizer_is_rejected` x2 (AdamW <-> Lion, `ov: keys differ`; control: the
+  same class loads); `test_stored_shape_other_than_the_models_is_rejected` (control: the rewrite alone loads);
+  `test_checkpoint_files_get_the_mode_of_a_plain_write` x3 umasks (control: `mkstemp` gives 0o600);
+  `test_nan_at_the_first_validation_is_not_the_best` (NaN and inf with no best yet, then 1e6 is accepted);
+  `test_manager_keeps_every_epoch_checkpoint_and_points_at_the_best` (losses 4, NaN, 3, 3.5: 4 files, best = epoch 2,
+  the NaN epoch loads, a reopened manager restores 3.0, a later top-1 best removes no epoch file);
+  `test_manager_save_last_follows_validation_ends`;
+- config: `test_loader_reads_every_form` x6 now pins `CheckpointConfig(epoch=..., step=...)` with the effective values
+  (decision 10); `test_hepattn_checkpoint_settings_overridden_by_its_setup_are_ignored`;
+  `test_optimizer_name_is_matched_case_insensitively`; `test_unsupported_run_options_raise` x9 (+ missing
+  weight_decay, both triggers, top-k 3 without a monitor, `save_on_train_epoch_end`);
+- metrics: `ulps` at a zero reference uses the smallest subnormal as the spacing (`test_ulps_of_an_exact_zero_reference_is_strict`).
 
 Re-verified 2026-10-16 in a new session at `a2bab07`: the 7 S6a test files + `test_import_hygiene.py` gave 92 passed,
 4 skipped (requiresdata) in 360 s; `prek run` on all 18 changed files passes; `S6a_mutations.py --only
@@ -158,7 +220,7 @@ tests); M29-M56 include those changes and are killed by the new tests.
 |---|---|---|
 | M29 | `lr_max` read from `initial` (R3) | `test_loader_reads_every_form[org_raw]` |
 | M30 | `every_n_train_steps = None` (R4) | `test_loader_reads_every_form[polaris_generated]` |
-| M31 | `save_last = False` (R5) | `test_loader_reads_every_form[org_raw]` |
+| M31 | `save_last = False` (R5; fix round 2: the step callback's) | `test_loader_reads_every_form[polaris_generated]` |
 | M32 | `weight_decay = 0.0` (R6) | same |
 | M33 | `seed = None` (R7) | same |
 | M34 | `num_val = -1` (R8) | same |
@@ -185,6 +247,36 @@ tests); M29-M56 include those changes and are killed by the new tests.
 | M55 | manager writes `step-<N>.npz` again at one step | `test_manager_keeps_last_k_and_the_best` |
 | M56 | float64 not cast | `test_float64_is_cast_to_float32_on_the_host` |
 
+Fix round 2: 23 more mutants (M57-M79; the reviewer's X1, X6, X11, MR1 and the new code), **23/23 killed**, 5-10 s
+each (selected tests: `DATA_WORKERS`, `CK_NEW`, `CFG_RUN` in the runner). M30, M31, M32, M36 and M37 were retargeted to
+the new `_checkpoint_callback` / `_optimizer` code (their old snippets no longer exist).
+
+| Mutant | Change | Killed by |
+|---|---|---|
+| M57 | no `multiprocessing_context` (platform default: fork on Linux) | `test_workers_are_never_forked` |
+| M58 | `WORKER_START_METHOD = "fork"` | same |
+| M59 | fork guard disabled | same |
+| M60 | `persistent_workers=False` | same |
+| M61 | `SplitBatches.epoch` does not move the sampler | `test_spawned_workers_give_the_in_process_batches_without_a_fork_warning` |
+| M62 | no chmod before the rename | `test_checkpoint_files_get_the_mode_of_a_plain_write[18]` (umask 0o022) |
+| M63 | stored shape not compared (X1) | `test_stored_shape_other_than_the_models_is_rejected` |
+| M64 | NaN guard removed (X11) | `test_nan_at_the_first_validation_is_not_the_best` |
+| M65 | batch signature without dtype (X6) | `test_a_new_batch_shape_or_dtype_raises[int32]` |
+| M66 | `ov` keys not compared (MR1) | `test_checkpoint_of_another_optimizer_is_rejected[AdamW-Lion]` |
+| M67 | hepattn `Checkpoint` save_last read from YAML | `test_loader_reads_every_form[org_raw]` |
+| M68 | hepattn `Checkpoint` top-k read from YAML (1) | same |
+| M69 | no default `every_n_epochs=1` | same |
+| M70 | both triggers accepted | `test_unsupported_run_options_raise[mutually exclusive]` |
+| M71 | hepattn `Checkpoint` dirpath read from YAML | `test_hepattn_checkpoint_settings_overridden_by_its_setup_are_ignored` |
+| M72 | optimizer name case-sensitive | `test_optimizer_name_is_matched_case_insensitively` |
+| M73 | missing weight_decay not rejected | `test_unsupported_run_options_raise[weight_decay]` (KeyError, not ConfigError) |
+| M74 | epsilon 1e-7 | `test_optimizer_name_is_matched_case_insensitively` |
+| M75 | top-1 best removes the previous best of any kind | `test_manager_keeps_every_epoch_checkpoint_and_points_at_the_best` |
+| M76 | `save_last` always writes | `test_manager_save_last_follows_validation_ends` |
+| M77 | stale `last-*` files kept | same |
+| M78 | NaN monitor value stored as a float | `test_manager_keeps_every_epoch_checkpoint_and_points_at_the_best` |
+| M79 | every epoch becomes best | same |
+
 Checkpoint mutants take 200-270 s each (the train-step compile); the others 6-25 s.
 
 ## Deviations
@@ -196,6 +288,8 @@ Checkpoint mutants take 200-270 s each (the train-step compile); the others 6-25
    `pool_layers=True` reproduces it).
 4. The resume gate steps with the first model's compiled function (cost); the fresh model is checked by an eager forward.
 5. The `on_test_end` ROOT file of the torch writer is not written (only the h5); `load_convert_h5` reads the native h5.
+6. Fix round 2: `CheckpointConfig` changed shape (two `CheckpointCallback`s instead of flat fields); no S6b code used it yet.
+   The checkpoint policy follows the hybrid callbacks, not the plan 3.9 text (decision 10).
 
 ## Open issues
 
@@ -209,15 +303,35 @@ Checkpoint mutants take 200-270 s each (the train-step compile); the others 6-25
 - **S6b:** pass `expect_config_hash=rc.model_hash` to `load_checkpoint` (safe since the fix round: the hash is the same
   for the raw, generated and saved forms, on any host, and for another LR / optimizer / matcher / data setting; a
   checkpoint written before the fix round has an old-style hash and needs `expect_config_hash=None`); resume data position at an optimizer-step
-  boundary with accumulation (`EpochSampler(start_batch)`); call `CheckpointManager.save` at the end of an epoch /
-  before walltime (`last` points at the latest step checkpoint).
+  boundary with accumulation (`SplitBatches.epoch(epoch, start_batch)`).
+- **S6b, checkpoint wiring** (fix round 2, decision 10): one `CheckpointManager` per `CheckpointCallback`. For
+  `checkpoint.epoch`: `save_epoch(epoch, step, {"val/loss": ...})` at every validation end, in the run's `ckpts`
+  directory (the hepattn callback ignores a YAML `dirpath`). For `checkpoint.step`: `maybe_save_step` every
+  `every_n_train_steps` with `keep_last_k = save_top_k`, and, when `save_last` is true, `save_last(step, ...)` at every
+  validation end and at the train end (else `last` can be up to `every_n_steps - 1` steps old), in `dirpath`.
+- **Plan owner:** plan 3.9 says "best on val/loss"; the hybrid keeps every epoch checkpoint (`save_top_k=-1`) and its
+  `Checkpoint` never writes `last` (decision 10). Correct the plan text.
+- **S6b, optimizer builder:** `keras.optimizers.AdamW(epsilon=rc.optimizer.epsilon)` (1e-8, torch's default; keras'
+  default is 1e-7), or record the deviation.
+- **S6b:** host hooks of plan 3.10 (`KERAS_JAX_PLAN.md:394`): `MetricsCsvWriter`, `EBOPsMonitor` and `BitwidthMonitor`
+  are not part of S6a and must be written in the loop.
+- **S8 / G4, data order:** G4 needs the same data order in the hybrid and JAX runs. The hybrid train loader is
+  `DataLoader(shuffle=True)` (a `RandomSampler` seeded from the global torch RNG) without `drop_last`
+  (`pflow_data.py:817-831`); the native one is `EpochSampler(seed + epoch)` with `drop_last`. Their orders differ, and
+  the hybrid has one more (short) batch per epoch unless S8 injects `EpochSampler` (with `drop_last`) into the hybrid
+  data module or exports an order file that both read.
+- **Polaris, worker start cost** (decision 9): measure the first-batch time and the memory of 8 spawned workers with
+  the real train `CLICDataset` (each receives the pickled in-memory arrays). If that is too large, give the workers a
+  dataset that opens the ROOT file itself in `worker_init_fn`.
 - **S6b / S8:** the generated Polaris config defaults to `precision: bf16-mixed`; the user decided fp32 first, so the
   driver must ignore it or the config be generated with `HGQ_PRECISION=32`. `RunConfig.trainer["precision"]` carries it.
 - **S5:** BetaPID's `min_beta` is 0.0 (the hybrid default, now filled in by the loader for raw configs too); plan 3.6's
   EBOPs read-out (sum(losses) / beta) needs beta > 0: S5/S6b must clamp or read EBOPs another way when beta is 0.
 - **S6b:** use `ClicMetrics(pool_layers=True)` when comparing with hybrid logs (G4); `ClicMetrics("train")` per
   logged step with `reset`.
-- **Polaris:** run `CLIC_DATA_DIR=/eagle/hgcal-maskformer-fpga/clic_data CLIC_DATA_REQUIRED=1 python -m pytest -m requiresdata tests/keras_native/test_data_real.py -s`.
+- **Polaris, before S8:** run `CLIC_DATA_DIR=/eagle/hgcal-maskformer-fpga/clic_data CLIC_DATA_REQUIRED=1 python -m pytest -m requiresdata tests/keras_native/test_data_real.py -s`
+  and record the counts here (the padded-node incidence-0 gate is still open; the test asserts that every event has a
+  padded node, so it is not vacuous).
   Risk found by reading: `pflow_data.py:461-462` sets `particle_valid` only for non-residual particles among the first
   `n_particles` (pdgid -999 -> class 5, `pflow_data.py:687`), so a residual before a real particle breaks the prefix
   that both torch's `Matcher` (`matcher.py:317-320`, lengths = valid count) and native `host_match` assume.
