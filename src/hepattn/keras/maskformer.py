@@ -98,6 +98,21 @@ class KerasMaskFormer(MaskFormer):
 
         yield from walk(self)
 
+    def quantized_leaves(self):
+        """Yield every HGQ2 layer that carries an EBOPs term (its own ``_beta`` and ``_ebops``), nested ones included.
+
+        ``keras_layers()`` stops at the top-level keras layers, but HGQ2 layers also sit inside them: the exp/inv
+        tables of every QSoftmax, and every leaf of the masked-Linformer cores (``AttendCore`` / ``ProjectCore`` are
+        plain keras layers that hold QEinsum, QEinsumDense, QSoftmax, QUnaryFunctionLUT leaves). Each leaf adds
+        ``beta * ebops`` with its OWN beta, so beta must be written to every leaf, and the total EBOPs is the sum of
+        each leaf's own ``_ebops`` (``QSoftmax.ebops`` already adds its tables, which are leaves too).
+        """
+        seen: set[int] = set()
+        for module in self.modules():
+            if getattr(module, "_beta", None) is not None and id(module) not in seen:
+                seen.add(id(module))
+                yield module
+
     def quant_losses(self) -> Tensor:
         """Sum of the HGQ2 EBOPs regularization terms collected from all keras layers.
 

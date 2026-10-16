@@ -8,6 +8,36 @@ import torch
 from lightning import Callback, LightningModule, Trainer
 
 
+def quantized_leaves(model) -> list:
+    """The HGQ2 layers whose beta and EBOPs the callbacks below act on.
+
+    ``KerasMaskFormer.quantized_leaves`` reaches the nested ones (QSoftmax tables, masked-Linformer core leaves);
+    a model without it (test doubles) falls back to its top-level ``keras_layers()``.
+    """
+    walk = getattr(model, "quantized_leaves", None)
+    return list(walk() if walk is not None else model.keras_layers())
+
+
+def total_ebops(model) -> float:
+    """Sum of every leaf's own EBOPs (``_ebops``; the ``ebops`` property of QSoftmax adds its tables, which are leaves
+    as well, so it is used only for layers without ``_ebops``).
+    """
+    total = 0.0
+    for layer in quantized_leaves(model):
+        own = getattr(layer, "_ebops", None)
+        ebops = own.value if own is not None else getattr(layer, "ebops", None)
+        if ebops is not None:
+            total += float(torch.as_tensor(ebops))
+    return total
+
+
+def write_beta(model, beta: float) -> None:
+    for layer in quantized_leaves(model):
+        beta_var = getattr(layer, "_beta", None)
+        if beta_var is not None:
+            beta_var.assign(beta)
+
+
 class MetricsCsvWriter(Callback):
     """Append every logged metric to a plain CSV, one row per validation epoch.
 
@@ -71,12 +101,7 @@ class EBOPsMonitor(Callback):
     """
 
     def on_validation_epoch_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
-        total = 0.0
-        for layer in pl_module.model.keras_layers():
-            ebops = getattr(layer, "ebops", None)
-            if ebops is not None:
-                total += float(torch.as_tensor(ebops))
-        pl_module.log("val/ebops", total, sync_dist=True)
+        pl_module.log("val/ebops", total_ebops(pl_module.model), sync_dist=True)
 
 
 class BitwidthMonitor(Callback):
@@ -176,10 +201,7 @@ class BetaScheduler(Callback):
     def on_train_batch_start(self, trainer: Trainer, pl_module: LightningModule, batch, batch_idx: int) -> None:
         fraction = min(1.0, trainer.global_step / max(1, self.warmup_steps))
         beta = self.beta_start + fraction * (self.beta_end - self.beta_start)
-        for layer in pl_module.model.keras_layers():
-            beta_var = getattr(layer, "_beta", None)
-            if beta_var is not None:
-                beta_var.assign(beta)
+        write_beta(pl_module.model, beta)
         pl_module.log("train/quant_beta", beta, sync_dist=True)
 
 
@@ -295,18 +317,10 @@ class BetaPID(Callback):
             )
 
     def read_ebops(self, pl_module: LightningModule) -> float:
-        total = 0.0
-        for layer in pl_module.model.keras_layers():
-            ebops = getattr(layer, "ebops", None)
-            if ebops is not None:
-                total += float(torch.as_tensor(ebops))
-        return total
+        return total_ebops(pl_module.model)
 
     def write_beta(self, pl_module: LightningModule, beta: float) -> None:
-        for layer in pl_module.model.keras_layers():
-            beta_var = getattr(layer, "_beta", None)
-            if beta_var is not None:
-                beta_var.assign(beta)
+        write_beta(pl_module.model, beta)
 
     def step(self, ebops: float) -> float:
         """Advance the controller one epoch and return the new beta.
