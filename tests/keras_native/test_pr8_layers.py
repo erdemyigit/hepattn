@@ -13,7 +13,6 @@ tolerance (``E2E``; plan 5.8, re-measured by R5); each has a control that exceed
 import collections
 import copy
 import importlib
-import inspect
 import itertools
 import math
 import re
@@ -27,7 +26,6 @@ import torch
 import yaml
 from torch import nn
 
-from hepattn.keras_native.attention import Attention as NAttention
 from hepattn.keras_native.decoder import MaskFormerDecoderLayer as NDecoderLayer
 from hepattn.keras_native.dense import Dense as NDense
 from hepattn.keras_native.encoder import Encoder as NEncoder
@@ -54,11 +52,6 @@ REPO = Path(__file__).resolve().parents[2]
 CLIC = REPO / "src/hepattn/experiments/clic"
 SCALE_DICT = str(CLIC / "configs/clic_var_transform.yaml")
 
-# Before the R2 merge, native build_attention routes attn_type "linformer" to Helen's layer (k=256, no linformer_core),
-# so the masked-Linformer rows are skipped. The condition is on the code, not a strict xfail: once R2's Attention (with
-# linformer_core) is in the tree they run as plain tests, and a wrong result fails instead of hiding as an xfail.
-R2_LANDED = "linformer_core" in inspect.signature(NAttention.__init__).parameters
-R2_REQUIRED = pytest.mark.skipif(not R2_LANDED, reason="needs R2's masked-Linformer Attention (RETARGET_ORG_MAIN.md section 5.6)")
 
 # Tolerances: 2x the measured maximum (R3.md, "Gates"; $S/r3/measure.out). The whole-model rows keep the plan's
 # maskformer.e2e tolerance (5e-5 / 1e-4, re-measured by R5); measured here: 8.6e-6 abs, 7% of it.
@@ -320,7 +313,6 @@ def torch_projection_rows(model) -> dict[tuple[str, int, str, str], int]:
     return rows
 
 
-@R2_REQUIRED
 def test_linformer_projection_shapes_equal_torch():
     """Plan 5.1 shape gate: ``proj_k`` / ``proj_v`` (168, 64) in the encoder, (160, 64) in ``q_ca`` / ``kv_ca``, and
     (150, 64) in native ``q_sa`` against (160, 64) in torch (native drops the dead tail rows, plan 5.6). Native rows are
@@ -741,7 +733,7 @@ def test_swiglu_quantized_trains_under_jit_with_ebops():
 LINFORMER_DEC = {"attn_type": "linformer", "linformer_seq_len": DEC_N, "linformer_k": 8}
 
 
-@pytest.mark.parametrize("part", ["encoder", "decoder_layer", pytest.param("decoder_layer_linformer", marks=R2_REQUIRED)])
+@pytest.mark.parametrize("part", ["encoder", "decoder_layer", "decoder_layer_linformer"])
 def test_pr8_layers_train_under_jit(part):
     """JIT gate at the high spec for the sorting encoder (2 layers, registers) and a PR #8 decoder layer at depth 0,
     with dense and (after the R2 merge) masked-Linformer attention. Linformer: ``q_sa`` (30 queries, seq_len 40) must
@@ -995,7 +987,6 @@ def org_linformer_pair(inputs: dict, seed: int = 30, sort: bool = True):
     return tmodel, nmodel
 
 
-@R2_REQUIRED
 def test_org_linformer_model_equals_torch(batch, monkeypatch):
     """R2 x R3 wiring (added at the rt/integration merge): R3's model with R2's masked-Linformer cores against org torch.
 
