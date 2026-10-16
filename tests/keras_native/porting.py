@@ -51,7 +51,12 @@ def port_norm(tnorm: nn.Module, nnorm) -> None:
 
 @torch.no_grad()
 def port_attention(tattn: Attention, nattn: NativeAttention) -> None:
-    assert tattn.attn_type == "torch", f"dense port expects a torch-backend Attention, got {tattn.attn_type}"
+    """Torch Attention (torch or linformer backend) -> native Attention of the same attn_type.
+
+    Linformer: ``proj_k`` / ``proj_v`` (seq_len, k) go to the core's E / F. Rows past the key length are dropped when
+    the native core has no tail (no renorm, e.g. decoder query self-attention): org never reads them there.
+    """
+    assert tattn.attn_type == nattn.attn_type, f"attn_type mismatch: torch {tattn.attn_type} vs native {nattn.attn_type}"
     assert tattn.dim == nattn.dim and tattn.num_heads == nattn.num_heads, "attention shape mismatch"
     w_q, w_k, w_v = tattn.in_proj_weight.chunk(3, dim=0)
     b_q = b_k = b_v = None
@@ -69,10 +74,15 @@ def port_attention(tattn: Attention, nattn: NativeAttention) -> None:
     if tattn.value_residual and not tattn.is_first_layer:
         lin = tattn.value_residual_mix[0]
         assign_dense(nattn.value_residual_mix, lin.weight, lin.bias)
+    if tattn.attn_type == "linformer":
+        assert nattn.core is not None, f"{nattn.name}: build the native attention before porting"
+        nattn.core.E.assign_full(_np(tattn.proj_k))
+        nattn.core.F.assign_full(_np(tattn.proj_v))
 
 
 @torch.no_grad()
 def port_linformer(tlin: LinformerAttention, nlin: NativeLinformer) -> None:
+    """Helen's LinformerAttention (``hepattn.models.linformer``) -> native twin; kept for R5's old goldens until their removal."""
     assert not tlin.share_kv, "share_kv is not ported"
     assign_dense(nlin.to_q, tlin.to_q.weight, None)
     assign_dense(nlin.to_k, tlin.to_k.weight, None)
@@ -83,12 +93,8 @@ def port_linformer(tlin: LinformerAttention, nlin: NativeLinformer) -> None:
 
 
 def port_any_attention(tattn: Attention, nfn) -> None:
-    """Torch Attention (torch or linformer backend) -> native Attention / LinformerAttention."""
-    if tattn.attn_type == "linformer":
-        assert isinstance(nfn, NativeLinformer), "torch linformer Attention needs a native LinformerAttention"
-        port_linformer(tattn.attn, nfn)
-    else:
-        port_attention(tattn, nfn)
+    """Torch Attention (torch or linformer backend) -> native Attention (``port_attention`` covers both)."""
+    port_attention(tattn, nfn)
 
 
 @torch.no_grad()

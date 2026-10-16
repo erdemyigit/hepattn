@@ -173,3 +173,99 @@ def test_control_static_check_allows_native_and_backend_neutral_imports(tmp_path
     scanned, bad = forbidden_imports(src, NATIVE_PKG)
     assert len(scanned) == 3
     assert bad == []
+
+
+# The hybrid (hepattn.keras, torch backend, hepattn/.venv without jax) will run the masked-Linformer core (plan
+# section 4, gate H0), so the core and its imports must work with no jax installed.
+HYBRID_PYTHON = Path(os.environ.get("HEPATTN_HYBRID_PYTHON", REPO_ROOT.parent / "hepattn" / ".venv" / "bin" / "python"))
+CORE_MODULES = ["hepattn.keras_native.factory", "hepattn.keras_native.attention", "hepattn.keras_native.masked_linformer"]
+NO_JAX_RUN = textwrap.dedent(
+    """
+    import importlib, importlib.abc, json, sys
+    BLOCK = sys.argv[1] == "block"
+    class NoJax(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name.split(".")[0] in {"jax", "jaxlib"}:
+                raise ImportError(f"blocked: {name}")
+    if BLOCK:
+        sys.meta_path.insert(0, NoJax())
+    failed = {}
+    for mod in sys.argv[2].split(","):
+        try:
+            importlib.import_module(mod)
+        except ImportError as err:
+            failed[mod] = str(err)
+    ran = {}
+    if not failed:
+        import keras
+        import numpy as np
+        from hepattn.keras_native.attention import Attention
+        from hepattn.keras_native.factory import LayerFactory
+        quant = {"weight": {"default_q_type": "kbi", "b0": 8, "i0": 2}, "datalane": {"default_q_type": "kif", "i0": 4, "f0": 8}}
+        rng = np.random.default_rng(0)
+        q, kv = rng.standard_normal((2, 6, 32)).astype("float32"), rng.standard_normal((2, 8, 32)).astype("float32")
+        mask = rng.random((2, 6, 8)) < 0.5
+        for mode, spec in (("float", None), ("quantized", quant)):
+            factory = LayerFactory(spec)
+            with factory.scopes():
+                attn = Attention(32, num_heads=4, attn_type="linformer", linformer_seq_len=10, linformer_k=4, factory=factory)
+                attn.build((None, 6, 32), (None, 8, 32))
+            out = keras.ops.convert_to_numpy(attn(q, kv, kv, attn_mask=mask))
+            ran[mode] = [list(out.shape), bool(np.isfinite(out).all()), type(attn.core).__name__]
+            # self-attention with a kv_mask: ProjectCore with renorm, rsqrt table and tail rows (6 tokens, seq_len 10)
+            with factory.scopes():
+                sa = Attention(32, num_heads=4, attn_type="linformer", linformer_seq_len=10, linformer_k=4, factory=factory)
+                sa.build((None, 6, 32))
+            out = keras.ops.convert_to_numpy(sa(q, kv_mask=np.arange(6)[None] < np.array([[6], [4]])))
+            ran[mode + "_self"] = [list(out.shape), bool(np.isfinite(out).all()), type(sa.core).__name__, sa.core.E.tail is not None]
+    print(json.dumps({"backend": keras.backend.backend() if not failed else None, "failed": failed, "ran": ran,
+                      "jax": sorted(m for m in sys.modules if m.split(".")[0] in {"jax", "jaxlib"})}))
+    """
+)
+
+
+EXPECTED_RUN = {
+    "float": [[2, 6, 32], True, "AttendCore"],
+    "quantized": [[2, 6, 32], True, "AttendCore"],
+    "float_self": [[2, 6, 32], True, "ProjectCore", True],
+    "quantized_self": [[2, 6, 32], True, "ProjectCore", True],
+}
+
+
+def run_without_jax(python: str, modules: list[str], block: bool) -> dict:
+    env = {**os.environ, "KERAS_BACKEND": "torch", "PYTHONPATH": str(REPO_ROOT / "src")}
+    proc = subprocess.run(
+        [python, "-c", NO_JAX_RUN, "block" if block else "free", ",".join(modules)], env=env, capture_output=True, text=True, timeout=600, check=False
+    )
+    return result(proc)
+
+
+def test_masked_linformer_core_runs_under_torch_with_jax_blocked():
+    out = run_without_jax(sys.executable, CORE_MODULES, block=True)
+    assert out["failed"] == {}, out["failed"]
+    assert out["backend"] == "torch"
+    assert out["jax"] == []
+    assert out["ran"] == EXPECTED_RUN
+
+
+def test_control_the_jax_blocker_stops_a_jax_import():
+    """Control: matching.py imports jax, so it fails under the same blocker (the check above is not vacuous)."""
+    out = run_without_jax(sys.executable, ["hepattn.keras_native.matching"], block=True)
+    assert "hepattn.keras_native.matching" in out["failed"], out
+    assert "blocked: jax" in out["failed"]["hepattn.keras_native.matching"]
+
+
+def test_masked_linformer_core_runs_in_the_hybrid_env_without_jax():
+    """The real target: hepattn/.venv (torch CPU, HGQ2, no jax)."""
+    if not HYBRID_PYTHON.exists():
+        pytest.skip(f"hybrid env not found at {HYBRID_PYTHON}")
+    probe = subprocess.run(
+        [str(HYBRID_PYTHON), "-c", "import importlib.util; print(importlib.util.find_spec('jax') is None)"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert probe.stdout.strip() == "True", "the hybrid env has jax installed; this test needs an env without it"
+    out = run_without_jax(str(HYBRID_PYTHON), CORE_MODULES, block=False)
+    assert out["failed"] == {} and out["backend"] == "torch" and out["jax"] == []
+    assert out["ran"] == EXPECTED_RUN
