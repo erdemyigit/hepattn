@@ -4,7 +4,9 @@ Residual wrapping (norms, LayerScale, DropPath) and the hybrid-norm schedule are
 REUSED from the torch implementation — norms are the float boundary of the
 quantized model. Only the attention and feed-forward leaves are factory-built.
 
-The keras encoder implements the dense-mask path (torch-SDPA semantics): sliding windows,
+The keras encoder implements the dense-mask path (torch-SDPA semantics) and the masked
+Linformer (``attn_type="linformer"``, org PR #9; self-attention with ``kv_mask``, so the
+``project`` core): sliding windows,
 score mods, and the flash/flex backends are torch-side performance features with
 identical math to the dense path, and are rejected here. A torch-model attn_type of
 flash/flash-varlen is coerced to "torch" with a warning so configs written for the GPU
@@ -29,7 +31,7 @@ from hepattn.models.norm import get_hybrid_norm_config
 
 ALLOWED_ATTN_TYPES = {"torch", "flash", "flash-varlen", "linformer"}
 # flash/flash-varlen are coerced to torch (identical math on the dense-mask path);
-# linformer is a distinct backend (KerasLinformerAttention) and is kept as-is.
+# linformer is a distinct backend (KerasAttention with the masked-Linformer core) and is kept as-is.
 COERCE_TO_TORCH = {"flash", "flash-varlen"}
 
 

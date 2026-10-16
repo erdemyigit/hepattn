@@ -74,9 +74,12 @@ class KerasMaskFormerDecoderLayer(MaskFormerDecoderLayer):
         dense_kwargs = dict(dense_kwargs or {})
 
         def attn(part: str):
-            return build_keras_attention(
-                dim, attn_type=attn_type, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_{part}", **attn_kwargs
-            )
+            kwargs = dict(attn_kwargs)
+            if attn_type == "linformer" and part == "q_sa":
+                # org calls q_sa without any mask, so masked_linformer.project reads E[:num_queries] with no renorm.
+                # q_ca / kv_ca keep "auto": attend when the decoder passes an attn_mask (mask attention), as org.
+                kwargs["linformer_core"] = "project_unmasked"
+            return build_keras_attention(dim, attn_type=attn_type, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_{part}", **kwargs)
 
         residual = partial(Residual, dim=dim)
         self.q_ca = residual(attn("q_ca"), norm=attn_norm)

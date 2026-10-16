@@ -39,7 +39,9 @@ __all__ = [
 
 @torch.no_grad()
 def port_attention(attn: Attention, kattn: KerasAttention) -> None:
+    """Port a torch Attention into its KerasAttention twin; a linformer's proj_k/proj_v wait for the lazy core."""
     assert attn.dim == kattn.dim and attn.num_heads == kattn.num_heads, "attention shape mismatch"
+    assert (attn.attn_type == "linformer") == (kattn.attn_type == "linformer"), f"attn_type mismatch: {attn.attn_type} vs {kattn.attn_type}"
 
     w_q, w_k, w_v = attn.in_proj_weight.chunk(3, dim=0)
     if attn.in_proj_bias is not None:
@@ -61,6 +63,9 @@ def port_attention(attn: Attention, kattn: KerasAttention) -> None:
     if attn.value_residual and not attn.is_first_layer:
         # torch: nn.Sequential(nn.Linear(dim, num_heads), nn.Sigmoid()); keras: Dense(num_heads, sigmoid)
         port_linear(attn.value_residual_mix[0], kattn.value_residual_mix)
+
+    if kattn.attn_type == "linformer":
+        kattn.load_projections(attn.proj_k, attn.proj_v)
 
 
 @torch.no_grad()
@@ -169,6 +174,12 @@ def port_keras_to_keras(src, dst) -> None:
         src_bias = getattr(src_layer, "bias", None)
         if src_bias is not None:
             dst_layer.bias.assign(np.asarray(src_bias))
+
+    # masked-Linformer cores hold their sequence projections in sublayers (head kernel, tail rows), not as `kernel`
+    dst_modules = dict(dst.named_modules())
+    for path, module in src.named_modules():
+        if isinstance(module, KerasAttention) and module.attn_type == "linformer":
+            dst_modules[path].load_projections(*module.full_projections())
 
 
 @torch.no_grad()
