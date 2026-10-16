@@ -24,11 +24,12 @@ from test_maskformer_parity import flatten_outputs  # ty: ignore [unresolved-imp
 from hepattn.keras.porting import port_maskformer
 
 # Error metric: max over elements of |hybrid - torch| / (1 + |torch|), finite slots. Measured (macOS arm64, torch
-# 2.10.0, CPU, dense attention, max over seeds 0-7, R4a and its fix round): outputs 1.65e-5 (seed 6, final mask
-# logits), losses 1.70e-7 (the loss maximum moves between runs of the same seed, 5e-8 .. 1.7e-7). Tolerances are 2x.
-# The rows run seeds 0 and 1. Re-measure on the first Linux/GPU run (carried gate).
-OUT_TOL = 3.3e-5
-LOSS_TOL = 3.4e-7
+# 2.10.0, CPU, dense attention, R4a fix round 2, $S/r4a_fix2/logs/loss_seeds*.out): max over seeds 0-15, each run 3
+# times in one process and once in another, outputs 1.855e-5 (seed 12, final regression), losses 2.75e-7 (seed 12,
+# layer_3 mask_bce); every repeat gave the same values to 4 digits. Tolerances are 2x. The rows run seeds 0 and 1.
+# Re-measure on the first Linux/GPU run (carried gate).
+OUT_TOL = 3.7e-5
+LOSS_TOL = 5.5e-7
 SEEDS = [0, 1]
 R4B = "R4b: the hybrid masked-Linformer branch (RETARGET_ORG_MAIN.md section 4); Helen's KerasLinformerAttention has no q_proj"
 
@@ -203,8 +204,25 @@ def state_map(org: dict, hyb: dict, quantized: bool) -> tuple[dict, dict, list]:
     return mapping, covered, unmatched
 
 
+# Packed torch tensors, by the name of the hybrid leaf that holds one part: SwiGLU [x1 | x2], attention [q | k | v].
+PACKED_PARTS = {"_x1": "chunk0/2", "_x2": "chunk1/2", "_q_proj": "chunk0/3", "_k_proj": "chunk1/3", "_v_proj": "chunk2/3"}
+
+
+def expected_relation(hkey: str) -> str:
+    """The relation a hybrid key's name implies: a Keras kernel is the transposed torch weight, a bias the same."""
+    leaf = hkey.rsplit(".", 1)[-1]
+    layer, _, var = leaf.rpartition("/")
+    part = next((rel for suffix, rel in PACKED_PARTS.items() if layer.endswith(suffix)), None)
+    if var == "kernel":
+        return f"{part}.T" if part else "T"
+    if var == "bias":
+        return part or "same"
+    return "same"
+
+
 def check_state_map(mapping: dict, covered: dict, unmatched: list, quantized: bool) -> None:
     for hkey, (tkey, rel) in mapping.items():
+        assert rel == expected_relation(hkey), f"{hkey} holds {tkey} as {rel}, its name implies {expected_relation(hkey)}"
         own = owner(tkey)
         if own is None:
             assert hkey == tkey and rel == "same", f"reused torch module state moved: {tkey} -> {hkey} ({rel})"
