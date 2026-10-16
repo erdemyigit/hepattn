@@ -8,11 +8,13 @@ The checks come as a set, because each one alone can pass vacuously:
 - EBOPs: every leaf adds a positive, differentiable EBOPs term in training mode.
 
 The high-spec floor (1.1e-2 to 1.3e-2) is the HGQ2 default bias quantizer, which the factory scopes do not set:
-a plain SiLU Dense(256) has the same floor (1.31e-2, R4a log).
+a plain SiLU Dense(256) has the same floor (1.31e-2, R4a log). That floor hides any SwiGLU error below about 1e-2, so
+a second row zeroes the biases: the high-spec error then falls about 300x, to the floor of the three leaves.
 """
 
 import pytest
 import torch
+from torch import nn
 
 pytest.importorskip("hepattn.keras", reason="hgq dependency group not installed")
 
@@ -39,6 +41,8 @@ CONFIGS = {
 }
 # Measured (R4a, macOS arm64, torch 2.10.0, CPU) over the 3 configs x seeds 0-2: high 1.12e-2 .. 1.30e-2; 2x.
 HIGH_TOL = 2.6e-2
+# The same with every bias set to 0 (R4a fix round, $S/r4a_fix/logs/swiglu_zero_bias.out): 2.96e-5 .. 4.27e-5; 2x.
+ZERO_BIAS_TOL = 8.6e-5
 
 
 def quantized_twin(tdense: Dense, quant: dict, x: torch.Tensor) -> KerasDense:
@@ -90,6 +94,28 @@ def test_quantized_swiglu_paired_delta(name):
     assert high_diff <= HIGH_TOL, f"high spec deviates {high_diff:.3e} from float: scopes not applied?"
     assert low_diff >= 10 * high_diff, f"low spec only {low_diff:.3e} from float (high {high_diff:.3e}): quantizers inert?"
     assert corr > 0.5, f"low-spec output is not a quantized version of the float output (corr {corr:.3f})"
+
+
+@pytest.mark.parametrize("name", CONFIGS)
+def test_quantized_swiglu_high_spec_without_bias(name):
+    """Without the bias-quantizer floor, the high spec resolves errors of the SwiGLU leaves down to about 1e-4."""
+    tdense, x = fixture(name)
+    with torch.no_grad():
+        for module in tdense.modules():
+            if isinstance(module, nn.Linear) and module.bias is not None:
+                module.bias.zero_()
+        ref = tdense(x)
+        diff = (quantized_twin(tdense, HIGH_QUANT, x)(x) - ref).abs().max().item()
+    record_measurement({
+        "tag": f"swiglu.quantized.{name}",
+        "config": "high_bitwidth_zero_bias",
+        "max_abs_err": diff,
+        "max_rel_err": float("nan"),
+        "atol": ZERO_BIAS_TOL,
+        "rtol": 0.0,
+    })
+    assert ref.abs().max().item() > 0.4  # not a vanishing output: the tolerance is about 2e-4 of it
+    assert diff <= ZERO_BIAS_TOL, f"zero-bias high spec deviates {diff:.3e} from float"
 
 
 @pytest.mark.parametrize("name", CONFIGS)
