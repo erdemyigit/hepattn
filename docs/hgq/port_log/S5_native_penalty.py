@@ -25,7 +25,7 @@ for task in _modules(init["tasks"]):
 data = np.load(sys.argv[2])
 out = []
 for seed in (0, 1):
-    import keras  # noqa: PLC0415
+    import keras
 
     keras.utils.set_random_seed(seed)
     model = from_config(cfg["model"])
@@ -41,6 +41,12 @@ for seed in (0, 1):
         _, losses = fwd(tv, ntv, inputs)
         pen, reg = el.split_losses(losses)
         total = float(sum(float(x) for x in losses))
-        row = {"seed": seed, "batch": i, "penalty_total": total, "ebops": float(sum(float(x) for x in pen)) / 1e-12, "reg": float(sum(float(x) for x in reg))}
+        row = {
+            "seed": seed,
+            "batch": i,
+            "penalty_total": total,
+            "ebops": float(sum(float(x) for x in pen)) / 1e-12,
+            "reg": float(sum(float(x) for x in reg)),
+        }
         out.append(row)
         print(json.dumps(row), flush=True)

@@ -34,7 +34,14 @@ T_SET = "tests/polaris/test_beta_setpoints.py"
 
 # (name, file, old, new, env, pytest targets)
 M = [
-    ("M1 train_step does not donate by default", TS, "donate: bool = True", "donate: bool = False", "jax", [f"{T_TS}::test_state_donation_and_model_variables"]),
+    (
+        "M1 train_step does not donate by default",
+        TS,
+        "donate: bool = True",
+        "donate: bool = False",
+        "jax",
+        [f"{T_TS}::test_state_donation_and_model_variables"],
+    ),
     (
         "M2 objective without the EBOPs penalty",
         TS,
@@ -94,8 +101,8 @@ M = [
     (
         "M9 OneCycle reads micro-steps (no division by k)",
         OPT,
-        "        n = ops.floor(ops.cast(step, \"float32\") / self.steps_per_update)",
-        "        n = ops.floor(ops.cast(step, \"float32\"))",
+        '        n = ops.floor(ops.cast(step, "float32") / self.steps_per_update)',
+        '        n = ops.floor(ops.cast(step, "float32"))',
         "jax",
         [f"{T_OPT}::test_onecycle_equals_torch_at_20_steps", f"{T_OPT}::test_optimizer_reads_the_schedule_at_the_optimizer_step"],
     ),
@@ -113,9 +120,19 @@ M = [
         '        "gradient_accumulation_steps": accumulate if accumulate > 1 else None,',
         '        "gradient_accumulation_steps": None,',
         "jax",
-        [f"{T_OPT}::test_accumulation_averages_k_micro_batches_like_one_k_times_batch", f"{T_TS}::test_accumulation_makes_one_host_call_per_micro_batch_and_one_update_per_k"],
+        [
+            f"{T_OPT}::test_accumulation_averages_k_micro_batches_like_one_k_times_batch",
+            f"{T_TS}::test_accumulation_makes_one_host_call_per_micro_batch_and_one_update_per_k",
+        ],
     ),
-    ("M12 Keras default Adam epsilon", OPT, "    adam_epsilon: float = 1e-8,", "    adam_epsilon: float = 1e-7,", "jax", [f"{T_OPT}::test_factory_reads_the_generated_polaris_config_and_org_base"]),
+    (
+        "M12 Keras default Adam epsilon",
+        OPT,
+        "    adam_epsilon: float = 1e-8,",
+        "    adam_epsilon: float = 1e-7,",
+        "jax",
+        [f"{T_OPT}::test_factory_reads_the_generated_polaris_config_and_org_base"],
+    ),
     (
         "M13 controller seeds without HGQ2's 1e-9",
         BC,
@@ -140,7 +157,14 @@ M = [
         "torch",
         [T_PID],
     ),
-    ("M16 hybrid quant_losses walks duplicates again", HMF, "for layer in self.unique_keras_layers() for loss in layer.losses]", "for layer in self.keras_layers() for loss in layer.losses]", "torch", [T_DEDUP]),
+    (
+        "M16 hybrid quant_losses walks duplicates again",
+        HMF,
+        "for layer in self.unique_keras_layers() for loss in layer.losses]",
+        "for layer in self.keras_layers() for loss in layer.losses]",
+        "torch",
+        [T_DEDUP],
+    ),
     (
         "M17 hybrid BetaPID integral gain ignored",
         BC,
@@ -150,7 +174,14 @@ M = [
         [T_PID],
     ),
     ("M18 generator drops min_beta", CFG, '            "min_beta": MIN_BETA_EFFECTIVE,\n', "", "torch", [T_SET]),
-    ("M19 generator ramp starts at 0", CFG, '"init_args": {"beta_start": BETA_START_EFFECTIVE,', '"init_args": {"beta_start": 0.0,', "torch", [T_SET]),
+    (
+        "M19 generator ramp starts at 0",
+        CFG,
+        '"init_args": {"beta_start": BETA_START_EFFECTIVE,',
+        '"init_args": {"beta_start": 0.0,',
+        "torch",
+        [T_SET],
+    ),
     (
         "M20 matching without stop_gradient on the costs (S4 code, gradient gate on the full model)",
         MATCH,
