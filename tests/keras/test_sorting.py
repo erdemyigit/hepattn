@@ -4,6 +4,8 @@ Dense attention is permutation-equivariant, so a full-model comparison cannot se
 of test_org_model_parity.py measures 0 difference). These tests check the mechanics directly:
 - the encoder round trip unsort(sort(x)) is exact, on a fixture whose sort is not the identity;
 - with a stub that marks the sequence position, the hybrid encoder equals the torch encoder only when both sort;
+  this runs with prefix padding (as CLIC data) and with padding between valid tokens, where the valid mask itself
+  must be sorted with the tokens (for a prefix mask, sorting the mask gives the same mask);
 - the model hands the torch sort index to the decoder's query cross-attention only, as org does.
 """
 
@@ -32,16 +34,25 @@ ENCODER = {
     "attn_kwargs": {"num_heads": 4},
     "dense_kwargs": {"activation": "SwiGLU"},
 }
-# Measured (R4a, macOS arm64, torch 2.10.0, CPU): max |torch - hybrid| on valid slots 7.15e-7; 2x.
+# Measured (R4a, macOS arm64, torch 2.10.0, CPU): max |torch - hybrid| on valid slots 7.15e-7, prefix and interleaved; 2x.
 STUB_TOL = 1.43e-6
+LAYOUTS = ["prefix", "interleaved"]
 
 
-def fixture(seed: int = 0) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def fixture(seed: int = 0, layout: str = "prefix") -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     g = torch.Generator().manual_seed(seed)
     x = torch.randn(3, 40, DIM, generator=g)
     phi = torch.randn(3, 40, generator=g)
     valid = torch.arange(40) < torch.tensor([[33], [21], [39]])
+    if layout == "interleaved":  # every third token is padding as well
+        valid &= torch.arange(40) % 3 != 1
     return x, phi, valid
+
+
+def test_interleaved_fixture_is_not_a_prefix():
+    _, _, valid = fixture(layout="interleaved")
+    prefix = torch.arange(40) < valid.sum(-1, keepdim=True)
+    assert not torch.equal(valid, prefix), "vacuous: the interleaved valid mask is a prefix"
 
 
 def mark_positions(_module, args, kwargs):
@@ -67,30 +78,32 @@ def test_encoder_sort_round_trip_is_exact():
     assert torch.equal(kenc(x, x_sort_value=phi, kv_mask=valid), x)
 
 
-def stub_outputs(sort_hybrid: bool = True) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def stub_outputs(sort_hybrid: bool = True, layout: str = "prefix") -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     torch.manual_seed(1)
     tenc = Encoder(attn_type="torch", **ENCODER).eval()
     kenc = KerasEncoder(**ENCODER).eval()
     port_encoder(tenc, kenc)
     tenc.layers[0].register_forward_pre_hook(mark_positions, with_kwargs=True)
     kenc.layers[0].register_forward_pre_hook(mark_positions, with_kwargs=True)
-    x, phi, valid = fixture()
+    x, phi, valid = fixture(layout=layout)
     with torch.no_grad():
         y_t = tenc(x, x_sort_value=phi, kv_mask=valid)
         y_k = kenc(x, x_sort_value=phi if sort_hybrid else None, kv_mask=valid)
     return y_t, y_k, valid
 
 
-def test_encoder_sort_matches_torch_with_position_stub():
-    y_t, y_k, valid = stub_outputs()
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_encoder_sort_matches_torch_with_position_stub(layout):
+    y_t, y_k, valid = stub_outputs(layout=layout)
     diff = (y_t - y_k)[valid].abs().max().item()
     assert diff <= STUB_TOL, diff
 
 
-def test_control_unsorted_hybrid_differs_with_position_stub():
-    y_t, y_k, valid = stub_outputs(sort_hybrid=False)
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_control_unsorted_hybrid_differs_with_position_stub(layout):
+    y_t, y_k, valid = stub_outputs(sort_hybrid=False, layout=layout)
     diff = (y_t - y_k)[valid].abs().max().item()
-    assert diff >= 10 * STUB_TOL, diff  # measured 2.54 (R4a)
+    assert diff >= 10 * STUB_TOL, diff  # measured 2.54 (prefix), 2.60 (interleaved)
 
 
 def attention_kwargs(model, inputs) -> dict[str, list]:
