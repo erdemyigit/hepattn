@@ -1,0 +1,17 @@
+16 failed, 58 passed, 66 warnings in 67.28s (0:01:07)
+FAILED tests/keras_native/test_pr8_layers.py::test_from_config_builds_org_linformer_model[float]
+FAILED tests/keras_native/test_pr8_layers.py::test_from_config_builds_org_linformer_model[prod]
+FAILED tests/keras_native/test_pr8_layers.py::test_variable_counts_equal_torch_with_dense_attention[32]
+FAILED tests/keras_native/test_pr8_layers.py::test_variable_counts_equal_torch_with_dense_attention[256]
+FAILED tests/keras_native/test_pr8_layers.py::test_fast_layer_norm_equals_torch_and_has_no_variables
+FAILED tests/keras_native/test_pr8_layers.py::test_encoder_legacy_placement_equals_torch[depth0]
+FAILED tests/keras_native/test_pr8_layers.py::test_encoder_legacy_placement_equals_torch[depth1]
+FAILED tests/keras_native/test_pr8_layers.py::test_placement_mismatch_is_refused_by_the_porter
+FAILED tests/keras_native/test_pr8_layers.py::test_decoder_layer_pr8_options_equal_torch[0]
+FAILED tests/keras_native/test_pr8_layers.py::test_decoder_layer_pr8_options_equal_torch[1]
+FAILED tests/keras_native/test_pr8_layers.py::test_org_model_with_dense_attention_equals_torch
+FAILED tests/keras_native/test_pr8_layers.py::test_layer0_classification_runs_and_equals_torch
+FAILED tests/keras_native/test_pr8_layers.py::test_org_linformer_model_equals_torch
+FAILED tests/keras_native/test_variables.py::test_trainable_variables_match_torch_and_hybrid[enc_lin-float]
+FAILED tests/keras_native/test_variables.py::test_trainable_variables_match_torch_and_hybrid[enc_lin-high]
+FAILED tests/keras_native/test_variables.py::test_trainable_variables_match_torch_and_hybrid[enc_lin-low]

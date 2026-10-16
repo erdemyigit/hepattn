@@ -19,6 +19,7 @@ Setup and test commands: [KERAS_NATIVE.md](../KERAS_NATIVE.md).
 | Merge of R1-R4a, cross-lane wiring test | [R-merge.md](R-merge.md) | `rt/integration` / `hepattn-keras-jax` |
 | R4b hybrid masked-Linformer core (gate H0), beta/EBOPs on nested leaves | [R4b.md](R4b.md) | `rt/integration` / `hepattn-keras-jax` |
 | R5 goldens, full-model gates, Helen's Linformer deleted, hls4ml smoke, G2 script on the org model | [R5.md](R5.md) (`R5_hls_smoke.py`) | `rt/integration` / `hepattn-keras-jax` |
+| Completeness critique of R0-R5 (end-to-end checks against org torch, mutants across stages, 2 fixes) | [R-critique.md](R-critique.md) (`retarget/critique/`) | `keras-jax` / `hepattn-keras-jax` |
 
 ## Gates carried to a later stage
 

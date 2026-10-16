@@ -1,6 +1,10 @@
 # Plan: retarget the HGQ2 model to the org/main float Linformer model
 
-Status: plan, 2026-10-15. Nothing here is implemented yet. Branch `keras-jax` (local HEAD `37ff127`; `origin/keras-jax` is `197ede2`).
+Status: implemented, 2026-10-16. Stages R0-R5 are merged into `rt/integration` and `keras-jax` was fast-forwarded to it
+(`2435fa8`), then the completeness critique added two fixes ([port_log/R-critique.md](port_log/R-critique.md)). Logs:
+[port_log/R0.md](port_log/R0.md) .. [port_log/R5.md](port_log/R5.md), [port_log/R-merge.md](port_log/R-merge.md). Nothing
+is pushed (`origin/keras-jax` is `197ede2`); the push waits for the user (section 6). The text below is the plan as approved
+on 2026-10-15 (written at local HEAD `37ff127`); deviations are in the stage logs.
 Request (user, 2026-10-15, `hepattn/WORKLOG.hgq.md:159`): fix bugs 1 and 2, edit the HGQ2 implementation to match
 the latest org float Linformer model, then push. This plan does not push.
 

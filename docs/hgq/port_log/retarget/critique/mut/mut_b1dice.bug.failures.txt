@@ -1,0 +1,16 @@
+15 failed, 52 passed, 14 warnings in 20.67s
+FAILED tests/keras_native/test_org_loss_fixes.py::test_b1a_mask_losses_equal_org_torch
+FAILED tests/keras_native/test_org_loss_fixes.py::test_b1b_batch_loss_is_the_object_weighted_mean_of_event_losses[mask_dice]
+FAILED tests/keras_native/test_org_loss_fixes.py::test_b1d_target_one_at_padded_nodes_is_finite_and_equals_torch
+FAILED tests/keras_native/test_org_loss_fixes.py::test_b1f_finite_logits_at_padded_nodes_change_nothing[mask_dice]
+FAILED tests/keras_native/test_org_loss_fixes.py::test_b1g_event_without_valid_nodes_is_finite_and_equals_torch[with_objects]
+FAILED tests/keras_native/test_org_loss_fixes.py::test_b1g_event_without_valid_nodes_is_finite_and_equals_torch[no_objects]
+FAILED tests/keras_native/test_org_loss_fixes.py::test_b1h_target_one_and_finite_logits_at_padded_nodes_equal_torch[mask_dice]
+FAILED tests/keras_native/test_objective_parity.py::test_task_losses_equal_torch[real-like]
+FAILED tests/keras_native/test_objective_parity.py::test_task_losses_equal_torch[dummy-like]
+FAILED tests/keras_native/test_objective_parity.py::test_mask_losses_are_normalised_per_event
+FAILED tests/keras_native/test_objective_parity.py::test_mask_bce_sample_weight_with_non_unit_null_weight_equals_torch
+FAILED tests/keras_native/test_objective_e2e.py::test_maskformer_loss_equals_torch[31-2-False]
+FAILED tests/keras_native/test_objective_e2e.py::test_maskformer_loss_equals_torch[32-4-False]
+FAILED tests/keras_native/test_objective_e2e.py::test_maskformer_loss_equals_torch[33-4-True]
+FAILED tests/keras_native/test_org_model.py::test_matched_losses_equal_torch

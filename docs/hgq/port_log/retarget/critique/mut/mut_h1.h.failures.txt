@@ -1,0 +1,7 @@
+6 failed, 88 passed, 9618 warnings in 104.07s (0:01:44)
+FAILED tests/keras/test_linformer_parity.py::test_linformer_attention_equals_org[q_ca]
+FAILED tests/keras/test_linformer_parity.py::test_linformer_cross_attention_with_distinct_values_equals_org[q_ca]
+FAILED tests/keras/test_linformer_parity.py::test_kv_sort_idx_gathers_keys_masks_and_attn_mask_columns
+FAILED tests/keras/test_linformer_parity.py::test_paired_delta_high_vs_coarse
+FAILED tests/keras/test_org_model_parity.py::test_full_model_float_parity[linformer-0]
+FAILED tests/keras/test_org_model_parity.py::test_full_model_float_parity[linformer-1]

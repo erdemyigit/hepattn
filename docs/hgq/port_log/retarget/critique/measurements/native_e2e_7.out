@@ -1,0 +1,29 @@
+Seed set to 42
+Creating CLIC dataset with dummy data and 8 samples
+valid nodes per event [55, 78, 100] max 160
+torch encoder attn Attention linformer proj_k (168, 64)
+normalized activation in jsonargparse cfg: {'class_path': 'hepattn.models.SwiGLU'}
+native[normal] final.classification.pflow_class_prob 2.9802322387695312e-08 0.19182291626930237 True
+native[normal] final.classification.pflow_logit 5.960464477539063e-08 0.24296724796295166 True
+native[normal] final.incidence.pflow_incidence 7.450580596923828e-09 0.010132928378880024 True
+native[normal] final.mask.pflow_node_logit 6.586313247680664e-06 4.631546497344971 True
+native[normal] final.regression.pflow_proxy_regr 3.0517578125e-05 132.36834716796875 True
+native[normal] final.regression.pflow_regr 1.4901161193847656e-07 0.5544633865356445 True
+native[normal] layer_0.attn_mask flips 0
+native[normal] layer_0.classification.pflow_class_prob 4.470348358154297e-08 0.1920611560344696 True
+native[normal] layer_0.classification.pflow_logit 3.725290298461914e-08 0.23086078464984894 True
+native[normal] layer_0.mask.pflow_node_logit 4.887580871582031e-06 5.126537799835205 True
+native[normal] layer_1.attn_mask flips 0
+native[normal] layer_1.classification.pflow_class_prob 4.470348358154297e-08 0.19166237115859985 True
+native[normal] layer_1.classification.pflow_logit 4.842877388000488e-08 0.23647889494895935 True
+native[normal] layer_1.mask.pflow_node_logit 5.245208740234375e-06 4.202358245849609 True
+native[normal] layer_2.attn_mask flips 0
+native[normal] layer_2.classification.pflow_class_prob 2.9802322387695312e-08 0.19079212844371796 True
+native[normal] layer_2.classification.pflow_logit 5.21540641784668e-08 0.2382570505142212 True
+native[normal] layer_2.mask.pflow_node_logit 5.424022674560547e-06 4.885361671447754 True
+native[normal] layer_3.attn_mask flips 0
+native[normal] layer_3.classification.pflow_class_prob 4.470348358154297e-08 0.19136813282966614 True
+native[normal] layer_3.classification.pflow_logit 5.587935447692871e-08 0.23734566569328308 True
+native[normal] layer_3.mask.pflow_node_logit 6.67572021484375e-06 5.10758113861084 True
+native[normal] WORST 3.0517578125e-05
+LOSSES 17 max abs 9.5367431640625e-07 sum torch 54.27772396802902 native total 54.27772521972656

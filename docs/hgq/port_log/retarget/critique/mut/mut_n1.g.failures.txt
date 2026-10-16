@@ -1,0 +1,3 @@
+2 failed, 14 passed, 14 warnings in 5.23s
+FAILED tests/keras_native/test_matching.py::test_matched_total_cost_equals_torch_matcher_over_100_batches[nan-and-inf]
+FAILED tests/keras_native/test_matching.py::test_non_finite_costs_need_the_sanitising_step

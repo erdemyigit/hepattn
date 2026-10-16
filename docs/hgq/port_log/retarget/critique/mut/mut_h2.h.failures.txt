@@ -1,0 +1,5 @@
+4 failed, 90 passed, 9618 warnings in 103.64s (0:01:43)
+FAILED tests/keras/test_sorting.py::test_encoder_sort_matches_torch_with_position_stub[prefix]
+FAILED tests/keras/test_sorting.py::test_encoder_sort_matches_torch_with_position_stub[interleaved]
+FAILED tests/keras/test_org_model_parity.py::test_full_model_float_parity[linformer-0]
+FAILED tests/keras/test_org_model_parity.py::test_full_model_float_parity[linformer-1]

@@ -1,0 +1,6 @@
+5 failed, 32 passed, 42 warnings in 51.49s
+FAILED tests/keras_native/test_pr8_layers.py::test_sort_index_equals_torch_on_the_valid_prefix
+FAILED tests/keras_native/test_pr8_layers.py::test_encoder_sorting_equals_torch_with_a_position_stub
+FAILED tests/keras_native/test_pr8_layers.py::test_key_sort_idx_reaches_decoder_q_ca
+FAILED tests/keras_native/test_pr8_layers.py::test_org_linformer_model_equals_torch
+FAILED tests/keras_native/test_pr8_layers.py::test_model_encoder_layers_see_tokens_sorted_by_phi

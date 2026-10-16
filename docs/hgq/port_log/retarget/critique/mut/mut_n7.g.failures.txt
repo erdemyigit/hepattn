@@ -1,0 +1,3 @@
+2 failed, 44 passed, 52 warnings in 41.73s
+FAILED tests/keras_native/test_masked_linformer.py::test_build_attention_rejects_unknown_or_missing_options[kwargs2-TypeError-unknown attention option]
+FAILED tests/keras_native/test_masked_linformer.py::test_build_attention_rejects_unknown_or_missing_options[kwargs3-TypeError-unknown attention option]

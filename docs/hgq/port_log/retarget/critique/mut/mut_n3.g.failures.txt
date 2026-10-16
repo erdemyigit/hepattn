@@ -1,0 +1,4 @@
+3 failed, 34 passed, 42 warnings in 50.75s
+FAILED tests/keras_native/test_pr8_layers.py::test_decoder_layer_pr8_options_equal_torch[0]
+FAILED tests/keras_native/test_pr8_layers.py::test_org_model_with_dense_attention_equals_torch
+FAILED tests/keras_native/test_pr8_layers.py::test_org_linformer_model_equals_torch
