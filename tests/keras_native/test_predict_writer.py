@@ -95,6 +95,18 @@ def test_predict_equals_torch_task_predict(run, torch_tasks):
     assert flips == 0
 
 
+def test_predict_with_null_class_queries_equals_torch(run, model, torch_tasks):
+    """Half of the queries get the null class as argmax (the untrained model predicts it nowhere)."""
+    outputs = jax.tree_util.tree_map(np.copy, run[0][0])
+    probs = outputs["final"]["classification"]["pflow_class_prob"]
+    probs[:, ::2, -1] = probs.max(-1)[:, ::2] + 0.5
+    native = to_numpy(W.predict(outputs, model.tasks))["final"]["classification"]
+    ref = torch_predict(torch_tasks, to_torch(outputs))["final"]["classification"]
+    assert 0 < int((native["pflow_class"] == 5).sum()) < native["pflow_class"].size
+    for key, value in ref.items():
+        np.testing.assert_array_equal(native[key], value.numpy().astype(native[key].dtype), err_msg=key)
+
+
 # measured max |sigmoid_jax - sigmoid_torch| of the mask probabilities (S6a log); tolerance 2x
 MASK_PROB_ATOL = 2 * 1.1920928955078125e-07
 
