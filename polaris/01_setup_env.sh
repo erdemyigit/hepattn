@@ -2,12 +2,13 @@
 # Build the HGQ2 environment on a Polaris LOGIN node (compute nodes have no outbound
 # network, so all downloads must happen here).
 #
-#   bash polaris/01_setup_env.sh
+#   bash polaris/01_setup_env.sh                            # the branch of this checkout
 #   HEPATTN_BRANCH=keras-jax bash polaris/01_setup_env.sh   # another branch, in its own clone
 #
-# The branch and the clone directory come from polaris/repo_dir.sh: HEPATTN_BRANCH (default keras-hgq2, in
-# $WORK_ROOT/hepattn as before) and HEPATTN_DIR (default $WORK_ROOT/hepattn-<branch> for any other branch). Jobs
-# read the same file, so set HEPATTN_BRANCH in env.sh (or export it) for both setup and submission.
+# The branch and the clone directory come from polaris/repo_dir.sh: HEPATTN_BRANCH (default: the branch of this
+# checkout, else keras-hgq2, which stays in $WORK_ROOT/hepattn) and HEPATTN_DIR (default $WORK_ROOT/hepattn-<branch>
+# for any other branch). Jobs get no environment from qsub: they read polaris/env.sh and repo_dir.sh in the clone
+# they are submitted from. After the clone is ready, this script checks that those files resolve to the clone.
 #
 # Design notes:
 #  * Uses a plain venv, not conda/pixi. A venv disables user-site by default, which
@@ -62,6 +63,20 @@ if [ "$HERE/env.sh" -ef "$REPO/polaris/env.sh" ]; then
 else
   cp "$HERE/env.sh" "$REPO/polaris/env.sh"
   echo "==> copied env.sh into $REPO/polaris/"
+fi
+
+# Jobs submitted from $REPO resolve their clone from its polaris/env.sh and repo_dir.sh alone (qsub passes no
+# environment). Refuse to go on if that is not $REPO, e.g. a custom HEPATTN_DIR given only on the command line.
+# A keras-hgq2 clone has no repo_dir.sh: its jobs use $WORK_ROOT/hepattn.
+if [ -f "$REPO/polaris/repo_dir.sh" ]; then
+  JOB_DIR="$(cd "$REPO" && env -u HEPATTN_BRANCH -u HEPATTN_DIR bash -c \
+    'source polaris/env.sh; source polaris/repo_dir.sh; echo "$HEPATTN_DIR"')"
+  if ! [ "$JOB_DIR" -ef "$REPO" ]; then
+    echo "ERROR: jobs submitted from $REPO would run in $JOB_DIR. Set HEPATTN_BRANCH and HEPATTN_DIR in $HERE/env.sh"
+    echo "       (setup copies it into the clone) and re-run."
+    exit 1
+  fi
+  echo "==> jobs submitted from $REPO run in it"
 fi
 
 # ---------------------------------------------------------------- venv + deps
