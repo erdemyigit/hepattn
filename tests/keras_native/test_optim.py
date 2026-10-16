@@ -3,8 +3,11 @@
 - OneCycle LR equals torch ``OneCycleLR`` at 20 sampled optimizer steps, with and without gradient accumulation (the
   Keras schedule sees micro-steps; control: without the ``steps_per_update`` division it runs k times too fast).
   torch also cycles beta1; ours keeps it fixed (documented deviation, asserted so it cannot change silently).
+- OneCycle holds its value past ``total_steps`` (control: the unclamped anneal moves on).
 - Weight decay skips exactly the variables with ``quantizer`` in their path, for AdamW and Lion, by state (``_use_weight_decay``)
-  and by effect (a zero-gradient step only decays); control: ``var_names=["quantizer"]`` excludes none of them.
+  and by effect (a zero-gradient step only decays); control: ``var_names=["quantizer"]`` excludes none of them. The
+  expected sets come from the test's own path rule and from the hybrid's groups on the same model
+  (``KerasMaskFormer.trainable_parameter_groups``: counts, element totals, variable kinds), not from ``quantizer_variables``.
 - AdamW and Lion steps against torch ``AdamW`` and ``lion_pytorch.Lion`` on the same gradients.
 - Gradient accumulation: k micro-batches of a decomposable loss give the same weights as one k-times batch; the
   accumulated gradient is the MEAN (control: the summed gradient gives different weights), and applying each micro-batch
@@ -24,7 +27,7 @@ import pytest
 import torch
 import yaml
 
-from hepattn.keras_native.optim import OneCycleLR, build_optimizer, optimizer_from_config, quantizer_variables
+from hepattn.keras_native.optim import OneCycleLR, build_optimizer, optimizer_from_config
 from hepattn.keras_native.train_step import TrainStep
 
 from .golden.cases import QUANT_SPECS
@@ -92,6 +95,16 @@ def test_onecycle_equals_torch_at_20_steps(k):
     assert min(betas) == pytest.approx(0.85) and max(betas) == pytest.approx(0.95)
 
 
+def test_onecycle_holds_its_value_past_total_steps():
+    sched = keras_schedule(LRS, TOTAL)
+    at_end = float(sched(TOTAL))
+    assert [float(sched(TOTAL + 1)), float(sched(TOTAL + 50))] == [at_end, at_end]
+    # control: without the clamp the cos anneal moves on (torch raises there instead)
+    pct = (TOTAL + 50 - sched.phase1_end) / (sched.phase2_end - sched.phase1_end)
+    unclamped = sched.min_lr + (sched.max_lr - sched.min_lr) / 2 * (np.cos(np.pi * pct) + 1)
+    assert abs(unclamped - at_end) > at_end, (unclamped, at_end)  # measured 4.46e-6 vs 1.00e-6
+
+
 def test_optimizer_reads_the_schedule_at_the_optimizer_step():
     model = keras.Sequential([keras.Input((3,)), keras.layers.Dense(2)])
     opt = build_optimizer(model, optimizer="AdamW", lrs_config=LRS, total_steps=TOTAL, accumulate=4)
@@ -115,15 +128,35 @@ def qmodel():
     return build_mf("org", QUANT_SPECS["high"], inputs)
 
 
+# The hybrid's groups on the same model (org test model, QUANT_SPECS["high"]): KerasMaskFormer.trainable_parameter_groups,
+# measured by docs/hgq/port_log/S5_hybrid_param_groups.py (S5_evidence/hybrid_param_groups.log). Kinds are the last path
+# component; the hybrid names its two torch parameters decoder.initial_queries and encoder.register_tokens.
+HYBRID_GROUPS = {
+    "decay": (334, 822123, {"bias": 144, "initial_queries": 1, "kernel": 180, "register_tokens": 1, "tail": 8}),
+    "quantizer": (982, 15093029, {"b": 288, "f": 468, "i": 226}),
+}
+
+
+def group_summary(variables) -> tuple[int, int, dict]:
+    kinds: dict[str, int] = {}
+    for v in variables:
+        kind = v.path.rsplit("/", 1)[-1]
+        kinds[kind] = kinds.get(kind, 0) + 1
+    return len(variables), int(sum(int(np.prod(v.shape)) for v in variables)), dict(sorted(kinds.items()))
+
+
 @pytest.mark.parametrize("kind", ["AdamW", "Lion"])
 def test_weight_decay_excludes_exactly_the_quantizer_paths(qmodel, kind):
     opt = build_optimizer(qmodel, optimizer=kind, lrs_config={**LRS, "skip_scheduler": True, "initial": 1e-2}, total_steps=TOTAL)
     variables = qmodel.trainable_variables
-    excluded = {v.path for v in variables if not opt._use_weight_decay(v)}  # noqa: SLF001
-    quant = {v.path for v in quantizer_variables(qmodel)}
-    assert len(quant) > 100, f"only {len(quant)} quantizer variables: the model under test is not quantized"
-    assert excluded == quant
+    excluded = [v for v in variables if not opt._use_weight_decay(v)]  # noqa: SLF001
+    decayed = [v for v in variables if opt._use_weight_decay(v)]  # noqa: SLF001
+    # the hybrid rule, written out here (trainable_parameter_groups: 'quantizer' in the path, '/beta' never trainable)
+    quant = {v.path for v in variables if "quantizer" in v.path}
+    assert {v.path for v in excluded} == quant
     assert not any(v.path.endswith("/beta") for v in variables), "HGQ2 beta must not be trainable"
+    assert group_summary(excluded) == HYBRID_GROUPS["quantizer"], group_summary(excluded)
+    assert group_summary(decayed) == HYBRID_GROUPS["decay"], group_summary(decayed)
 
     # control (plan 3.7): matching by name excludes nothing, because HGQ2 names its bitwidths b / i / f
     by_name = keras.optimizers.AdamW(weight_decay=1e-4)
