@@ -38,6 +38,16 @@ R5_XFAIL = pytest.mark.xfail(
     reason="R5: the torch reference passes linformer_proj_dim, which org Attention rejects since PR #9; goldens regenerate in R5",
 )
 XCASE_MODES = [pytest.param(*row, marks=R5_XFAIL) if row[0] == "enc_lin" else row for row in CASE_MODES]
+# Merge xfail (rt/integration, docs/hgq/port_log/R-merge.md); strict, so it fails once R5 changes cases.py (enc_lin attn_kwargs).
+MERGE_R5_XFAIL = pytest.mark.xfail(
+    strict=True,
+    raises=TypeError,
+    reason=(
+        "R5: golden/cases.py (enc_lin attn_kwargs) passes linformer_proj_dim, which native build_attention rejects since R2"
+        " (RETARGET_ORG_MAIN.md section 5.1)"
+        "; added at the rt/integration merge, see docs/hgq/port_log/R-merge.md"
+    ),
+)
 
 # The hybrid oracle itself separates a single Linformer layer by only 5.3x (self) / 8.5x (cross): at 4-bit the
 # attention output underflows and the layer returns its quantized bias, so the low delta is capped by the
@@ -67,7 +77,10 @@ def test_tolerance_table_covers_every_golden_case():
     assert set(MEASURED) == set(CASE_MODES)
 
 
-@pytest.mark.parametrize(("case", "mode"), [(case, mode) for case, mode in CASE_MODES if mode != "float"])
+@pytest.mark.parametrize(
+    ("case", "mode"),
+    [pytest.param(case, mode, marks=MERGE_R5_XFAIL) if case == "enc_lin" else (case, mode) for case, mode in CASE_MODES if mode != "float"],
+)
 def test_init_quantizer_state_matches_hybrid(case, mode):
     """Built in the same HGQ2 scopes, the native leaves start from the hybrid's quantizer state, bit for bit.
 

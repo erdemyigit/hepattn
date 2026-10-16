@@ -19,6 +19,18 @@ from .mf_golden_utils import build_mf, flatten
 
 SENTINEL = 1e30
 
+# Merge xfail (rt/integration, docs/hgq/port_log/R-merge.md); strict, so it fails once R5 changes mf_cases.py LIN_KWARGS.
+MERGE_R5_XFAIL = pytest.mark.xfail(
+    strict=True,
+    raises=TypeError,
+    reason=(
+        "R5: golden/mf_cases.py LIN_KWARGS passes linformer_proj_dim, which native build_attention rejects since R2"
+        " (RETARGET_ORG_MAIN.md section 5.1)"
+        "; added at the rt/integration merge, see docs/hgq/port_log/R-merge.md"
+    ),
+)
+pytestmark = MERGE_R5_XFAIL
+
 
 @pytest.fixture(scope="module")
 def batches():

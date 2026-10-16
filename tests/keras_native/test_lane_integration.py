@@ -18,6 +18,20 @@ from .golden.cases import QUANT_SPECS
 from .golden.mf_cases import clic_dummy_batch
 from .mf_golden_utils import build_mf
 
+# Merge xfail (rt/integration, docs/hgq/port_log/R-merge.md); strict, so it fails once R5 changes mf_cases.py LIN_KWARGS.
+MERGE_R5_XFAIL = pytest.mark.xfail(
+    strict=True,
+    raises=TypeError,
+    reason=(
+        "R5: golden/mf_cases.py LIN_KWARGS passes linformer_proj_dim, which native build_attention rejects since R2"
+        " (RETARGET_ORG_MAIN.md section 5.1)"
+        "; added at the rt/integration merge, see docs/hgq/port_log/R-merge.md"
+        "; test_dummy_targets_give_the_documented_inf must then be rewritten: bug 1 makes the dummy total finite"
+        " (replacement in docs/hgq/port_log/R1.md, deviation 1)"
+    ),
+)
+pytestmark = MERGE_R5_XFAIL
+
 
 def real_like(targets: dict) -> dict:
     """Dummy data gives padded nodes target 1, so mask_bce is inf (S4.md); real CLIC data has 0 there."""

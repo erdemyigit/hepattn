@@ -55,6 +55,16 @@ R5_XFAIL = pytest.mark.xfail(
     reason="R5: the torch reference passes linformer_proj_dim, which org Attention rejects since PR #9; goldens regenerate in R5",
 )
 XROWS = [pytest.param(*row, marks=R5_XFAIL) if row[0] == "mf_lin" else row for row in ROWS]
+# Merge xfail (rt/integration, docs/hgq/port_log/R-merge.md); strict, so it fails once R5 changes mf_cases.py LIN_KWARGS.
+MERGE_R5_XFAIL = pytest.mark.xfail(
+    strict=True,
+    raises=TypeError,
+    reason=(
+        "R5: golden/mf_cases.py LIN_KWARGS passes linformer_proj_dim, which native build_attention rejects since R2"
+        " (RETARGET_ORG_MAIN.md section 5.1)"
+        "; added at the rt/integration merge, see docs/hgq/port_log/R-merge.md"
+    ),
+)
 
 
 @pytest.mark.parametrize(("case", "mode", "jit"), XROWS, ids=[f"{c}-{m}{'-jit' if j else ''}" for c, m, j in ROWS])
@@ -111,7 +121,7 @@ def test_quant_losses_match_hybrid_per_layer(case, mode):
 
 
 @pytest.mark.parametrize("mode", [m for m in MF_MODES if m != "float"])
-@pytest.mark.parametrize("case", list(MF_CASES))
+@pytest.mark.parametrize("case", [pytest.param(c, marks=MERGE_R5_XFAIL) if c == "mf_lin" else c for c in MF_CASES])
 def test_init_quantizer_state_matches_hybrid(case, mode):
     """A freshly built native model has the hybrid's initial quantizer state (all scopes applied), bit for bit."""
     golden = load_mf_golden(case)
