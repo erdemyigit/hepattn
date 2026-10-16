@@ -33,6 +33,7 @@ from hepattn.keras_native.checkpoint import state_keys
 from hepattn.keras_native.config import (
     BETA_PID_ARGS,
     BETA_SCHEDULER_ARGS,
+    CheckpointCallback,
     CheckpointConfig,
     ConfigError,
     OptimizerConfig,
@@ -100,6 +101,30 @@ def checkpoint_dirpath(form: str, generated: Path) -> str | None:
     return {"polaris_generated": str(generated.parent / "ckpts"), "polaris_normalised": "/polaris/home/hepattn/hgq_ckpts"}.get(form)
 
 
+# What the callbacks do, not their YAML text (lightning 2.5.2 model_checkpoint.py, hepattn/callbacks/checkpoint.py):
+# hepattn Checkpoint passes save_top_k=-1 (keep every epoch-end checkpoint) and its setup() sets save_last = False and
+# dirpath = <log_dir>/ckpts, although base.yaml and pflow_hgq.yaml say save_last: true. No trigger set -> every_n_epochs=1.
+EPOCH_CALLBACK = CheckpointCallback(
+    monitor="val/loss", mode="min", save_top_k=-1, save_last=False, every_n_train_steps=0, every_n_epochs=1, dirpath=None
+)
+
+
+def checkpoint_config(form: str, generated: Path) -> CheckpointConfig:
+    if not form.startswith("polaris"):
+        return CheckpointConfig(epoch=EPOCH_CALLBACK, step=None)
+    # polaris/03_make_config.py: ModelCheckpoint(every_n_train_steps=1000, save_last=True, save_top_k=1, monitor=None)
+    step = CheckpointCallback(
+        monitor=None,
+        mode="min",
+        save_top_k=1,
+        save_last=True,
+        every_n_train_steps=1000,
+        every_n_epochs=0,
+        dirpath=checkpoint_dirpath(form, generated),
+    )
+    return CheckpointConfig(epoch=EPOCH_CALLBACK, step=step)
+
+
 def load(form: str, generated: Path):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # the packaged scale dict fallback of configs saved elsewhere
@@ -155,7 +180,7 @@ def test_loader_reads_every_form(form, polaris_generated):
     assert (rc.quant.spec is not None) == quantized
     assert rc.quant.ebops_every_n_steps == ebops_every
     assert (rc.quant.beta_pid is not None) == quantized
-    assert rc.checkpoint.monitor == "val/loss"
+    assert rc.checkpoint.epoch.monitor == "val/loss"
     assert rc.optimizer == OPTIMIZER[family]
     batch_size, workers, num_train, num_val, num_test, every = DATA_AND_CADENCE[family]
     assert (rc.data.batch_size, rc.data.num_workers, rc.data.num_train, rc.data.num_val, rc.data.num_test) == (
@@ -165,9 +190,8 @@ def test_loader_reads_every_form(form, polaris_generated):
         num_val,
         num_test,
     )
-    assert rc.checkpoint == CheckpointConfig(
-        every_n_train_steps=every, monitor="val/loss", mode="min", save_last=True, dirpath=checkpoint_dirpath(form, polaris_generated)
-    )
+    assert rc.checkpoint == checkpoint_config(form, polaris_generated)
+    assert (rc.checkpoint.step.every_n_train_steps if rc.checkpoint.step else None) == every
     assert rc.seed == 42
     if quantized:
         assert rc.quant.beta_pid == {
@@ -192,7 +216,10 @@ def test_raw_and_saved_forms_give_the_same_run_sections(first, second, polaris_g
     """Besides the model: optimizer, checkpoint policy (but the host-specific dirpath), data, quant callbacks, seed."""
     a, b = load(first, polaris_generated), load(second, polaris_generated)
     assert a.optimizer == b.optimizer
-    assert dataclasses.replace(a.checkpoint, dirpath=None) == dataclasses.replace(b.checkpoint, dirpath=None)
+    assert a.checkpoint.epoch == b.checkpoint.epoch
+    assert (a.checkpoint.step is None) == (b.checkpoint.step is None)
+    if a.checkpoint.step is not None:
+        assert dataclasses.replace(a.checkpoint.step, dirpath=None) == dataclasses.replace(b.checkpoint.step, dirpath=None)
     assert (a.quant.beta_pid, a.quant.beta_scheduler, a.quant.ebops_every_n_steps) == (
         b.quant.beta_pid,
         b.quant.beta_scheduler,
@@ -324,10 +351,38 @@ def periodic_ebops(cfg: dict) -> dict:
     return next(c for c in cfg["trainer"]["callbacks"] if c["class_path"].endswith("PeriodicEBOPs"))["init_args"]
 
 
+def checkpoint_args(cfg: dict, name: str) -> dict:
+    entry = next(c for c in cfg["trainer"]["callbacks"] if c["class_path"].rsplit(".", 1)[-1] == name)
+    return entry.setdefault("init_args", {})
+
+
+def test_hepattn_checkpoint_settings_overridden_by_its_setup_are_ignored(polaris_generated, tmp_path):
+    """``Checkpoint.setup`` sets ``save_last = False`` and ``dirpath = <log_dir>/ckpts``; a step trigger passes through."""
+    cfg = small_raw(polaris_generated)
+    checkpoint_args(cfg, "Checkpoint").update({"dirpath": "/elsewhere", "save_last": True})
+    assert load_config(write(tmp_path / "a.yaml", cfg)).checkpoint.epoch == EPOCH_CALLBACK
+    checkpoint_args(cfg, "Checkpoint")["every_n_train_steps"] = 1000  # the commented-out line of base.yaml
+    epoch = load_config(write(tmp_path / "b.yaml", cfg)).checkpoint.epoch
+    assert epoch == dataclasses.replace(EPOCH_CALLBACK, every_n_train_steps=1000, every_n_epochs=0)
+
+
+def test_optimizer_name_is_matched_case_insensitively(polaris_generated, tmp_path):
+    """As ``self.optimizer.lower()`` in ``models/wrapper.py``; the canonical name is stored."""
+    cfg = small_raw(polaris_generated)
+    cfg["model"]["optimizer"] = "lion"
+    rc = load_config(write(tmp_path / "c.yaml", cfg))
+    assert rc.optimizer.name == "Lion"
+    assert rc.optimizer.epsilon == 1e-8  # torch AdamW's eps, not keras' 1e-7
+
+
 @pytest.mark.parametrize(
     ("edit", "message"),
     [
         (lambda c: c["model"].__setitem__("optimizer", "Adam"), "optimizer 'Adam'"),
+        (lambda c: c["model"]["lrs_config"].pop("weight_decay"), "weight_decay"),
+        (lambda c: checkpoint_args(c, "ModelCheckpoint").__setitem__("every_n_epochs", 1), "mutually exclusive"),
+        (lambda c: checkpoint_args(c, "ModelCheckpoint").__setitem__("save_top_k", 3), "needs a monitor"),
+        (lambda c: checkpoint_args(c, "Checkpoint").__setitem__("save_on_train_epoch_end", True), "save_on_train_epoch_end"),
         (lambda c: c["trainer"].__setitem__("gradient_clip_algorithm", "value"), "norm clipping"),
         (
             lambda c: c["trainer"]["callbacks"].append({"class_path": "hepattn.keras.callbacks.BetaScheduler", "init_args": {}}),

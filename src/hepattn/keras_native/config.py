@@ -251,6 +251,13 @@ def model_description(model_section: dict) -> dict:
 
 @dataclass(frozen=True)
 class OptimizerConfig:
+    """``model.optimizer`` + ``model.lrs_config`` + the trainer's clipping and accumulation (``models/wrapper.py``).
+
+    ``epsilon`` is the torch ``AdamW`` default (1e-8), which the hybrid run uses; keras ``AdamW`` defaults to 1e-7,
+    so the native optimizer builder must pass it. Lion has no epsilon (lion_pytorch betas (0.9, 0.99) are the keras
+    Lion defaults).
+    """
+
     name: str
     lr_initial: float
     lr_max: float
@@ -260,6 +267,7 @@ class OptimizerConfig:
     skip_scheduler: bool
     clip_norm: float | None
     accumulate_grad_batches: int
+    epsilon: float = 1e-8
 
 
 @dataclass(frozen=True)
@@ -276,14 +284,38 @@ class QuantConfig:
 
 
 @dataclass(frozen=True)
-class CheckpointConfig:
-    """Production policy: every ``every_n_train_steps`` (step ModelCheckpoint), ``last``, best on ``monitor``."""
+class CheckpointCallback:
+    """What one Lightning ``ModelCheckpoint`` does (lightning 2.5.2 ``callbacks/model_checkpoint.py``), not its YAML text.
 
-    every_n_train_steps: int | None
+    ``every_n_epochs`` / ``every_n_train_steps``: 0 is "no trigger"; with neither set, Lightning uses
+    ``every_n_epochs=1`` (``__init_triggers``), i.e. a save at every validation end. ``save_top_k`` -1 keeps every
+    checkpoint; with ``monitor`` None, 1 keeps only the newest. ``save_last``: ``last`` is rewritten at every save
+    and at every validation end. ``dirpath`` None is Lightning's default directory.
+    """
+
     monitor: str | None
     mode: str
+    save_top_k: int
     save_last: bool
+    every_n_train_steps: int
+    every_n_epochs: int
     dirpath: str | None
+
+
+@dataclass(frozen=True)
+class CheckpointConfig:
+    """The two checkpoint callbacks of the CLIC configs; None if the config does not register it.
+
+    - ``epoch``: ``hepattn.callbacks.Checkpoint`` (``src/hepattn/callbacks/checkpoint.py``): ``save_top_k=-1``, so
+      every epoch-end checkpoint is kept (``epoch=NNN-val_loss=X``); ``setup`` forces ``save_last = False`` and, for
+      fit, ``dirpath = <log_dir>/ckpts`` whatever the YAML says (``save_last: true`` in base.yaml / pflow_hgq.yaml has
+      no effect). ``dirpath`` is therefore None here.
+    - ``step``: ``lightning.pytorch.callbacks.ModelCheckpoint`` (Polaris, ``polaris/03_make_config.py``): every 1000
+      steps, ``save_top_k=1`` without a monitor (the newest step checkpoint), ``save_last``.
+    """
+
+    epoch: CheckpointCallback | None
+    step: CheckpointCallback | None
 
 
 @dataclass(frozen=True)
@@ -336,12 +368,15 @@ def _callbacks(trainer: dict) -> dict[str, dict]:
 
 
 def _optimizer(model: dict, trainer: dict) -> OptimizerConfig:
-    name = model.get("optimizer", "AdamW")
-    if name not in OPTIMIZERS:
-        raise ConfigError(f"optimizer {name!r} is not supported (supported: {sorted(OPTIMIZERS)})")
+    given = model.get("optimizer", "AdamW")
+    name = {n.lower(): n for n in OPTIMIZERS}.get(str(given).lower())  # the wrapper matches case-insensitively
+    if name is None:
+        raise ConfigError(f"optimizer {given!r} is not supported (supported: {sorted(OPTIMIZERS)})")
     if trainer.get("gradient_clip_algorithm") not in {None, "norm"}:
         raise ConfigError(f"gradient_clip_algorithm {trainer['gradient_clip_algorithm']!r}: only norm clipping is supported")
     lrs = model.get("lrs_config") or {}
+    if "weight_decay" not in lrs:
+        raise ConfigError("lrs_config has no weight_decay (the torch wrapper reads lrs_config['weight_decay'] without a default)")
     clip = trainer.get("gradient_clip_val")
     return OptimizerConfig(
         name=name,
@@ -349,7 +384,7 @@ def _optimizer(model: dict, trainer: dict) -> OptimizerConfig:
         lr_max=float(lrs["max"]),
         lr_end=float(lrs["end"]),
         pct_start=float(lrs["pct_start"]),
-        weight_decay=float(lrs.get("weight_decay", 0.0)),
+        weight_decay=float(lrs["weight_decay"]),
         skip_scheduler=bool(lrs.get("skip_scheduler", False)),
         clip_norm=None if clip is None else float(clip),
         accumulate_grad_batches=int(trainer.get("accumulate_grad_batches") or 1),
@@ -402,16 +437,42 @@ def _quant(init_args: dict, callbacks: dict[str, dict]) -> QuantConfig:
     )
 
 
-def _checkpoint(callbacks: dict[str, dict]) -> CheckpointConfig:
-    step = callbacks.get("ModelCheckpoint") or {}
-    best = callbacks.get("Checkpoint") or {}
-    return CheckpointConfig(
-        every_n_train_steps=step.get("every_n_train_steps"),
-        monitor=best.get("monitor"),
-        mode=best.get("mode", "min"),
-        save_last=bool(step.get("save_last") or best.get("save_last")),
-        dirpath=step.get("dirpath") or best.get("dirpath"),
+def _checkpoint_callback(name: str, args: dict, *, hepattn_checkpoint: bool) -> CheckpointCallback:
+    """The effective settings of one ``ModelCheckpoint`` (see ``CheckpointCallback``).
+
+    Raises:
+        ConfigError: For a time-interval trigger, a save on train epoch end, or a combination Lightning rejects.
+    """
+    if args.get("train_time_interval") is not None or args.get("save_on_train_epoch_end") is not None:
+        raise ConfigError(f"{name}: train_time_interval / save_on_train_epoch_end are not supported by the native driver")
+    steps, epochs = args.get("every_n_train_steps"), args.get("every_n_epochs")
+    if steps is None and epochs is None:
+        steps, epochs = 0, 1
+    steps, epochs = int(steps or 0), int(epochs or 0)
+    if steps and epochs:
+        raise ConfigError(f"{name}: every_n_train_steps and every_n_epochs are mutually exclusive (as in Lightning)")
+    monitor = args.get("monitor", "val/loss") if hepattn_checkpoint else args.get("monitor")
+    save_top_k = -1 if hepattn_checkpoint else int(args.get("save_top_k", 1))
+    if monitor is None and save_top_k not in {-1, 0, 1}:
+        raise ConfigError(f"{name}: save_top_k={save_top_k} needs a monitor (as in Lightning)")
+    return CheckpointCallback(
+        monitor=monitor,
+        mode=args.get("mode", "min"),
+        save_top_k=save_top_k,
+        save_last=False if hepattn_checkpoint else bool(args.get("save_last")),  # "link" saves too
+        every_n_train_steps=steps,
+        every_n_epochs=epochs,
+        dirpath=None if hepattn_checkpoint else args.get("dirpath"),
     )
+
+
+def _checkpoint(callbacks: dict[str, dict]) -> CheckpointConfig:
+    def build(name: str, *, hepattn_checkpoint: bool) -> CheckpointCallback | None:
+        if name not in callbacks:
+            return None
+        return _checkpoint_callback(name, callbacks[name], hepattn_checkpoint=hepattn_checkpoint)
+
+    return CheckpointConfig(epoch=build("Checkpoint", hepattn_checkpoint=True), step=build("ModelCheckpoint", hepattn_checkpoint=False))
 
 
 DATA_LOADER_KEYS = {"train_path", "valid_path", "test_path", "batch_size", "num_workers", "num_train", "num_val", "num_test", "scale_dict_path"}
