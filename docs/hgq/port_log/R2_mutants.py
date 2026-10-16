@@ -150,6 +150,27 @@ TARGETS["m16_mul_k_bypassed"] = [
     f"{T}::test_attend_core_forward_and_gradients_equal_masked_linformer",
 ]
 
+# Fix round (reviewer findings): each mutant passed every R2 test before the fix
+MUTANTS |= {
+    "m17_energy_float_head": [(ML, '        if hasattr(self.proj, "kq"):\n            head = self.proj.kq(head, training=training)', "        pass")],
+    "m18_energy_float_tail": [
+        (ML, "        if tail is not None and self.tail_q is not None:\n            tail = self.tail_q(tail, training=training)", "        pass")
+    ],
+    "m19_mask_lane_8_frac_bits": [(FA, '        mask_conf = _fixed_config("datalane", 1, 0)', '        mask_conf = _fixed_config("datalane", 1, 8)')],
+    "m20_no_scopes_in_build": [
+        (AT, '        with self._factory.scopes():\n            if kind == "attend":', '        if True:\n            if kind == "attend":')
+    ],
+    "m21_v_from_k": [(AT, "        vp = self.v_proj(v, training=training)", "        vp = self.v_proj(k, training=training)")],
+}
+TARGETS |= {
+    "m17_energy_float_head": [f"{T}::test_renorm_and_projection_use_the_quantized_rows"],
+    "m18_energy_float_tail": [f"{T}::test_renorm_and_projection_use_the_quantized_rows"],
+    "m19_mask_lane_8_frac_bits": [f"{T}::test_projection_fractional_bits_are_capped_and_the_table_fits_hls4ml"],
+    "m20_no_scopes_in_build": [f"{T}::test_core_leaves_take_the_spec_when_built_outside_the_scopes"],
+    "m21_v_from_k": [f"{T}::test_linformer_cross_attention_with_distinct_values_equals_org"],
+}
+TARGETS["m05_tail_dropped"].append("tests/keras_native/test_import_hygiene.py::test_masked_linformer_core_runs_under_torch_with_jax_blocked")
+
 
 def run(scratch: Path, mutant: str) -> str:
     root = Path(__file__).resolve().parents[3]
