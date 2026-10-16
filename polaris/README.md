@@ -85,7 +85,7 @@ calibrated first, and the obvious way to do it is wrong.** See the warning below
 
 | | |
 |---|---|
-| `flash-attn` | **not needed.** The Keras/HGQ2 path never imports it; `flash`/`flash-varlen` are coerced to torch SDPA and the config uses the in-repo linformer. Skips the hardest build step. |
+| `flash-attn` | **not needed.** The Keras/HGQ2 path never imports it; `flash`/`flash-varlen` are coerced to torch SDPA. Skips the hardest build step. |
 | `~/.local` shadowing | A venv disables user-site by default, and `PYTHONNOUSERSITE=1` is exported everywhere — the torch/CUDA-mismatch trap cannot bite. |
 | `torch.compile` | **Do not enable.** Measured 0.77× (slower): Keras-torch dispatch breaks the graph at every layer so inductor can't fuse. The `Compile` callback is stripped in `03_make_config.py`. |
 | `bf16-mixed` | Validated on CUDA — finite loss, quantizer bitwidth gradients flow. |
@@ -129,7 +129,8 @@ uninterrupted production run. Coordinate before you do.
 | `env.sh.example` | copy to `env.sh`; the only file with site-specific values |
 | `01_setup_env.sh` | uv venv (own Python 3.12) + deps + import/GPU verification |
 | `02_stage_data.sh` | rsync CLIC ROOT files into project space, with size verification |
-| `03_make_config.py` | generates `polaris_hgq.yaml` from `base.yaml` with all the above baked in |
+| `03_make_config.py` | generates `polaris_hgq.yaml` from `base.yaml` + `linformer.yaml` (the org/main model; `HGQ_ATTN=torch` for `base.yaml` alone) with all the above baked in; see docs/hgq/USAGE.md |
+| `repo_dir.sh` | `HEPATTN_BRANCH` / `HEPATTN_DIR`: which clone setup and every job use (keras-hgq2 stays in `$WORK_ROOT/hepattn`) |
 | `04_smoke.pbs` | **gate**: real GPU, real data, bf16 steps, asserts quantizers exist and train |
 | `05_sweep.pbs` | **main**: N GPUs × independent beta points, self-chaining across walltime |
 | `06_ddp_validate.pbs` | optional: tests whether DDP is safe on this stack before trusting it |
