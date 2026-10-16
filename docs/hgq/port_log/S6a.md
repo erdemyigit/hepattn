@@ -56,6 +56,10 @@ Test runs (macOS CPU): `test_config` + `test_data` + `test_data_real` + `test_me
 train step compile at test width: 190-200 s of it). Whole native suite after the last commit: 614 passed, 4 skipped
 (requiresdata) in 1140 s (`HEPATTN_PARITY_LEDGER=0`).
 
+Re-verified 2026-10-16 in a new session at `a2bab07`: the 7 S6a test files + `test_import_hygiene.py` gave 92 passed,
+4 skipped (requiresdata) in 360 s; `prek run` on all 18 changed files passes; `S6a_mutations.py --only
+M1,M3,M13,M14,M19,M22,M24,M25` killed 8/8, and the tree was clean afterwards.
+
 | Gate | Result | Evidence and control |
 |---|---|---|
 | Loader reads every form | pass | `test_loader_reads_every_form` x6: org raw (base + linformer), org saved, `pflow_hgq.yaml`, its saved form, the generated Polaris config (run in the test), its saved form. Each gives `clic_specs()`, 16 matcher threads, the expected optimizer / quant / accumulation / PeriodicEBOPs period. Controls: `test_unsupported_run_options_raise` x5 (each also loads the unedited config first), activation / decoder rejection tests. |
