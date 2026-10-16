@@ -7,17 +7,23 @@
   the real events the outputs of an unpadded batch, and a finite matched loss;
 - one epoch of padded val batches compiles the jitted eval forward + ``predict`` once (plan S6 gate, eval and
   predict part); control: the unpadded short batch compiles a second executable;
-- order: the train permutation depends on (seed, epoch) only, and ``start_batch`` resumes inside an epoch.
+- order: the train permutation depends on (seed, epoch) only, and ``start_batch`` resumes inside an epoch;
+- workers: never forked (JAX is multithreaded); spawned persistent workers give the in-process batches over two
+  epochs and a resume, with no fork warning after JAX has a backend; control: a fork context is refused, and
+  forking after JAX init warns;
+- a batch with the shapes of the first one but another dtype raises (a new compile).
 """
 
 import dataclasses
+import multiprocessing
+import warnings
 
 import jax
 import numpy as np
 import pytest
 import torch
 
-from hepattn.experiments.clic.native_data import EpochSampler, host_batches, make_dataset, make_loader
+from hepattn.experiments.clic.native_data import EpochSampler, SplitBatches, host_batches, make_dataset, make_loader
 from hepattn.keras_native.config import load_config
 from hepattn.keras_native.data import HostBatches, pad_events
 from hepattn.keras_native.objective import clic_specs, matched_loss
@@ -152,10 +158,12 @@ def test_float64_is_cast_to_float32_on_the_host():
     assert batch.inputs["x_valid"].dtype == np.bool_  # other dtypes pass through
 
 
-def test_a_new_batch_shape_raises():
-    loader = [({"x": np.zeros((2, 3), np.float32)}, {}), ({"x": np.zeros((2, 4), np.float32)}, {})]
+@pytest.mark.parametrize("second", [np.zeros((2, 4), np.float32), np.zeros((2, 3), np.int32), np.zeros((2, 3), bool)])
+def test_a_new_batch_shape_or_dtype_raises(second):
+    first = np.zeros((2, 3), np.float32)
+    collect(HostBatches([({"x": first}, {}), ({"x": first.copy()}, {})], 2, pad_to_batch=False, device_put=False))  # control
     with pytest.raises(ValueError, match="new compile"):
-        collect(HostBatches(loader, 2, pad_to_batch=False, device_put=False))
+        collect(HostBatches([({"x": first}, {}), ({"x": second}, {})], 2, pad_to_batch=False, device_put=False))
 
 
 def test_pad_values():
@@ -197,3 +205,59 @@ def test_one_val_epoch_compiles_eval_and_predict_once(data_config, dataset):
     short = {k: v.astype(np.int32) if v.dtype == np.int64 else v for k, v in short.items()}
     jax.block_until_ready(evaluate(tv, ntv, short))
     assert evaluate._cache_size() == 2  # noqa: SLF001
+
+
+def test_workers_are_never_forked(dataset):
+    assert make_loader(dataset, "train", batch_size=BATCH).multiprocessing_context is None  # no workers, no processes
+    for split in ("train", "val"):
+        loader = make_loader(dataset, split, batch_size=BATCH, num_workers=2)
+        assert loader.multiprocessing_context.get_start_method() == "spawn"
+        assert loader.persistent_workers
+    with pytest.raises(ValueError, match="must not be forked"):  # control
+        make_loader(dataset, "train", batch_size=BATCH, num_workers=2, multiprocessing_context="fork")
+
+
+def numpy_batches(batches) -> list[dict]:
+    return [{**b.inputs, **{f"t/{k}": v for k, v in b.targets.items()}, "valid": b.event_valid} for b in batches]
+
+
+def assert_same_batches(a: list[dict], b: list[dict]) -> None:
+    assert len(a) == len(b)
+    for x, y in zip(a, b, strict=True):
+        assert x.keys() == y.keys()
+        for key in x:
+            np.testing.assert_array_equal(x[key], y[key], err_msg=key)
+
+
+def fork_warnings(caught) -> list[str]:
+    return [str(w.message) for w in caught if "fork" in str(w.message)]
+
+
+def test_spawned_workers_give_the_in_process_batches_without_a_fork_warning(data_config, dataset):
+    """After JAX has a backend: two epochs and a resume through one persistent-worker loader equal ``num_workers=0``."""
+    jax.block_until_ready(jax.device_put(np.ones(3)))  # JAX threads running, its at-fork hook installed
+    epochs = [(0, 0), (1, 0), (1, 1)]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        workers = SplitBatches(dataclasses.replace(data_config, num_workers=2), "train", dataset=dataset, device_put=False)
+        with_workers = [numpy_batches(workers.epoch(epoch, start)) for epoch, start in epochs]
+    assert fork_warnings(caught) == [], fork_warnings(caught)
+    in_process = SplitBatches(data_config, "train", dataset=dataset, device_put=False)
+    expected = [numpy_batches(in_process.epoch(epoch, start)) for epoch, start in epochs]
+    for got, ref in zip(with_workers, expected, strict=True):
+        assert_same_batches(got, ref)
+    assert [len(b) for b in expected] == [2, 2, 1]
+    assert not np.array_equal(expected[0][0]["node_features"], expected[1][0]["node_features"])  # epochs differ
+
+
+def test_control_forking_after_jax_init_warns(dataset):
+    """What spawn avoids: a fork-started worker after JAX init triggers JAX's deadlock warning (macOS and Linux)."""
+    jax.block_until_ready(jax.device_put(np.ones(3)))
+    sampler = EpochSampler(len(dataset), batch_size=BATCH, shuffle=False, seed=0)
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size=BATCH, sampler=sampler, num_workers=1, multiprocessing_context=multiprocessing.get_context("fork")
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        next(iter(loader))
+    assert any("JAX is multithreaded" in m for m in fork_warnings(caught)), [str(w.message) for w in caught]

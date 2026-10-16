@@ -8,8 +8,16 @@ user decision 2026-10-16): torch DataLoader as the host data source for now; a n
 Order and resume: the train order of an epoch is a permutation drawn from ``torch.Generator().manual_seed(seed +
 epoch)``, so ``(epoch, batch index)`` is the data position a checkpoint stores, and ``start_batch`` resumes inside an
 epoch with the same order (``EpochSampler``). Val / test are not shuffled.
+
+Workers: with ``num_workers > 0`` the loader starts its workers with ``spawn`` (``WORKER_START_METHOD``), never
+``fork``, and keeps them for the whole run (``persistent_workers``; ``SplitBatches`` holds one loader per split and
+moves the sampler to the next epoch with ``set_epoch``). The process is multithreaded once JAX has a backend, and
+JAX warns at every ``os.fork()`` that this "will likely lead to a deadlock" (jax/_src/xla_bridge.py, ``_at_fork``);
+``fork`` is the Python 3.12 default on Linux (Polaris), ``spawn`` on macOS. A spawned worker receives the dataset
+pickled, once per run; its start cost with real CLIC sizes is to be measured on Polaris (S6a log).
 """
 
+import multiprocessing
 from collections.abc import Iterator
 
 import torch
@@ -19,6 +27,7 @@ from hepattn.experiments.clic.pflow_data import CLICDataset
 from hepattn.keras_native.config import DataConfig
 from hepattn.keras_native.data import HostBatches
 
+WORKER_START_METHOD = "spawn"
 SPLITS = {"train": ("train_path", "num_train"), "val": ("valid_path", "num_val"), "test": ("test_path", "num_test")}
 
 
@@ -35,6 +44,11 @@ class EpochSampler(Sampler[int]):
         self.epoch = epoch
         self.start_batch = start_batch
         self.drop_last = drop_last
+
+    def set_epoch(self, epoch: int, start_batch: int = 0) -> None:
+        """The next ``iter`` gives epoch ``epoch`` from batch ``start_batch`` (read in the main process, also with workers)."""
+        self.epoch = epoch
+        self.start_batch = start_batch
 
     def order(self) -> list[int]:
         if not self.shuffle:
@@ -70,11 +84,51 @@ def make_loader(
     seed: int = 42,
     epoch: int = 0,
     start_batch: int = 0,
+    multiprocessing_context: str = WORKER_START_METHOD,
 ) -> DataLoader:
-    """A torch ``DataLoader``: train shuffles and drops the last short batch, val / test keep the order and every event."""
+    """A torch ``DataLoader``: train shuffles and drops the last short batch, val / test keep the order and every event.
+
+    With workers: persistent, started with ``multiprocessing_context`` (see the module docstring).
+
+    Raises:
+        ValueError: If ``multiprocessing_context`` is ``fork``.
+    """
     train = split == "train"
     sampler = EpochSampler(len(dataset), batch_size=batch_size, shuffle=train, seed=seed, epoch=epoch, start_batch=start_batch, drop_last=train)
-    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, drop_last=train, num_workers=num_workers, persistent_workers=False)
+    workers = {}
+    if num_workers > 0:
+        if multiprocessing.get_context(multiprocessing_context).get_start_method() == "fork":
+            raise ValueError("DataLoader workers must not be forked from the multithreaded JAX process (use spawn or forkserver)")
+        workers = {"multiprocessing_context": multiprocessing_context, "persistent_workers": True}
+    return DataLoader(dataset, batch_size=batch_size, sampler=sampler, drop_last=train, num_workers=num_workers, **workers)
+
+
+class SplitBatches:
+    """One loader (and its workers) for a split for the whole run; ``epoch`` gives the static-shape batches of an epoch.
+
+    Train drops the last short batch, val / test are padded with invalid events. One ``HostBatches`` serves every
+    epoch, so a batch whose shapes or dtypes differ from the first batch of the run raises.
+    """
+
+    def __init__(
+        self,
+        data: DataConfig,
+        split: str,
+        *,
+        dataset: CLICDataset | None = None,
+        seed: int = 42,
+        device_put: bool = True,
+        multiprocessing_context: str = WORKER_START_METHOD,
+    ) -> None:
+        self.dataset = dataset if dataset is not None else make_dataset(data, split)
+        self.loader = make_loader(
+            self.dataset, split, batch_size=data.batch_size, num_workers=data.num_workers, seed=seed, multiprocessing_context=multiprocessing_context
+        )
+        self.batches = HostBatches(self.loader, data.batch_size, pad_to_batch=split != "train", device_put=device_put)
+
+    def epoch(self, epoch: int = 0, start_batch: int = 0) -> HostBatches:
+        self.loader.sampler.set_epoch(epoch, start_batch)
+        return self.batches
 
 
 def host_batches(
@@ -87,7 +141,5 @@ def host_batches(
     start_batch: int = 0,
     device_put: bool = True,
 ) -> HostBatches:
-    """Static-shape batches of ``split``: train with ``drop_last``, val / test padded with invalid events."""
-    dataset = dataset if dataset is not None else make_dataset(data, split)
-    loader = make_loader(dataset, split, batch_size=data.batch_size, num_workers=data.num_workers, seed=seed, epoch=epoch, start_batch=start_batch)
-    return HostBatches(loader, data.batch_size, pad_to_batch=split != "train", device_put=device_put)
+    """Static-shape batches of one epoch of ``split`` (a new loader; a run keeps one ``SplitBatches`` per split)."""
+    return SplitBatches(data, split, dataset=dataset, seed=seed, device_put=device_put).epoch(epoch, start_batch)
