@@ -13,6 +13,11 @@ values as Lightning's epoch reduction does (mean weighted by the logged ``batch_
 batch's event count for the task metrics). Deviation from the Lightning module, on purpose: there one torchmetrics
 object per metric is shared by every decoder layer (``self.eff`` etc. are updated once per layer), so its epoch value
 pools all layers under each layer's name; here each layer has its own (``docs/hgq/port_log/S6a.md``).
+``pool_layers=True`` gives the Lightning values, for comparisons with hybrid logs.
+
+Stage ``train``: as ``MPflow.log_custom_metrics``, only the task metrics (no accuracy / eff / pur / mask metrics).
+Lightning logs training metrics per step (every ``log_every_n_steps``), not as an epoch mean: ``reset`` before each
+logged step.
 
 Inputs are predictions after matching (``MaskFormer.predict`` of the permuted outputs), numpy, with padding events
 removed (``event_valid``).
@@ -193,43 +198,54 @@ class ClicMetrics:
     ``{"<stage>/<layer>_<name>": value}`` with the Lightning module's names.
     """
 
-    def __init__(self, stage: str = "val", num_classes: int = 6, regression_fields=("e", "pt", "eta", "sinphi", "cosphi")) -> None:
+    def __init__(
+        self,
+        stage: str = "val",
+        num_classes: int = 6,
+        regression_fields=("e", "pt", "eta", "sinphi", "cosphi"),
+        pool_layers: bool = False,
+    ) -> None:
         self.stage = stage
         self.num_classes = num_classes
         self.fields = tuple(regression_fields)
+        self.pool_layers = pool_layers
         self.reset()
 
     def reset(self) -> None:
         self.counters: dict[str, object] = {}
+        self.reported: dict[str, str] = {}  # logged name -> counter key (one key for every layer when pooled)
         self.means: dict[str, WeightedMean] = defaultdict(WeightedMean)
 
-    def _counter(self, name: str, factory):
-        if name not in self.counters:
-            self.counters[name] = factory()
-        return self.counters[name]
+    def _counter(self, layer: str, metric: str, factory):
+        name = f"{self.stage}/{layer}_{metric}"
+        key = f"{self.stage}/*_{metric}" if self.pool_layers else name
+        self.reported[name] = key
+        if key not in self.counters:
+            self.counters[key] = factory()
+        return self.counters[key]
 
     def update(self, preds: dict, targets: dict) -> None:
         batch_size = float(np.asarray(targets["particle_valid"]).shape[0])
         class_labels = np.asarray(targets["particle_class"])
         truth_valid = class_labels < self.num_classes - 1
         prefix = f"{self.stage}/"
+        custom = self.stage != "train"  # MPflow.log_custom_metrics returns early for train
         for layer, layer_preds in preds.items():
             for task_name, task_preds in layer_preds.items():
                 if task_name == "classification":
                     classes = np.asarray(task_preds["pflow_class"])
-                    for average in ("micro", "macro"):
-                        acc = self._counter(
-                            f"{prefix}{layer}_obj_class_accuracy_{average}", lambda a=average: MulticlassAccuracy(self.num_classes, a)
-                        )
-                        acc.update(classes, class_labels)
-                    pred_valid = classes < self.num_classes - 1
-                    self._counter(f"{prefix}{layer}_eff", BinaryRecall).update(pred_valid, truth_valid)
-                    self._counter(f"{prefix}{layer}_pur", BinaryPrecision).update(pred_valid, truth_valid)
+                    if custom:
+                        for average in ("micro", "macro"):
+                            acc = self._counter(layer, f"obj_class_accuracy_{average}", lambda a=average: MulticlassAccuracy(self.num_classes, a))
+                            acc.update(classes, class_labels)
+                        pred_valid = classes < self.num_classes - 1
+                        self._counter(layer, "eff", BinaryRecall).update(pred_valid, truth_valid)
+                        self._counter(layer, "pur", BinaryPrecision).update(pred_valid, truth_valid)
                     for key, value in classification_task_metrics(
                         np.asarray(task_preds["pflow_valid"]), np.asarray(targets["particle_valid"])
                     ).items():
                         self.means[f"{prefix}{layer}_{task_name}_{key}"].update(value, batch_size)
-                elif task_name == "mask":
+                elif task_name == "mask" and custom:
                     masks = mask_metrics(np.asarray(task_preds["pflow_node_valid"]), np.asarray(targets["particle_node_valid"]), truth_valid)
                     for key, value in masks.items():
                         self.means[f"{prefix}{layer}_{key}"].update(value, 1.0)
@@ -238,6 +254,6 @@ class ClicMetrics:
                         self.means[f"{prefix}{layer}_{task_name}_{key}"].update(value, batch_size)
 
     def compute(self) -> dict[str, float]:
-        out = {name: counter.compute() for name, counter in self.counters.items()}
+        out = {name: self.counters[key].compute() for name, key in self.reported.items()}
         out.update({name: mean.compute() for name, mean in self.means.items()})
         return dict(sorted(out.items()))

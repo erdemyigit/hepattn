@@ -3,10 +3,13 @@
 References in this process: torchmetrics 1.8 objects, ``MaskInference``, the torch task ``metrics`` of the org tasks,
 and ``MPflow.log_metrics`` with ``self.log`` captured (one decoder layer, so the shared-metric pooling of the
 Lightning module, documented in ``metrics.py``, does not enter). Controls: one perturbed prediction changes each value.
+Epoch reduction: a real Lightning ``Trainer.validate`` over three batches of unequal size (per layer, and pooled over
+two layers with ``pool_layers=True``); control: the swapped per-batch weights give other values.
 """
 
 import math
 
+import lightning as L
 import numpy as np
 import pytest
 import torch
@@ -139,8 +142,8 @@ def mpflow(torch_tasks):
     return MPflow(name="t", model=model, lrs_config={})
 
 
-def torch_logged(mpflow, preds: dict, targets: dict) -> dict[str, float]:
-    """``MPflow.log_metrics(..., "val")`` with ``self.log`` captured; metric objects read with ``compute``."""
+def torch_logged(mpflow, preds: dict, targets: dict, stage: str = "val") -> dict[str, float]:
+    """``MPflow.log_metrics(..., stage)`` with ``self.log`` captured; metric objects read with ``compute``."""
     logged = {}
 
     def log(name, value, **_):
@@ -150,7 +153,7 @@ def torch_logged(mpflow, preds: dict, targets: dict) -> dict[str, float]:
     mpflow.log_dict = lambda values, **_: logged.update(values)
     for metric in (mpflow.obj_accuracy_micro, mpflow.obj_accuracy_macro, mpflow.eff, mpflow.pur):
         metric.reset()
-    mpflow.log_metrics(tt(preds), tt(targets), "val")
+    mpflow.log_metrics(tt(preds), tt(targets), stage)
     return {k: float(v.compute() if isinstance(v, tm.Metric) else v) for k, v in logged.items()}
 
 
@@ -228,6 +231,99 @@ def test_lightning_module_pools_layers_and_native_does_not(mpflow):
     assert values["val/layer_0_eff"] == 0.0 < values["val/final_eff"]
     assert ref["val/layer_0_eff"] == ref["val/final_eff"]  # pooled in the torch module
     assert min(values["val/layer_0_eff"], values["val/final_eff"]) < ref["val/final_eff"] < max(values["val/layer_0_eff"], values["val/final_eff"])
+
+
+def sliced(tree: dict, n: int) -> dict:
+    return {k: sliced(v, n) if isinstance(v, dict) else v[:n] for k, v in tree.items()}
+
+
+def lightning_validate(cases: list[tuple[dict, dict]]) -> dict[str, float]:
+    """A real ``Trainer.validate`` of ``MPflow.log_metrics`` over ``cases`` (one batch each): Lightning's own epoch
+    reduction, with the batch size inferred from the batch as in the CLIC module (first tensor: ``[B, ...]``).
+    """
+
+    class Ref(MPflow):
+        def validation_step(self, batch, batch_idx):
+            preds, targets = cases[batch_idx]
+            self.log_metrics(tt(preds), tt(targets), "val")
+
+        def configure_optimizers(self):
+            return None
+
+    class Batches(torch.utils.data.Dataset):
+        def __len__(self):
+            return len(cases)
+
+        def __getitem__(self, i):
+            events = cases[i][1]["particle_valid"].shape[0]
+            return {"hit_x": torch.zeros(events, 1)}, {"particle_valid": torch.zeros(events, 1)}
+
+    model = nn.Module()
+    model.tasks = instantiate(org_init_args()["tasks"])
+    model.encoder_tasks = nn.ModuleList()
+    trainer = L.Trainer(accelerator="cpu", logger=False, enable_checkpointing=False, enable_progress_bar=False, enable_model_summary=False)
+    trainer.validate(Ref(name="t", model=model, lrs_config={}), torch.utils.data.DataLoader(Batches(), batch_size=None), verbose=False)
+    return {k: float(v) for k, v in trainer.callback_metrics.items()}
+
+
+# WeightedMean sums in float64, Lightning in float32 (value * batch_size added to a float32 tensor): measured up to
+# 1.17 ulps on the means that are exact per batch (10 cases: 5 seed triples, pooled and not); slack 2x. Counter
+# metrics stay exact (measured 0).
+EPOCH_SLACK = 2.4
+
+
+def epoch_cases(pool_layers: bool) -> list[tuple[dict, dict]]:
+    """Three val batches of 3, 1 and 2 events; with ``pool_layers`` a second decoder layer with other predictions."""
+    cases = []
+    for seed, events in ((4, 3), (5, 1), (6, 2)):
+        preds, targets = fixed_case(seed)
+        layers = {"layer_0": sliced(fixed_case(seed + 10)[0], events)} if pool_layers else {}
+        cases.append(({**layers, "final": sliced(preds, events)}, sliced(targets, events)))
+    return cases
+
+
+@pytest.mark.parametrize("pool_layers", [False, True])
+def test_epoch_reduction_over_unequal_batches_equals_lightning(pool_layers):
+    """The per-batch weights (event count for the task metrics, 1 for the mask metrics) decide every float epoch value.
+    With two decoder layers, ``pool_layers=True`` gives Lightning's shared-object values; one layer otherwise (Lightning
+    pools, decision 5). Control: swapping either weight kind moves a value far outside the tolerance.
+    """
+    cases = epoch_cases(pool_layers)
+    ref = lightning_validate(cases)
+    ours = M.ClicMetrics("val", pool_layers=pool_layers)
+    for preds, targets in cases:
+        ours.update(preds, targets)
+    values = ours.compute()
+    assert values.keys() == ref.keys(), values.keys() ^ ref.keys()
+    measured = {}
+    for key in ref:
+        if math.isnan(ref[key]):
+            assert math.isnan(values[key]), key
+            continue
+        measured[key] = ulps(values[key], ref[key])
+        assert measured[key] <= tolerance(key) + (EPOCH_SLACK if key in ours.means else 0), (key, values[key], ref[key])
+    print("largest ulp differences:", sorted(measured.items(), key=lambda kv: -kv[1])[:4])
+    # control: the other weighting of the same per-batch values
+    per_batch, sizes = [], []
+    for preds, targets in cases:
+        one = M.ClicMetrics("val", pool_layers=pool_layers)
+        one.update(preds, targets)
+        per_batch.append(one.compute())
+        sizes.append(targets["particle_valid"].shape[0])
+    for key, wrong_weights in (("val/final_regression_e_abs_res", [1, 1, 1]), ("val/final_mask_recall", sizes)):
+        wrong = float(np.average([b[key] for b in per_batch], weights=wrong_weights))
+        assert ulps(wrong, ref[key]) > 100 * max(tolerance(key) + EPOCH_SLACK, 1), key
+
+
+def test_train_stage_logs_only_the_task_metrics(mpflow):
+    """``MPflow.log_custom_metrics`` returns early for train: no accuracy, eff, pur or mask names."""
+    preds, targets = fixed_case(2)
+    ref = torch_logged(mpflow, {"final": preds}, targets, stage="train")
+    ours = M.ClicMetrics("train")
+    ours.update({"final": preds}, targets)
+    assert_equal_metrics(ours.compute(), ref)
+    assert len(ref) == 20 + 4  # regression + classification-task metrics only
+    assert len(M.ClicMetrics("val").compute()) == 0  # nothing before an update
 
 
 def test_weighted_mean_is_lightnings_epoch_reduction():
