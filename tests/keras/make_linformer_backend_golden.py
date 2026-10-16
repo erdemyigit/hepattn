@@ -32,6 +32,12 @@ def main() -> None:
         for site in C.SITES
         for mode, training in C.MODES.items()
     }
+    arrays |= {
+        C.key(spec_name, site, mode, C.PROD_HEADS): C.run_case(site, spec, training, C.PROD_HEADS)
+        for spec_name, spec in C.SPECS.items()
+        for site in C.PROD_HEAD_SITES
+        for mode, training in C.MODES.items()
+    }
     meta = {"inputs_sha256": C.inputs_digest(), "jax": jax.__version__, "keras": keras.__version__}
     OUT.parent.mkdir(exist_ok=True)
     np.savez_compressed(OUT, **arrays, **{f"meta.{name}": np.array(value) for name, value in meta.items()})

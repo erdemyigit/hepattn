@@ -39,6 +39,7 @@ import org_model_utils as U  # ty: ignore [unresolved-import]
 from parity_utils import assert_parity  # ty: ignore [unresolved-import]
 
 from hepattn.keras.attention import KerasAttention
+from hepattn.keras.callbacks import write_beta
 from hepattn.keras.factory import LayerFactory
 from hepattn.keras.porting import port_attention
 from hepattn.keras_native import masked_linformer as nml
@@ -251,11 +252,17 @@ def test_core_parity_tolerances_resolve_the_renorm():
 
 
 # ----------------------------------------------------------------- H0 (3): torch backend == JAX backend, quantized
-# Measured (golden/linformer_backend.npz, 5 sites x {high, prod} x {eval, train}): 0.0 on every element, so the
-# tolerance is 0 (plan section 5 policy; re-measure on the first Linux/GPU run). A probe at 16 heads ($S/r4b/logs/
-# be_*.npz) was exact except one query row (16 elements) in 3 of 20 outputs (high q_ca train 5.5e-5, kv_ca eval
-# 1.3e-4, kv_ca train 4.5e-5): rounding ties that the two backends' float32 sums break differently.
+# Measured (golden/linformer_backend.npz, 2 heads, 5 sites x {high, prod} x {eval, train}): 0.0 on every element, so
+# the tolerance is 0 (plan section 5 policy; re-measure on the first Linux/GPU run). The 16-head rows are below.
 BACKEND_TOL = 0.0
+# 16 heads (production), attend sites ($S/r4b_fix/logs/h16_measure.out; the same with OMP_NUM_THREADS=1): prod 0.0
+# everywhere; high: q_ca eval 1.656e-4 (64 elements), q_ca train 7.875e-5 (16), kv_ca eval 1.437e-4 (48), kv_ca
+# train 1.069e-4 (112) of 76800 / 81920. Every differing element belongs to a whole (event, head, query) row of
+# head_dim elements: a float32 rounding tie upstream of the values einsum that the two backends break differently.
+# Tolerance (2x): (max |diff|, number of differing elements). The count is what a real bug exceeds: one datalane bit
+# less differs in >= 57686 elements ($S/r4b_fix/logs/h16_control.out), >= 257x the bound; its max |diff| at the high
+# spec, 5.6e-4, is only 1.7x the 3.31e-4 bound.
+PROD_HEADS_TOL = {"high": (3.31e-4, 224), "prod": (0.0, 0)}
 
 
 @pytest.fixture(scope="module")
@@ -273,6 +280,28 @@ def test_quantized_core_torch_backend_equals_jax_backend(backend_golden, spec_na
     got = torch.from_numpy(C.run_case(site, C.SPECS[spec_name], C.MODES[mode]))
     assert torch.isfinite(got).all()
     assert_parity("h0.backend", C.key(spec_name, site, mode), ref, got, atol=BACKEND_TOL, rtol=0.0)
+
+
+@pytest.mark.parametrize("mode", list(C.MODES))
+@pytest.mark.parametrize("site", C.PROD_HEAD_SITES)
+@pytest.mark.parametrize("spec_name", list(C.SPECS))
+def test_quantized_core_at_production_heads_equals_jax_up_to_rounding_ties(backend_golden, spec_name, site, mode):
+    ref = backend_golden[C.key(spec_name, site, mode, C.PROD_HEADS)]
+    got = C.run_case(site, C.SPECS[spec_name], C.MODES[mode], C.PROD_HEADS)
+    assert np.isfinite(got).all()
+    differs = np.abs(got - ref) > 0
+    max_diff, max_count = PROD_HEADS_TOL[spec_name]
+    assert float(np.abs(got - ref).max()) <= max_diff
+    assert int(differs.sum()) <= max_count, int(differs.sum())
+    assert int(differs.sum()) == C.HEAD_DIM * int(differs.any(-1).sum()), "differences outside whole query rows"
+
+
+def test_production_heads_control_one_datalane_bit():
+    """Control for the bound above: one fractional datalane bit less at the high spec (measured 76540 elements)."""
+    spec = copy.deepcopy(C.SPECS["high"])
+    spec["datalane"]["f0"] -= 1
+    ref = np.load(GOLDEN)[C.key("high", "q_ca", "train", C.PROD_HEADS)]
+    assert int((np.abs(C.run_case("q_ca", spec, True, C.PROD_HEADS) - ref) > 0).sum()) >= 10 * PROD_HEADS_TOL["high"][1]
 
 
 @pytest.mark.parametrize("site", list(C.SITES))
@@ -328,14 +357,16 @@ def test_every_core_variable_is_a_registered_torch_parameter(quantized_model):
 def test_every_trainable_core_variable_gets_a_gradient_and_moves(quantized_model):
     """One training step (task losses + EBOPs at beta 1e-6, as BetaScheduler sets beta) with AdamW at weight decay 0:
     every trainable core variable has a finite nonzero gradient and changes (measured 404 of 404). SGD at lr 1e-2
-    would move only 190: some bitwidths get EBOPs gradients of 1e-8, below float32 resolution after the lr.
+    would move only 190 (measured at R4b with beta on the top-level leaves only): some bitwidths get EBOPs gradients
+    of 1e-8, below float32 resolution after the lr.
     """
     model, inputs, targets = quantized_model
     trainable = {id(v): v for core in cores(model) for v in core.variables if v.trainable}
     before = {key: v.value.detach().clone() for key, v in trainable.items()}
-    for layer in model.keras_layers():
-        if getattr(layer, "_beta", None) is not None:
-            layer._beta.assign(1e-6)  # noqa: SLF001
+    write_beta(model, 1e-6)  # as BetaScheduler: every leaf, the core leaves included
+    core_leaves = [m for core in cores(model) for m in core.modules() if getattr(m, "_beta", None) is not None]
+    assert len(core_leaves) > 200, len(core_leaves)  # measured 212
+    assert all(float(leaf._beta.value) == pytest.approx(1e-6, rel=1e-6) for leaf in core_leaves)  # noqa: SLF001
     decay, quant = model.trainable_parameter_groups()
     opt = torch.optim.AdamW([{"params": decay}, {"params": quant}], lr=1e-3, weight_decay=0.0)
     model.train()
@@ -601,6 +632,53 @@ def test_paired_delta_high_vs_coarse():
     assert err_high <= HIGH_TOL
     assert coarse.std(dim=1).mean() > 0.05, "the coarse spec must still depend on the input"
     assert err_coarse >= 10 * err_high, (err_high, err_coarse)
+
+
+@pytest.mark.parametrize("spec_name", list(C.SPECS))
+@pytest.mark.parametrize("shape", ["q_ca", "enc"])
+def test_train_mode_attention_runs_the_core_in_train_mode(shape, spec_name, monkeypatch):
+    """QAT calls the hybrid attention in train mode. There HGQ2's WRAP-mode quantizers fit their integer bits to the
+    data (a state update) instead of wrapping, so from the same core state a train-mode and an eval-mode core call
+    differ. Inside a train-mode forward, the core output and the core state afterwards equal those of the core run
+    directly with training=True on the same inputs and from the same state, bit for bit.
+    """
+    x = make_inputs(shape, 41, sort=shape == "q_ca")
+    kattn = hybrid_attention(shape, torch_attention(shape, 40), x, spec=C.SPECS[spec_name])
+    core = kattn.core
+    start = [v.value.detach().clone() for v in core.variables]
+
+    def state() -> list[torch.Tensor]:
+        return [v.value.detach().clone() for v in core.variables]
+
+    def restore() -> None:
+        for v, value in zip(core.variables, start, strict=True):
+            v.assign(value)
+
+    seen = []
+    original = type(core).call
+
+    def record(self, *args, training=None):
+        out = original(self, *args, training=training)
+        seen.append((args, out))
+        return out
+
+    monkeypatch.setattr(type(core), "call", record)
+    kattn.train()
+    call(kattn, x)
+    monkeypatch.undo()
+    ((args, out),) = seen
+    after = state()
+    with torch.no_grad():
+        restore()
+        train = core(*args, training=True)
+        assert all(starmap(torch.equal, zip(state(), after, strict=True)))
+        restore()
+        evaluated = core(*args, training=False)
+    assert not all(starmap(torch.equal, zip(after, start, strict=True))), "the train-mode call fitted no integer bits"
+    assert torch.equal(out, train)
+    # control, the core in eval mode from the same state (measured max |train - eval|, $S/r4b_fix/logs/train_mode.out):
+    # high q_ca 4.33e-4, enc 3.94e-4; prod q_ca 37.3, enc 45.4 (the prod datalanes wrap in eval mode)
+    assert float((train - evaluated).abs().max()) > {"high": 1e-4, "prod": 1.0}[spec_name]
 
 
 def test_core_leaves_built_at_the_first_forward_take_the_factory_spec():
