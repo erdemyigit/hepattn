@@ -18,6 +18,10 @@ T = "tests/keras_native/"
 
 FAST = [T + "test_config.py", "-k", "not build_the_same_model and not control_forward and not control_shape and not quant_spec"]
 CK_FAST = [T + "test_checkpoint.py", "-k", "longest or durable"]
+CK_NEW = [T + "test_checkpoint.py", "-k", "another_optimizer or stored_shape or mode_of or nan_at or every_epoch or save_last"]
+DATA_WORKERS = [T + "test_data.py", "-k", "fork or new_batch"]
+CFG_RUN = [T + "test_config.py", "-k", "every_form or run_sections or unsupported_run or case_insens or overridden"]
+NATIVE_DATA = "src/hepattn/experiments/clic/native_data.py"
 
 MUTATIONS = [
     # config.py
@@ -152,14 +156,14 @@ MUTATIONS = [
     # fix round (reviewer findings R1-R14 and the hash / durability fixes); FAST runs only the config tests that
     # do not build models, CK_FAST the checkpoint tests that need no compiled step
     ("M29", N + "config.py", 'lr_max=float(lrs["max"]),', 'lr_max=float(lrs["initial"]),', FAST),
-    ("M30", N + "config.py", 'every_n_train_steps=step.get("every_n_train_steps"),', "every_n_train_steps=None,", FAST),
-    ("M31", N + "config.py", 'save_last=bool(step.get("save_last") or best.get("save_last")),', "save_last=False,", FAST),
-    ("M32", N + "config.py", 'weight_decay=float(lrs.get("weight_decay", 0.0)),', "weight_decay=0.0,", FAST),
+    ("M30", N + "config.py", "steps, epochs = int(steps or 0), int(epochs or 0)", "steps, epochs = 0, int(epochs or 0)", FAST),
+    ("M31", N + "config.py", 'else bool(args.get("save_last")),', "else False,", FAST),
+    ("M32", N + "config.py", 'weight_decay=float(lrs["weight_decay"]),', "weight_decay=0.0,", FAST),
     ("M33", N + "config.py", 'seed=cfg.get("seed_everything"),', "seed=None,", FAST),
     ("M34", N + "config.py", 'num_val=int(data.get("num_val", -1)),', "num_val=-1,", FAST),
     ("M35", N + "config.py", 'pct_start=float(lrs["pct_start"]),', "pct_start=0.3,", FAST),
-    ("M36", N + "config.py", 'dirpath=step.get("dirpath") or best.get("dirpath"),', "dirpath=None,", FAST),
-    ("M37", N + "config.py", 'mode=best.get("mode", "min"),', 'mode="max",', FAST),
+    ("M36", N + "config.py", 'dirpath=None if hepattn_checkpoint else args.get("dirpath"),', "dirpath=None,", FAST),
+    ("M37", N + "config.py", 'mode=args.get("mode", "min"),', 'mode="max",', FAST),
     ("M38", N + "config.py", 'batch_size=int(data["batch_size"]),', "batch_size=32,", FAST),
     ("M39", N + "config.py", "if k not in defaults or v != _canonical(defaults[k], k)}}", "}}", FAST),
     ("M40", N + "config.py", "        return _file_digest(node)", "        return node", FAST),
@@ -221,6 +225,60 @@ MUTATIONS = [
         T + "test_checkpoint.py",
     ),
     ("M56", N + "data.py", "    if array.dtype == np.float64:\n        return array.astype(np.float32)\n", "", T + "test_data.py"),
+    # fix round 2: worker start method, checkpoint callbacks, file mode, uncovered checks (reviewer X1, X6, X11, MR1)
+    ("M57", NATIVE_DATA, '"multiprocessing_context": multiprocessing_context, "persistent_workers"', '"persistent_workers"', DATA_WORKERS),
+    ("M58", NATIVE_DATA, 'WORKER_START_METHOD = "spawn"', 'WORKER_START_METHOD = "fork"', DATA_WORKERS),
+    ("M59", NATIVE_DATA, 'get_start_method() == "fork":', 'get_start_method() == "never":', DATA_WORKERS),
+    ("M60", NATIVE_DATA, '"persistent_workers": True}', '"persistent_workers": False}', DATA_WORKERS),
+    ("M61", NATIVE_DATA, "        self.loader.sampler.set_epoch(epoch, start_batch)\n", "", DATA_WORKERS),
+    ("M62", N + "checkpoint.py", "        Path(tmp).chmod(0o666 & ~_umask())\n", "", CK_NEW),
+    (
+        "M63",
+        N + "checkpoint.py",
+        "if tuple(array.shape) != tuple(var.shape) or np.dtype(array.dtype) != np.dtype(var.dtype):",
+        "if np.dtype(array.dtype) != np.dtype(var.dtype):",
+        CK_NEW,
+    ),
+    ("M64", N + "checkpoint.py", "        if not math.isfinite(value):\n            return False\n", "", CK_NEW),
+    ("M65", N + "data.py", "(value.shape, value.dtype.str) for group", "(value.shape,) for group", DATA_WORKERS),
+    ("M66", N + "checkpoint.py", "groups = GROUPS if optimizer is not None else GROUPS[:2]", "groups = GROUPS[:2]", CK_NEW),
+    (
+        "M67",
+        N + "config.py",
+        'save_last=False if hepattn_checkpoint else bool(args.get("save_last"))',
+        'save_last=bool(args.get("save_last"))',
+        CFG_RUN,
+    ),
+    (
+        "M68",
+        N + "config.py",
+        'save_top_k = -1 if hepattn_checkpoint else int(args.get("save_top_k", 1))',
+        'save_top_k = int(args.get("save_top_k", 1))',
+        CFG_RUN,
+    ),
+    ("M69", N + "config.py", "        steps, epochs = 0, 1\n", "        steps, epochs = 0, 0\n", CFG_RUN),
+    ("M70", N + "config.py", "    if steps and epochs:\n", "    if False:\n", CFG_RUN),
+    ("M71", N + "config.py", 'dirpath=None if hepattn_checkpoint else args.get("dirpath"),', 'dirpath=args.get("dirpath"),', CFG_RUN),
+    (
+        "M72",
+        N + "config.py",
+        "name = {n.lower(): n for n in OPTIMIZERS}.get(str(given).lower())",
+        "name = given if given in OPTIMIZERS else None",
+        CFG_RUN,
+    ),
+    ("M73", N + "config.py", '    if "weight_decay" not in lrs:\n', "    if False:\n", CFG_RUN),
+    ("M74", N + "config.py", "    epsilon: float = 1e-8\n", "    epsilon: float = 1e-7\n", CFG_RUN),
+    ("M75", N + "checkpoint.py", ' and _BEST_FILE.fullmatch(previous["file"]):', ":", CK_NEW),
+    ("M76", N + "checkpoint.py", 'if pointer is not None and pointer.get("step") == step and', "if False and", CK_NEW),
+    ("M77", N + "checkpoint.py", "if _LAST_FILE.fullmatch(old.name) and old != path:", "if False:", CK_NEW),
+    ("M78", N + "checkpoint.py", "value = float(value) if math.isfinite(float(value)) else str(float(value))", "value = float(value)", CK_NEW),
+    (
+        "M79",
+        N + "checkpoint.py",
+        "        if self.policy.is_better(metrics):\n            self._set_pointer",
+        "        if True:\n            self._set_pointer",
+        CK_NEW,
+    ),
 ]
 
 
