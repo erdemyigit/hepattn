@@ -35,7 +35,7 @@ def assign_dense(layer, weight: torch.Tensor, bias: torch.Tensor | None) -> None
 
 @torch.no_grad()
 def port_dense(tdense, ndense) -> None:
-    """Torch Dense -> native Dense. A SwiGLU hidden Linear (2h, in) splits by rows: [:h] -> x1, [h:] -> the gate half."""
+    """Torch Dense -> native Dense. A SwiGLU hidden Linear (2h, in) splits by rows: [:h] -> x1, [h:] -> x2."""
     linears = [m for m in tdense.net if isinstance(m, nn.Linear)]
     layers = [*ndense.hidden, ndense.final]
     assert len(linears) == len(layers), f"structure mismatch: {len(linears)} torch Linears vs {len(layers)} keras Dense"

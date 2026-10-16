@@ -4,16 +4,18 @@ Same layer structure and names as the hybrid ``hepattn.keras.dense.KerasDense`` 
 ``{name}_final``), so weights port one-to-one. Sublayers are built in ``build`` from the static input shape.
 
 SwiGLU (``x1 * silu(x2)``, x1 = the first half of torch's packed ``Linear(in, 2h)``) uses one graph in float and
-quantized mode (plan RETARGET_ORG_MAIN.md section 5.4): the packed projection is two factory denses,
-``{name}_hidden{i}`` (x1, no activation) and ``{name}_hidden{i}_gate`` (x2, ``activation="silu"`` inside the leaf, as
-every other quantized activation), and the product is the elementwise factory einsum ``{name}_hidden{i}_glu``
-(``QEinsum`` when quantized). Porting splits the torch weight rows: x1 = rows [:h], x2 = rows [h:].
+quantized mode (plan RETARGET_ORG_MAIN.md section 5.4). The leaves are those of the hybrid twin (R4a, ``rt/r4``
+``keras/dense.py``): the packed projection is two factory denses, ``{name}_hidden{i}_x1`` (no activation) and
+``{name}_hidden{i}_x2`` (``activation="silu"`` inside the leaf, as every other quantized activation), and the product
+is the factory einsum ``{name}_hidden{i}_glu`` with the equation ``bnc,bnc->bnc`` (``QEinsum`` when quantized); other
+input ranks are folded into rank 3, (B, -1, C), around it. Porting splits the torch weight rows: x1 = rows [:h],
+x2 = rows [h:].
 
 Initialisation (``init``): ``"keras"`` (glorot-uniform kernel, zero bias) is what the hybrid's encoder/decoder
-Dense layers get, because the hybrid builds those from the config. The hybrid packs a SwiGLU layer as one (in, 2h)
-kernel, so both native halves take the glorot bound of that packed shape, sqrt(6 / (in + 2h)), not of (in, h). ``"torch"`` is ``nn.Linear``'s default,
-kernel and bias U(+-1/sqrt(fan_in)); the hybrid's input nets and task heads start from it, because
-``kerasify_module`` ports them from torch ``Dense`` modules.
+Dense layers get, because the hybrid builds those from the config; each SwiGLU half is its own (in, h) leaf there,
+with the keras default bound sqrt(6 / (in + h)). ``"torch"`` is ``nn.Linear``'s default, kernel and bias
+U(+-1/sqrt(fan_in)); the hybrid's input nets and task heads start from it, because ``kerasify_module`` ports them from
+torch ``Dense`` modules.
 """
 
 import math
@@ -31,6 +33,7 @@ ACTIVATION_ALIASES = {
     "Tanh": "tanh",
 }
 KERAS_ACTIVATIONS = {"silu", "relu", "gelu", "sigmoid", "tanh"}
+GLU_EQUATION = "bnc,bnc->bnc"  # the hybrid twin's equation (R4a), so both QEinsum leaves serialise the same
 
 
 def resolve_activation(activation: str | None, default: str | None) -> str | None:
@@ -104,35 +107,30 @@ class Dense(keras.layers.Layer):
         def sub(part: str) -> str | None:
             return f"{name}_{part}" if name else None
 
-        def initializers(fan_in: int, packed_out: int | None = None) -> dict:
+        def initializers(fan_in: int) -> dict:
             if init == "keras":
-                if packed_out is None:
-                    return {}
-                limit = math.sqrt(6.0 / (fan_in + packed_out))  # glorot_uniform of the packed (in, 2h) kernel
-                return {"kernel_initializer": keras.initializers.RandomUniform(-limit, limit)}
+                return {}
             # nn.Linear: kaiming_uniform(a=sqrt(5)) kernel and bias, both U(+-1/sqrt(fan_in))
             bound = 1.0 / math.sqrt(fan_in)
             uniform = keras.initializers.VarianceScaling(scale=1.0 / 3.0, mode="fan_in", distribution="uniform")
             return {"kernel_initializer": uniform, "bias_initializer": keras.initializers.RandomUniform(-bound, bound)}
 
         fan_ins = [input_size, *self.hidden_sizes]  # both SwiGLU halves have the fan-in of the packed torch Linear
-
-        def half_init(i: int, size: int) -> dict:
-            return initializers(fan_ins[i], 2 * size if self.gate else None)
-
+        x1_suffix = "_x1" if self.gate else ""
         self.hidden = [
-            factory.dense(size, activation=None if self.gate else activation, use_bias=bias, name=sub(f"hidden{i}"), **half_init(i, size))
+            factory.dense(
+                size, activation=None if self.gate else activation, use_bias=bias, name=sub(f"hidden{i}{x1_suffix}"), **initializers(fan_ins[i])
+            )
             for i, size in enumerate(self.hidden_sizes)
         ]
         self.gates, self.products = [], []
         if self.gate:
             self.gates = [
-                factory.dense(size, activation="silu", use_bias=bias, name=sub(f"hidden{i}_gate"), **half_init(i, size))
+                factory.dense(size, activation="silu", use_bias=bias, name=sub(f"hidden{i}_x2"), **initializers(fan_ins[i]))
                 for i, size in enumerate(self.hidden_sizes)
             ]
-            # "..." is replaced by explicit letters in build: HGQ2 0.1.9 QEinsum.build expands it from a Python set, so
-            # the serialised equation would depend on the hash seed.
-            self.products = [factory.einsum("...d,...d->...d", name=sub(f"hidden{i}_glu")) for i in range(len(self.hidden_sizes))]
+            # explicit letters: HGQ2 0.1.9 QEinsum.build expands "..." from a Python set (hash-seed dependent equation)
+            self.products = [factory.einsum(GLU_EQUATION, name=sub(f"hidden{i}_glu")) for i in range(len(self.hidden_sizes))]
         self.final = factory.dense(output_size, activation=final_activation, use_bias=bias, name=sub("final"), **initializers(fan_ins[-1]))
         self.dropout = keras.layers.Dropout(dropout, name=sub("dropout")) if dropout else None
 
@@ -140,23 +138,30 @@ class Dense(keras.layers.Layer):
         if input_shape[-1] != self.input_size:
             raise ValueError(f"{self.name}: input feature size {input_shape[-1]} != input_size {self.input_size}")
         lead = (None, *input_shape[1:-1])
-        product_equation = "{0},{0}->{0}".format("abcefghijklmnopqrstuvwxyz"[: len(lead)] + "d")
+        inner = lead[1:]
+        folded = math.prod(inner) if None not in inner else None  # the rank-3 middle axis of the product einsum
         in_size = self.input_size
         for i, (layer, size) in enumerate(zip(self.hidden, self.hidden_sizes, strict=True)):
             layer.build((*lead, in_size))
             if self.gate:
                 self.gates[i].build((*lead, in_size))
-                self.products[i].equation = product_equation
-                self.products[i].build([(*lead, size), (*lead, size)])
+                self.products[i].build([(None, folded, size)] * 2)
             in_size = size
         self.final.build((*lead, in_size))
 
+    def _swiglu(self, i: int, x, training):
+        x1 = self.hidden[i](x, training=training)
+        x2 = self.gates[i](x, training=training)
+        if len(x1.shape) == 3:
+            return self.products[i]([x1, x2], training=training)
+        shape = keras.ops.shape(x1)
+        fold = (shape[0], -1, shape[-1])
+        out = self.products[i]([keras.ops.reshape(x1, fold), keras.ops.reshape(x2, fold)], training=training)
+        return keras.ops.reshape(out, shape)
+
     def call(self, x, training=None):
         for i, layer in enumerate(self.hidden):
-            if self.gate:
-                x = self.products[i]([layer(x, training=training), self.gates[i](x, training=training)], training=training)
-            else:
-                x = layer(x, training=training)
+            x = self._swiglu(i, x, training) if self.gate else layer(x, training=training)
             if self.dropout is not None:
                 x = self.dropout(x, training=training)
         return self.final(x, training=training)

@@ -79,7 +79,7 @@ def test_register_tokens_are_standard_normal():
 
 
 def dense_layers(module) -> list:
-    """Every kernel-holding leaf; a SwiGLU Dense has the x1 and gate halves of each hidden layer."""
+    """Every kernel-holding leaf; a SwiGLU Dense has the x1 and x2 halves of each hidden layer."""
     return [*module.hidden, *module.gates, module.final]
 
 
@@ -129,14 +129,15 @@ def test_dense_torch_init_matches_nn_linear(mode, activation):
 def test_dense_keras_init_is_glorot_with_zero_bias(activation):
     """init='keras' (the default; the hybrid's encoder/decoder Dense layers): glorot-uniform kernel, zero bias.
 
-    SwiGLU: the hybrid packs both halves in one (in, 2h) kernel, so each native half takes that glorot bound.
+    SwiGLU: as in the hybrid twin (R4a), each half is its own (in, h) leaf with the keras default bound
+    sqrt(6 / (in + h)), not the bound of the packed (in, 2h) torch kernel (0.0484 vs 0.0361 here).
     """
     dense = Dense(input_size=512, output_size=64, hidden_layers=[2048], activation=activation)
     dense.build((None, 10, 512))
-    halves = {id(layer) for layer in (*dense.hidden, *dense.gates)} if activation == "SwiGLU" else set()
+    assert len(dense_layers(dense)) == (3 if activation == "SwiGLU" else 2)
     for layer in dense_layers(dense):
         fan_in, fan_out = layer.kernel.shape
-        limit = math.sqrt(6.0 / (fan_in + fan_out * (2 if id(layer) in halves else 1)))
+        limit = math.sqrt(6.0 / (fan_in + fan_out))
         kernel = n(layer.kernel)
         assert np.abs(kernel).max() <= limit * FP32_SLACK
         assert kernel.std() == pytest.approx(limit / math.sqrt(3), rel=STD_RTOL)
