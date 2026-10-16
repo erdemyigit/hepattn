@@ -77,7 +77,11 @@ MUTANTS = {
     "m15_log_every_call": [(OBJECTIVE, "@cache\ndef _log_lap1015_fallback", "def _log_lap1015_fallback")],
     # fix round 1 (reviewer mutants that survived a37b04a)
     "m16_bce_count_unclamped": [
-        (LOSSES, "counts = ops.maximum(ops.sum(pad, axis=-1, keepdims=True), 1.0)  # [B, 1]", "counts = ops.sum(pad, axis=-1, keepdims=True)  # [B, 1]")
+        (
+            LOSSES,
+            "counts = ops.maximum(ops.sum(pad, axis=-1, keepdims=True), 1.0)  # [B, 1]",
+            "counts = ops.sum(pad, axis=-1, keepdims=True)  # [B, 1]",
+        )
     ],
     "m17_dice_numerator_unmasked": [
         (LOSSES, "numerator = 2.0 * ops.sum(probs * targets, axis=-1)", "numerator = 2.0 * ops.sum(ops.sigmoid(f32(logits)) * targets, axis=-1)")
