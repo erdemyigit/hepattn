@@ -1,0 +1,167 @@
+[
+ {
+  "mutation": "M1 train_step does not donate by default",
+  "summary": "2 passed in 3.56s",
+  "failed": [],
+  "killed": false
+ },
+ {
+  "mutation": "M2 objective without the EBOPs penalty",
+  "summary": "1 failed in 164.69s (0:02:44)",
+  "failed": [
+   "tests/keras_native/test_train_step.py::test_penalty_check_against_an_eager_reference"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M3 matmul precision context dropped",
+  "summary": "1 failed in 19.52s",
+  "failed": [
+   "tests/keras_native/test_train_step.py::test_steps_request_highest_matmul_precision"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M4 EBOPs switch is a no-op",
+  "summary": "2 failed in 299.99s (0:04:59)",
+  "failed": [
+   "tests/keras_native/test_train_step.py::test_periodic_ebops_skipped_step_has_no_penalty",
+   "tests/keras_native/test_ebops.py::test_loss_list_is_ebops_terms_then_regularizers"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M5 EBOPs switch does not restore the flags",
+  "summary": "1 failed in 88.20s (0:01:28)",
+  "failed": [
+   "tests/keras_native/test_ebops.py::test_loss_list_is_ebops_terms_then_regularizers"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M6 set_beta writes the first leaf only",
+  "summary": "2 failed in 191.36s (0:03:11)",
+  "failed": [
+   "tests/keras_native/test_train_step.py::test_beta_change_keeps_the_executable_and_scales_the_penalty",
+   "tests/keras_native/test_ebops.py::test_beta_helpers_refuse_invalid_states"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M7 read-out divides all loss terms (regularizers included)",
+  "summary": "2 failed in 141.63s (0:02:21)",
+  "failed": [
+   "tests/keras_native/test_ebops.py::test_readout_equals_the_torch_backend_value",
+   "tests/keras_native/test_ebops.py::test_loss_list_is_ebops_terms_then_regularizers"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M8 weight decay excluded by var_names (name, not path)",
+  "summary": "2 failed in 56.52s",
+  "failed": [
+   "tests/keras_native/test_optim.py::test_weight_decay_excludes_exactly_the_quantizer_paths[AdamW]",
+   "tests/keras_native/test_optim.py::test_weight_decay_excludes_exactly_the_quantizer_paths[Lion]"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M9 OneCycle reads micro-steps (no division by k)",
+  "summary": "2 failed, 1 passed in 3.55s",
+  "failed": [
+   "tests/keras_native/test_optim.py::test_onecycle_equals_torch_at_20_steps[4]",
+   "tests/keras_native/test_optim.py::test_optimizer_reads_the_schedule_at_the_optimizer_step"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M10 OneCycle linear anneal instead of cos",
+  "summary": "2 failed in 12.83s",
+  "failed": [
+   "tests/keras_native/test_optim.py::test_onecycle_equals_torch_at_20_steps[1]",
+   "tests/keras_native/test_optim.py::test_onecycle_equals_torch_at_20_steps[4]"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M11 accumulation ignored by the factory",
+  "summary": "2 failed in 156.13s (0:02:36)",
+  "failed": [
+   "tests/keras_native/test_optim.py::test_accumulation_averages_k_micro_batches_like_one_k_times_batch",
+   "tests/keras_native/test_train_step.py::test_accumulation_makes_one_host_call_per_micro_batch_and_one_update_per_k"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M12 Keras default Adam epsilon",
+  "summary": "1 failed in 10.20s",
+  "failed": [
+   "tests/keras_native/test_optim.py::test_factory_reads_the_generated_polaris_config_and_org_base"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M13 controller seeds without HGQ2's 1e-9",
+  "summary": "19 passed in 0.23s",
+  "failed": [],
+  "killed": false
+ },
+ {
+  "mutation": "M14 controller steps on a missing reading",
+  "summary": "1 failed, 18 passed in 0.48s",
+  "failed": [
+   "tests/keras_native/test_beta_control.py::test_epoch_hook_warmup_and_missing_reading"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M15 ramp one step ahead",
+  "summary": "1 failed, 36 passed in 3.07s",
+  "failed": [
+   "tests/keras/test_beta_pid.py::test_scheduler_ramp_is_the_shared_ramp"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M16 hybrid quant_losses walks duplicates again",
+  "summary": "4 failed, 1 passed in 205.07s (0:03:25)",
+  "failed": [
+   "tests/keras/test_quant_losses_dedupe.py::test_generated_org_model_counts_each_layer_once",
+   "tests/keras/test_quant_losses_dedupe.py::test_quant_losses_equals_the_golden_per_layer_terms[high-mf_org]",
+   "tests/keras/test_quant_losses_dedupe.py::test_quant_losses_equals_the_golden_per_layer_terms[prod-mf_torch]",
+   "tests/keras/test_quant_losses_dedupe.py::test_quant_losses_equals_the_golden_per_layer_terms[prod-mf_org]"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M17 hybrid BetaPID integral gain ignored",
+  "summary": "37 passed in 3.05s",
+  "failed": [],
+  "killed": false
+ },
+ {
+  "mutation": "M18 generator drops min_beta",
+  "summary": "2 failed, 1 passed in 0.79s",
+  "failed": [
+   "tests/polaris/test_beta_setpoints.py::test_pid_defaults_and_their_rules",
+   "tests/polaris/test_beta_setpoints.py::test_env_overrides_still_win"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M19 generator ramp starts at 0",
+  "summary": "1 failed, 2 passed in 0.85s",
+  "failed": [
+   "tests/polaris/test_beta_setpoints.py::test_schedule_ramp_starts_above_zero"
+  ],
+  "killed": true
+ },
+ {
+  "mutation": "M20 matching without stop_gradient on the costs (S4 code, gradient gate on the full model)",
+  "summary": "1 failed in 286.34s (0:04:46)",
+  "failed": [
+   "tests/keras_native/test_train_step.py::test_gradients_through_matching_equal_the_fixed_index_reference"
+  ],
+  "killed": true
+ }
+]
