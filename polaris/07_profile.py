@@ -9,6 +9,9 @@ Answers three questions that MPS profiling could not:
      be in a training step at all?
 
 Run via polaris/07_profile.pbs (debug queue, ~20 min).
+
+The model here is the PRE-RETARGET one (no SwiGLU, no FastLayerNorm, Linformer k = seq_len = 256, no sorting), not
+the org/main model that 03_make_config.py now writes; its numbers do not describe that model until R5 or G2 updates it.
 """
 
 import os

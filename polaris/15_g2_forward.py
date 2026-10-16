@@ -22,7 +22,9 @@ Torch fp32 OOMs at batch 32 (job 7746577), so G2 is decided at batch 16, fp32: m
 Batch 8 is the second point of the same comparison, and JAX batch 32 is reported for scaling only.
 
 The model config is written once (``model_config``) and fed to both frameworks. At the defaults (dim 256, 16 heads,
-6 + 4 Linformer layers, k = 256, 160 nodes + 8 registers, 150 queries) it is 07_profile.py's model.
+6 + 4 Linformer layers, k = 256, 160 nodes + 8 registers, 150 queries) it is 07_profile.py's model. That is the
+PRE-RETARGET model (no SwiGLU, no FastLayerNorm, no sorting), not the org/main model that 03_make_config.py now
+writes; G2 numbers do not describe that model until R5 or G2 updates model_config.
 
 Single run:  KERAS_BACKEND=jax python 15_g2_forward.py --mode jax --batch 16
 Sweep:       python 15_g2_forward.py --sweep --torch-python T --jax-python J --out logs/g2_<jobid>.json
