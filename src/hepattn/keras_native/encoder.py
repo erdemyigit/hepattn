@@ -152,6 +152,8 @@ class EncoderLayer(keras.layers.Layer):
         attn_norm, dense_post_norm, qkv_norm = get_hybrid_norm_config(norm, depth, hybrid_norm, qkv_norm, dense_norm_placement)
         attn_kwargs["value_residual"] = value_residual
         attn_kwargs["is_first_layer"] = depth == 0
+        if attn_type == "linformer":
+            attn_kwargs["linformer_core"] = "project"  # org encoder self-attention: project with the padding mask (renorm)
 
         self.dim = dim
         attn = build_attention(dim, attn_type=attn_type, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_attn", **attn_kwargs)

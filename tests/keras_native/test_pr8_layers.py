@@ -338,6 +338,10 @@ def test_linformer_projection_shapes_equal_torch():
     assert all(rows == expected[key[2]] for key, rows in t_rows.items()), t_rows
     for key, rows in n_rows.items():
         assert rows == (150 if key[2] == "q_sa" else t_rows[key]), (key, rows)
+    # each call site has the core of its org call (encoder: project with the padding mask; q_sa: project, mask=None)
+    assert {layer.attn.fn.core_kind for layer in nmodel.encoder.layers} == {"project"}
+    for layer in nmodel.decoder.layers:
+        assert (layer.q_ca.fn.core_kind, layer.q_sa.fn.core_kind, layer.kv_ca.fn.core_kind) == ("attend", "project_unmasked", "attend")
 
 
 # ------------------------------------------------------------------------------- 5.2 FastLayerNorm

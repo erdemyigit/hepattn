@@ -23,6 +23,7 @@ from hepattn.keras_native.factory import LayerFactory
 from hepattn.keras_native.norm import get_hybrid_norm_config
 
 DECODER_ATTN_TYPES = {"torch", "flash", "flash-varlen", "linformer"}
+LINFORMER_CORES = {"q_ca": "attend", "q_sa": "project_unmasked", "kv_ca": "attend"}  # org call sites (R2 linformer_core)
 QUERY_UPDATE_ORDERS = ("ca_dense_sa", "ca_sa_dense")
 
 
@@ -85,10 +86,11 @@ class MaskFormerDecoderLayer(keras.layers.Layer):
 
         def attn(part: str):
             part_kwargs = dict(attn_kwargs)
-            if attn_type == "linformer" and part == "q_sa":
-                # org q_sa runs project with mask=None: proj[:Q] only, no renorm. The masked core that a self-attention
-                # build picks by default has renorm and tail rows with no gradient (plan 5.6: native creates no tail here).
-                part_kwargs["linformer_core"] = "project_unmasked"
+            if attn_type == "linformer":
+                # The core is fixed per call site, not left to "auto" (which keys on the build shapes). Org q_sa runs
+                # project with mask=None: proj[:Q] only, no renorm; the masked core would add tail rows with no gradient
+                # (plan 5.6: native creates no tail there). q_ca and kv_ca always get an attn_mask.
+                part_kwargs["linformer_core"] = LINFORMER_CORES[part]
             return build_attention(dim, attn_type=attn_type, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_{part}", **part_kwargs)
 
         def residual(fn, part: str, res_norm, post_norm: bool = False):
