@@ -22,7 +22,9 @@ Torch fp32 OOMs at batch 32 (job 7746577), so G2 is decided at batch 16, fp32: m
 Batch 8 is the second point of the same comparison, and JAX batch 32 is reported for scaling only.
 
 The model config is written once (``model_config``) and fed to both frameworks. At the defaults (dim 256, 16 heads,
-6 + 4 Linformer layers, k = 256, 160 nodes + 8 registers, 150 queries) it is 07_profile.py's model.
+6 + 4 Linformer layers, k = 256, 160 nodes + 8 registers, 150 queries) it is 07_profile.py's model. That is the
+PRE-RETARGET model (no SwiGLU, no FastLayerNorm, no sorting), not the org/main model that 03_make_config.py now
+writes; G2 numbers do not describe that model until R5 or G2 updates model_config.
 
 Single run:  KERAS_BACKEND=jax python 15_g2_forward.py --mode jax --batch 16
 Sweep:       python 15_g2_forward.py --sweep --torch-python T --jax-python J --out logs/g2_<jobid>.json
@@ -87,7 +89,7 @@ def parse_args(argv=None):
 def model_config(args) -> dict:
     """The CLIC MaskFormer as plain dicts (YAML structure). 07_profile.py's model at the default arguments."""
     dim = args.dim
-    lin = {"num_heads": args.heads, "linformer_seq_len": args.linformer_k, "linformer_proj_dim": args.linformer_k}
+    lin = {"num_heads": args.heads, "linformer_seq_len": args.linformer_k, "linformer_k": args.linformer_k}
     task = {"input_object": "query", "output_object": "pflow", "target_object": "particle"}
     return {
         "dim": dim,
@@ -351,6 +353,21 @@ def extra_peak_dev(backend: str):
     return stats["peak_bytes_in_use"] / 2**30 if stats else None
 
 
+def check_native_linformer_k(model, k: int) -> None:
+    """Refuse a JAX arm whose Linformer rank is not the requested one.
+
+    Before lane R2 (RETARGET_ORG_MAIN.md section 5.6), native build_attention reads only ``linformer_proj_dim`` and
+    LinformerAttention swallows ``linformer_k``, so every --linformer-k other than 256 would build k = 256 in the JAX
+    arm while the hybrid arm builds the requested k. After R2 the native class goes away and this check finds nothing.
+
+    Raises:
+        SystemExit: a native LinformerAttention has a rank other than ``k``.
+    """
+    ks = {layer.k for layer in model._flatten_layers() if type(layer).__name__ == "LinformerAttention"}
+    if ks - {k}:
+        raise SystemExit(f"native Linformer k {sorted(ks)} != --linformer-k {k}: the JAX arm needs lane R2's linformer_k read")
+
+
 def make_jax_step(args, inputs):
     import jax
     import keras
@@ -359,6 +376,7 @@ def make_jax_step(args, inputs):
     from hepattn.keras_native.maskformer import MaskFormer
 
     model = MaskFormer(**model_config(args), quant=copy.deepcopy(QUANT))
+    check_native_linformer_k(model, args.linformer_k)
     model(inputs, training=False)  # eager build from the static shapes, before any tracing
     tv = [v.value for v in model.trainable_variables]
     ntv = [v.value for v in model.non_trainable_variables]

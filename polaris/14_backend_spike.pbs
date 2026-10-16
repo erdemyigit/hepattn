@@ -17,7 +17,7 @@
 #
 # ONE-TIME SETUP on a login node (compute nodes may not reach PyPI). The JAX env is
 # separate so it cannot disturb the torch env that 01_setup_env.sh built in .venv:
-#   cd "$WORK_ROOT/hepattn"
+#   cd "$HEPATTN_DIR"   # see polaris/repo_dir.sh
 #   uv venv --python 3.12.0 .venv-jax
 #   uv pip install --python .venv-jax/bin/python \
 #     "keras==3.15.0" "hgq2==0.1.9" "quantizers==1.2.2" "numpy==2.3.5" "jax[cuda12]==0.11.2" psutil
@@ -32,7 +32,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # report real JAX device memory instead of the default 75% preallocation
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-REPO="$WORK_ROOT/hepattn"; cd "$REPO"
+source polaris/repo_dir.sh
+REPO="$HEPATTN_DIR"; cd "$REPO"
 mkdir -p logs
 
 [ -x "$REPO/.venv-jax/bin/python" ] || { echo "ERROR: $REPO/.venv-jax missing; see ONE-TIME SETUP in this file"; exit 1; }

@@ -1,8 +1,13 @@
-"""Keras twin of hepattn.models.dense.Dense with an identical layer structure."""
+"""Keras twin of hepattn.models.dense.Dense with an identical layer structure.
+
+SwiGLU leaf rule (docs/hgq/RETARGET_ORG_MAIN.md section 5.4, shared with keras_native): torch packs the gate as one
+``Linear(in, 2h)`` followed by ``x1 * silu(x2)``, x1 being the first half. Here each half is its own factory dense
+(``_x1`` linear, ``_x2`` with ``activation="silu"`` inside the layer, as for every other quantized activation), and the
+product is a factory einsum ``bnc,bnc->bnc`` (``QEinsum`` when quantized). Float mode uses the same graph.
+"""
 
 import torch
 from torch import Tensor, nn
-from torch.nn import functional as F
 
 from hepattn.keras import keras
 from hepattn.keras.factory import LayerFactory
@@ -33,11 +38,18 @@ def port_linear(linear: nn.Linear, layer) -> None:
 
 @torch.no_grad()
 def port_dense(dense: Dense, kdense: "KerasDense") -> None:
+    """Port a torch Dense into its KerasDense twin; a packed SwiGLU Linear is split into its x1 and x2 halves."""
     linears = [m for m in dense.net if isinstance(m, nn.Linear)]
-    klayers = [*kdense.hidden, kdense.final]
-    assert len(linears) == len(klayers), f"structure mismatch: {len(linears)} torch Linears vs {len(klayers)} keras Dense layers"
-    for lin, klayer in zip(linears, klayers, strict=True):
-        port_linear(lin, klayer)
+    assert len(linears) == len(kdense.hidden) + 1, f"structure mismatch: {len(linears)} torch Linears vs {len(kdense.hidden) + 1} keras Dense layers"
+    for i, lin in enumerate(linears[:-1]):
+        if not kdense.gate:
+            port_linear(lin, kdense.hidden[i])
+            continue
+        w1, w2 = lin.weight.chunk(2, dim=0)
+        b1, b2 = lin.bias.chunk(2, dim=0) if lin.bias is not None else (None, None)
+        assign_dense(kdense.hidden[i], w1, b1)
+        assign_dense(kdense.gates[i], w2, b2)
+    port_linear(linears[-1], kdense.final)
 
 
 # torch activation-module class -> keras activation name
@@ -103,8 +115,9 @@ class KerasDense(nn.Module):
         self.input_size = input_size
         self.output_size = output_size
         self.gate = activation == "SwiGLU"
-        if factory.quantize and self.gate:
-            raise NotImplementedError("SwiGLU is not supported in quantized mode (not used by the CLIC config)")
+
+        def sub(part: str) -> str | None:
+            return f"{name}_{part}" if name else None
 
         # Float layers are built eagerly (parameters must exist before the optimizer is
         # created). Quantized layers build LAZILY on the first forward: HGQ2 datalane
@@ -112,20 +125,31 @@ class KerasDense(nn.Module):
         # count from the full static input shape, which is only known from real data
         # (hepattn pads CLIC events to fixed max_nodes/num_queries, so shapes ARE static).
         # Training drivers must therefore run one forward before creating the optimizer.
-        hidden = []
+        # With SwiGLU, hidden[i] is the x1 half, gates[i] the silu(x2) half, products[i] their product.
+        hidden, gates, products = [], [], []
         node_list = [input_size, *hidden_layers]
         for i in range(len(node_list) - 1):
-            proj_dim = node_list[i + 1] * 2 if self.gate else node_list[i + 1]
-            layer = factory.dense(proj_dim, activation=None if self.gate else activation, use_bias=bias, name=f"{name}_hidden{i}" if name else None)
+            if self.gate:
+                layers = [
+                    factory.dense(node_list[i + 1], activation=None, use_bias=bias, name=sub(f"hidden{i}_x1")),
+                    factory.dense(node_list[i + 1], activation="silu", use_bias=bias, name=sub(f"hidden{i}_x2")),
+                ]
+                products.append(factory.einsum("bnc,bnc->bnc", name=sub(f"hidden{i}_glu")))
+            else:
+                layers = [factory.dense(node_list[i + 1], activation=activation, use_bias=bias, name=sub(f"hidden{i}"))]
             if not factory.quantize:
-                layer.build((None, node_list[i]))
-            hidden.append(layer)
+                for layer in layers:
+                    layer.build((None, node_list[i]))
+            hidden.append(layers[0])
+            gates.extend(layers[1:])
 
-        final = factory.dense(output_size, activation=final_activation, use_bias=bias, name=f"{name}_final" if name else None)
+        final = factory.dense(output_size, activation=final_activation, use_bias=bias, name=sub("final"))
         if not factory.quantize:
             final.build((None, node_list[-1]))
 
         self.hidden = nn.ModuleList(hidden)
+        self.gates = nn.ModuleList(gates)
+        self.products = nn.ModuleList(products)
         self.final = final
         # torch Dense whose weights are ported into this module at lazy build (quantized
         # mode only — eagerly-built float layers are ported immediately by the caller).
@@ -179,10 +203,11 @@ class KerasDense(nn.Module):
         """
         lead = (None, *(int(d) for d in x.shape[1:-1]))
         in_size = self.input_size
-        for layer in self.hidden:
-            if not layer.built:
-                layer.build((*lead, in_size))
-            in_size = layer.units // 2 if self.gate else layer.units
+        for i, layer in enumerate(self.hidden):
+            for sublayer in (layer, self.gates[i]) if self.gate else (layer,):
+                if not sublayer.built:
+                    sublayer.build((*lead, in_size))
+            in_size = layer.units
         if not self.final.built:
             self.final.build((*lead, in_size))
         if self._pending_port is not None:
@@ -192,11 +217,17 @@ class KerasDense(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         if not self.final.built or self._pending_port is not None:
             self._materialize(x)
-        for layer in self.hidden:
-            x = layer(x, training=self.training)
-            if self.gate:
-                x1, x2 = torch.chunk(x, 2, dim=-1)
-                x = x1 * F.silu(x2)
+        for i, layer in enumerate(self.hidden):
+            x = self._swiglu(i, x) if self.gate else layer(x, training=self.training)
             if self.dropout is not None:
                 x = self.dropout(x, training=self.training)
         return self.final(x, training=self.training)
+
+    def _swiglu(self, i: int, x: Tensor) -> Tensor:
+        """x1 * silu(x2) through the product einsum, whose equation is rank 3 (other ranks are folded into it)."""
+        x1 = self.hidden[i](x, training=self.training)
+        x2 = self.gates[i](x, training=self.training)
+        shape = x1.shape
+        if x1.dim() != 3:
+            x1, x2 = x1.reshape(shape[0], -1, shape[-1]), x2.reshape(shape[0], -1, shape[-1])
+        return self.products[i]([x1, x2], training=self.training).reshape(shape)

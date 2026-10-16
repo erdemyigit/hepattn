@@ -2,7 +2,13 @@
 # Build the HGQ2 environment on a Polaris LOGIN node (compute nodes have no outbound
 # network, so all downloads must happen here).
 #
-#   bash polaris/01_setup_env.sh
+#   bash polaris/01_setup_env.sh                            # the branch of this checkout
+#   HEPATTN_BRANCH=keras-jax bash polaris/01_setup_env.sh   # another branch, in its own clone
+#
+# The branch and the clone directory come from polaris/repo_dir.sh: HEPATTN_BRANCH (default: the branch of this
+# checkout, else keras-hgq2, which stays in $WORK_ROOT/hepattn) and HEPATTN_DIR (default $WORK_ROOT/hepattn-<branch>
+# for any other branch). Jobs get no environment from qsub: they read polaris/env.sh and repo_dir.sh in the clone
+# they are submitted from. After the clone is ready, this script checks that those files resolve to the clone.
 #
 # Design notes:
 #  * Uses a plain venv, not conda/pixi. A venv disables user-site by default, which
@@ -18,6 +24,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "$HERE/env.sh" ] || { echo "ERROR: create $HERE/env.sh from env.sh.example first"; exit 1; }
 source "$HERE/env.sh"
+source "$HERE/repo_dir.sh"
 export PYTHONNOUSERSITE=1
 
 echo "==> work root: $WORK_ROOT"
@@ -32,13 +39,19 @@ fi
 echo "==> uv: $(uv --version)"
 
 # ---------------------------------------------------------------- repo
-REPO="$WORK_ROOT/hepattn"
+REPO="$HEPATTN_DIR"
 if [ -d "$REPO/.git" ]; then
-  echo "==> repo exists, updating"
-  git -C "$REPO" fetch -q origin && git -C "$REPO" checkout -q keras-hgq2 && git -C "$REPO" pull -q --ff-only
+  # Never switch the branch of an existing clone: jobs may be running from it.
+  CURRENT="$(git -C "$REPO" rev-parse --abbrev-ref HEAD)"
+  if [ "$CURRENT" != "$HEPATTN_BRANCH" ]; then
+    echo "ERROR: $REPO is on branch $CURRENT, not $HEPATTN_BRANCH. Set HEPATTN_DIR to a new directory."
+    exit 1
+  fi
+  echo "==> repo exists, updating (branch $HEPATTN_BRANCH)"
+  git -C "$REPO" fetch -q origin && git -C "$REPO" pull -q --ff-only
 else
-  echo "==> cloning hepattn (branch keras-hgq2)"
-  git clone -q --branch keras-hgq2 https://github.com/erdemyigit/hepattn.git "$REPO"
+  echo "==> cloning hepattn (branch $HEPATTN_BRANCH) into $REPO"
+  git clone -q --branch "$HEPATTN_BRANCH" https://github.com/erdemyigit/hepattn.git "$REPO"
 fi
 cd "$REPO"
 echo "==> at commit $(git log --oneline -1)"
@@ -50,6 +63,20 @@ if [ "$HERE/env.sh" -ef "$REPO/polaris/env.sh" ]; then
 else
   cp "$HERE/env.sh" "$REPO/polaris/env.sh"
   echo "==> copied env.sh into $REPO/polaris/"
+fi
+
+# Jobs submitted from $REPO resolve their clone from its polaris/env.sh and repo_dir.sh alone (qsub passes no
+# environment). Refuse to go on if that is not $REPO, e.g. a custom HEPATTN_DIR given only on the command line.
+# A keras-hgq2 clone has no repo_dir.sh: its jobs use $WORK_ROOT/hepattn.
+if [ -f "$REPO/polaris/repo_dir.sh" ]; then
+  JOB_DIR="$(cd "$REPO" && env -u HEPATTN_BRANCH -u HEPATTN_DIR bash -c \
+    'source polaris/env.sh; source polaris/repo_dir.sh; echo "$HEPATTN_DIR"')"
+  if ! [ "$JOB_DIR" -ef "$REPO" ]; then
+    echo "ERROR: jobs submitted from $REPO would run in $JOB_DIR. Set HEPATTN_BRANCH and HEPATTN_DIR in $HERE/env.sh"
+    echo "       (setup copies it into the clone) and re-run."
+    exit 1
+  fi
+  echo "==> jobs submitted from $REPO run in it"
 fi
 
 # ---------------------------------------------------------------- venv + deps
@@ -65,7 +92,13 @@ echo "==> creating venv (python $PYVER)"
 rm -rf .venv
 uv venv --python "$PYVER" .venv
 echo "==> installing base + hgq dependency group (this takes a few minutes)"
-uv sync --group hgq --no-install-project --python .venv/bin/python
+# keras-hgq2 keeps its old behaviour. Other branches install exactly their uv.lock (--locked fails loudly if the
+# lock is stale instead of re-solving on the login node); since the org/main merge that lock includes
+# masked-linformer, which is fetched from GitHub, so the login node needs outbound HTTPS.
+LOCKED=""
+[ "$HEPATTN_BRANCH" = "keras-hgq2" ] || LOCKED="--locked"
+# shellcheck disable=SC2086  # LOCKED is one flag or nothing
+uv sync --group hgq --no-install-project $LOCKED --python .venv/bin/python
 
 PY="$REPO/.venv/bin/python"
 
@@ -86,6 +119,12 @@ print("hgq2        import OK")
 import hepattn
 from hepattn.keras.maskformer import KerasMaskFormer
 print("hepattn     keras/HGQ2 path imports OK")
+try:  # org/main attention (branches with the org/main merge) imports it
+    import masked_linformer
+    print(f"masked-lin  {masked_linformer.__file__}")
+except ImportError:
+    if os.environ["HEPATTN_BRANCH"] != "keras-hgq2":
+        raise
 assert keras.backend.backend() == "torch", "KERAS_BACKEND must be torch"
 print("\nALL CHECKS PASSED")
 EOF

@@ -1,13 +1,18 @@
 #!/usr/bin/env python
-"""Generate the Polaris HGQ2 training config from the repo's base.yaml.
+"""Generate the Polaris HGQ2 training config from the repo's CLIC configs.
 
 Run from the repo root, inside the venv:
     python 03_make_config.py
 
-Writes ./polaris_hgq.yaml. Everything Polaris-specific (data paths, checkpoint dir,
-batch size, precision) is set here so the repo's committed configs stay clean.
+Writes ./polaris_hgq.yaml. The model is the org float Linformer model (org/main ac0da8f):
+configs/base.yaml with configs/linformer.yaml merged over it, with the network swapped for
+KerasMaskFormer, the HGQ2 quantization spec added, and the matcher solver set to scipy.
+Everything Polaris-specific (data paths, checkpoint dir, batch size, precision) is set here
+so the repo's committed configs stay clean.
 
 Env overrides:
+    HGQ_ATTN       linformer | torch              (default linformer: base.yaml + linformer.yaml;
+                                                   torch: base.yaml alone, dense attention, no sorting)
     HGQ_BATCH      micro-batch per GPU            (default 32)
     HGQ_ACCUM      gradient accumulation steps    (default 4)
     HGQ_CONFIG_OUT output path                    (default ./polaris_hgq.yaml)
@@ -33,10 +38,15 @@ import pathlib
 import yaml
 
 REPO = pathlib.Path(__file__).resolve().parent.parent  # polaris/ -> repo root
-SRC = REPO / "src/hepattn/experiments/clic/configs/base.yaml"
+CONFIGS = REPO / "src/hepattn/experiments/clic/configs"
+SRC = CONFIGS / "base.yaml"
+OVERLAY = CONFIGS / "linformer.yaml"
 DST = pathlib.Path(os.environ.get("HGQ_CONFIG_OUT", REPO / "polaris_hgq.yaml"))
-if not SRC.exists():
-    raise SystemExit(f"cannot find {SRC} — run this from the repo (it lives in polaris/)")
+if not SRC.exists() or not OVERLAY.exists():
+    raise SystemExit(f"cannot find {SRC} or {OVERLAY} — run this from the repo (it lives in polaris/)")
+ATTN = os.environ.get("HGQ_ATTN", "linformer").lower()
+if ATTN not in {"linformer", "torch"}:
+    raise SystemExit(f"HGQ_ATTN must be 'linformer' or 'torch', got {ATTN!r}")
 
 DATA_DIR = os.environ.get("DATA_DIR", os.environ.get("HGQ_DATA", str(REPO / "data/clic")))
 CKPT_DIR = os.environ.get("CKPT_DIR", str(REPO / "hgq_ckpts"))
@@ -62,6 +72,12 @@ BETA_END = float(os.environ.get("HGQ_BETA_END", "4.0e-15"))
 # A setpoint that far away saturates the controller on its first epoch and degenerates
 # into training at max_beta. 1.0e15 is the setpoint that asks a question we can answer
 # in one run: does closed-loop pressure move the reported cost AT ALL?
+# STALE FOR THE ORG/MAIN MODEL: 1.6755e15 (and so this setpoint, INIT_BETA and the PID gain
+# below) was measured on the pre-retarget model, where 99.99% of the EBOPs came from the
+# decoder cross-attention softmax's -1e9 mask fill. The masked-Linformer attend softmax
+# takes no mask, so that term goes away (RETARGET_ORG_MAIN.md section 7, risk 1).
+# Re-measure total EBOPs on the R4b model and re-derive these before any sweep.
+OLD_MODEL_EBOPS = 1.6755e15
 TARGET_EBOPS = float(os.environ.get("HGQ_TARGET_EBOPS", "1.0e15"))
 # Top of the recalibrated sweep -- the beta that moved /f furthest (0.165 bits off its
 # 8-bit init) without destabilising the task loss.
@@ -109,10 +125,24 @@ WARMUP_STEPS = max(1, round(WARMUP_EPOCHS * STEPS_PER_EPOCH))
 LR_MAX = 5.0e-5
 CLIP = 0.1
 
-with open(SRC) as f:
-    cfg = yaml.safe_load(f)
 
-cfg["name"] = "CLIC_pflow_HGQ_polaris"
+def merge(base: dict, overlay: dict) -> dict:
+    """Overlay ``overlay`` on ``base``: dicts merge key by key, every other value is replaced.
+
+    The org overlay repeats every base key of the dicts it touches (decoder_layer_config), so this gives the same
+    effective config as the LightningCLI's replace-a-plain-dict rule (docs/hgq/RETARGET_ORG_MAIN.md section 1.1).
+    """
+    out = dict(base)
+    for key, value in overlay.items():
+        out[key] = merge(out[key], value) if isinstance(value, dict) and isinstance(out.get(key), dict) else value
+    return out
+
+
+cfg = yaml.safe_load(SRC.read_text())
+if ATTN == "linformer":
+    cfg = merge(cfg, yaml.safe_load(OVERLAY.read_text()))
+
+cfg["name"] = "CLIC_pflow_HGQ_polaris" if ATTN == "linformer" else "CLIC_pflow_HGQ_dense_polaris"
 
 d = cfg["data"]
 d["train_path"] = f"{DATA_DIR}/train_clic_fix.root"
@@ -186,20 +216,20 @@ net = m["model"]["init_args"]
 net_cls = m["model"]
 net_cls["class_path"] = "hepattn.keras.maskformer.KerasMaskFormer"
 
-# Quantized encoder/decoder with the linformer attention used by the group's baseline.
-net["encoder"] = {
-    "num_layers": 6,
-    "attn_type": "linformer",
-    "hybrid_norm": True,
-    "value_residual": True,
-    "num_register_tokens": 8,
-    "attn_kwargs": {"num_heads": 16, "linformer_seq_len": 256, "linformer_k": 256},
-}
-net["decoder"]["decoder_layer_config"]["attn_kwargs"].update({
-    "attn_type": "linformer",
-    "linformer_seq_len": 256,
-    "linformer_k": 256,
-})
+# KerasMaskFormer takes the encoder as a plain dict (it builds the layers inside the HGQ2 config
+# scopes) and passes the model dim itself.
+encoder = dict(net["encoder"]["init_args"])
+if encoder.pop("dim") != net["dim"]:
+    raise SystemExit("encoder dim differs from the model dim")
+if ATTN == "torch":
+    # base.yaml asks for flash-varlen, which KerasEncoder coerces to the same dense maths; say so explicitly
+    encoder["attn_type"] = "torch"
+net["encoder"] = encoder
+
+# lap1015_late (base.yaml) is not importable here: 01_setup_env.sh installs with --no-install-project, so
+# `import lap1015` is an empty namespace package and the first match fails. scipy finds the same optimum
+# (ties may break differently) and is what every Polaris run before the org/main merge used.
+net["matcher"]["init_args"]["default_solver"] = "scipy"
 
 # HGQ2 quantization spec. q_type/place are SELECTORS in HGQ2 scopes; the type is
 # chosen via default_q_type.
@@ -256,10 +286,10 @@ for task in net["tasks"]["init_args"]["modules"]:
     if "scale_dict_path" in ia:
         ia["scale_dict_path"] = SCALE
 
-with open(DST, "w") as f:
-    yaml.safe_dump(cfg, f, sort_keys=False)
+DST.write_text(yaml.safe_dump(cfg, sort_keys=False))
 
 print(f"WROTE {DST}")
+print(f"  model      {'base.yaml + linformer.yaml (masked linformer, phi sort)' if ATTN == 'linformer' else 'base.yaml (dense attention)'}")
 print(f"  data       {DATA_DIR}")
 print(f"  ckpts      {CKPT_DIR}")
 print(f"  batch      {BATCH} x accum {ACCUM} x devices {DEVICES} = effective {BATCH * ACCUM * DEVICES}")
@@ -267,10 +297,12 @@ print(f"  precision  {PRECISION}")
 print(f"  lr max     {LR_MAX:.3e}   clip {CLIP}   (Lightning averages over accum: no rescaling)")
 print(f"  epochs     {EPOCHS}")
 if BETA_MODE == "pid":
-    print(f"  beta       PID -> target {TARGET_EBOPS:.3e} EBOPs (measured now: 1.6755e15)")
+    print(f"  beta       PID -> target {TARGET_EBOPS:.3e} EBOPs (measured {OLD_MODEL_EBOPS:.4e} on the PRE-RETARGET model)")
+    if ATTN == "linformer":
+        print("             WARNING: setpoint, init beta and gain are not re-derived for this model; re-measure EBOPs first")
     print(f"             init {INIT_BETA_EFFECTIVE:.2e}  ceiling {MAX_BETA_EFFECTIVE:.2e}  i={PID_I}  warmup {PID_WARMUP_EPOCHS} epoch(s)")
     headroom = math.log10(MAX_BETA_EFFECTIVE / INIT_BETA_EFFECTIVE)
-    err = math.log10(1.6755e15 / TARGET_EBOPS)
+    err = math.log10(OLD_MODEL_EBOPS / TARGET_EBOPS)
     print(
         f"             {headroom:.2f} decades of headroom; at a constant error of {err:.3f}"
         f" the ceiling is reached in ~{headroom / (PID_I * err):.0f} epochs"

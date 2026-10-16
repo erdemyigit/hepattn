@@ -22,7 +22,7 @@
 # CPU-only torch (used only by CLICDataset here; a CUDA torch would load a second set of CUDA libraries into the JAX
 # process). The resolution was checked with `uv pip compile --python-platform x86_64-manylinux_2_28 --python-version
 # 3.12` (torch 2.10.0+cpu, jax-cuda12-plugin 0.11.2, nvidia-cudnn-cu12 9.27):
-#   cd "$WORK_ROOT/hepattn"
+#   cd "$HEPATTN_DIR"   # see polaris/repo_dir.sh
 #   [ -x .venv-jax/bin/python ] || uv venv --python 3.12.0 .venv-jax
 #   uv pip install --python .venv-jax/bin/python \
 #     --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match \
@@ -40,7 +40,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # report real JAX device memory instead of the default 75% preallocation
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-REPO="$WORK_ROOT/hepattn"; cd "$REPO"
+source polaris/repo_dir.sh
+REPO="$HEPATTN_DIR"; cd "$REPO"
 mkdir -p logs
 
 [ -x "$REPO/.venv-jax/bin/python" ] || { echo "ERROR: $REPO/.venv-jax missing; see ONE-TIME SETUP in this file"; exit 1; }
