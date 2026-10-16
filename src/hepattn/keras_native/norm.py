@@ -40,8 +40,9 @@ def get_hybrid_norm_config(
     return attn_norm, dense_post_norm, qkv_norm
 
 
-# torch NORM_TYPES names (hepattn/models/norm.py) this port expresses. CustomLayerNorm and FastLayerNorm only add a
-# dtype cast back to the input dtype, which keras does by its dtype policy, so they are the same ops in fp32.
+# torch NORM_TYPES names (hepattn/models/norm.py) this port expresses. CustomLayerNorm and FastLayerNorm add a dtype
+# cast back to the input dtype, which keras does by its dtype policy, so in fp32 that cast is a no-op. FastLayerNorm
+# is also non-affine (NON_AFFINE_NORMS).
 SUPPORTED_NORMS = ("LayerNorm", "CustomLayerNorm", "FastLayerNorm")
 TORCH_NORMS = ("LayerNorm", "RMSNorm", "CustomLayerNorm", "FastLayerNorm", "CustomRMSNorm", "SimpleRMSNorm", "DyT")
 # torch FastLayerNorm is nn.LayerNorm(elementwise_affine=False): no weight, no bias
