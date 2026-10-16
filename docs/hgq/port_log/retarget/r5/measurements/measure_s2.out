@@ -1,0 +1,118 @@
+dense_ffn float max|n-h|=1.1921e-07 n_diff=5305 absmax=1.089e+00 init_mismatch=0 []
+dense_ffn high max|n-h|=3.5986e-06 n_diff=32 absmax=1.090e+00 init_mismatch=0 []
+dense_ffn low max|n-h|=0.0000e+00 n_diff=0 absmax=1.344e+00 init_mismatch=0 []
+dense_ffn DELTA native {'high': 0.012321561574935913, 'low': 0.5943891666829586} hybrid {'high': 0.012321531772613525, 'low': 0.5943891368806362} ratio 48.24
+dense_innet float max|n-h|=1.1921e-07 n_diff=4873 absmax=9.983e-01 init_mismatch=0 []
+dense_innet high max|n-h|=4.0531e-06 n_diff=128 absmax=9.962e-01 init_mismatch=0 []
+dense_innet low max|n-h|=0.0000e+00 n_diff=0 absmax=1.156e+00 init_mismatch=0 []
+dense_innet DELTA native {'high': 0.009963855147361755, 'low': 0.44222718477249146} hybrid {'high': 0.009963855147361755, 'low': 0.44222718477249146} ratio 44.38
+attn_self float max|n-h|=1.4901e-07 n_diff=8482 absmax=7.918e-01 init_mismatch=0 []
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_2' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_1' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'attn_values' (of type QEinsum) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_6' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_3' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+attn_self high max|n-h|=2.5481e-05 n_diff=1435 absmax=7.873e-01 init_mismatch=0 []
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_10' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_5' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_14' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_7' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+attn_self low max|n-h|=0.0000e+00 n_diff=0 absmax=4.391e+00 init_mismatch=0 []
+attn_self DELTA native {'high': 0.01420525461435318, 'low': 4.3689284324646} hybrid {'high': 0.014205247163772583, 'low': 4.368928469717503} ratio 307.56
+attn_cross float max|n-h|=2.3842e-07 n_diff=7547 absmax=6.906e-01 init_mismatch=0 []
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_18' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_9' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_22' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_11' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+attn_cross high max|n-h|=5.3406e-05 n_diff=1427 absmax=6.953e-01 init_mismatch=0 []
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_26' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_13' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_30' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_15' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+attn_cross low max|n-h|=0.0000e+00 n_diff=0 absmax=3.797e+00 init_mismatch=0 []
+attn_cross DELTA native {'high': 0.014414951205253601, 'low': 3.6990066170692444} hybrid {'high': 0.014414921402931213, 'low': 3.699006602168083} ratio 256.61
+dense_ffn_swiglu float max|n-h|=5.9605e-08 n_diff=4317 absmax=9.120e-01 init_mismatch=0 []
+dense_ffn_swiglu high max|n-h|=3.7849e-06 n_diff=95 absmax=9.207e-01 init_mismatch=0 []
+dense_ffn_swiglu low max|n-h|=0.0000e+00 n_diff=0 absmax=1.031e+00 init_mismatch=0 []
+dense_ffn_swiglu DELTA native {'high': 0.011645287275314331, 'low': 0.46963442862033844} hybrid {'high': 0.011645287275314331, 'low': 0.46963444352149963} ratio 40.33
+dense_innet_swiglu float max|n-h|=5.9605e-08 n_diff=4661 absmax=7.094e-01 init_mismatch=0 []
+dense_innet_swiglu high max|n-h|=4.1462e-06 n_diff=64 absmax=7.169e-01 init_mismatch=0 []
+dense_innet_swiglu low max|n-h|=0.0000e+00 n_diff=0 absmax=7.656e-01 init_mismatch=0 []
+dense_innet_swiglu DELTA native {'high': 0.011228814721107483, 'low': 0.405733197927475} hybrid {'high': 0.011228814721107483, 'low': 0.40573322772979736} ratio 36.13
+lin_enc float max|n-h|=2.0862e-07 n_diff=9171 absmax=6.858e-01 init_mismatch=0 []
+lin_enc high max|n-h|=3.4109e-05 n_diff=5656 absmax=6.909e-01 init_mismatch=0 []
+lin_enc low max|n-h|=0.0000e+00 n_diff=0 absmax=4.109e+00 init_mismatch=0 []
+lin_enc DELTA native {'high': 0.02861914038658142, 'low': 3.9544422328472137} hybrid {'high': 0.02861914038658142, 'low': 3.9544422030448914} ratio 138.17
+lin_q_ca float max|n-h|=2.9802e-07 n_diff=8203 absmax=5.026e-01 init_mismatch=0 []
+lin_q_ca high max|n-h|=7.4774e-05 n_diff=3481 absmax=5.013e-01 init_mismatch=0 []
+lin_q_ca low max|n-h|=0.0000e+00 n_diff=0 absmax=3.938e+00 init_mismatch=0 []
+lin_q_ca DELTA native {'high': 0.02400439977645874, 'low': 3.720886617898941} hybrid {'high': 0.02400447428226471, 'low': 3.720886617898941} ratio 155.01
+lin_kv_ca float max|n-h|=1.7881e-07 n_diff=8807 absmax=5.348e-01 init_mismatch=0 []
+lin_kv_ca high max|n-h|=6.6943e-05 n_diff=3164 absmax=5.446e-01 init_mismatch=0 []
+lin_kv_ca low max|n-h|=0.0000e+00 n_diff=0 absmax=3.531e+00 init_mismatch=0 []
+lin_kv_ca DELTA native {'high': 0.03069809079170227, 'low': 3.7316420525312424} hybrid {'high': 0.0306968092918396, 'low': 3.731642037630081} ratio 121.56
+enc_lin float max|n-h|=7.1526e-07 n_diff=7735 absmax=3.451e+00 init_mismatch=0 []
+enc_lin high max|n-h|=8.8274e-05 n_diff=10220 absmax=3.444e+00 init_mismatch=0 []
+enc_lin low max|n-h|=4.7684e-07 n_diff=3881 absmax=5.303e+00 init_mismatch=0 []
+enc_lin DELTA native {'high': 0.0385967493057251, 'low': 4.539396047592163} hybrid {'high': 0.0386197566986084, 'low': 4.539395809173584} ratio 117.61
+enc_torch float max|n-h|=7.1526e-07 n_diff=7512 absmax=4.091e+00 init_mismatch=0 []
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_306' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_153' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'encoder_l0_attn_values' (of type QEinsum) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_310' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_155' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'encoder_l1_attn_values' (of type QEinsum) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_314' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_157' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_318' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_159' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+enc_torch high max|n-h|=6.1162e-05 n_diff=10058 absmax=4.099e+00 init_mismatch=0 []
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_322' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_161' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_326' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_163' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_330' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_165' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'quantizer_334' (of type Quantizer) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/lib/python3.12/site-packages/keras/src/layers/layer.py:1039: UserWarning: Layer 'multiple_quantizers_167' (of type MultipleQuantizers) was passed an input with a mask attached to it. However, this layer does not support masking and will therefore destroy the mask information. Downstream layers will not see the mask.
+  warnings.warn(
+enc_torch low max|n-h|=7.1526e-07 n_diff=5698 absmax=4.159e+00 init_mismatch=0 []
+enc_torch DELTA native {'high': 0.0195387601852417, 'low': 2.900181531906128} hybrid {'high': 0.019539475440979004, 'low': 2.900181531906128} ratio 148.43
+innet float max|n-h|=2.3842e-07 n_diff=2435 absmax=1.723e+00 init_mismatch=0 []
+innet high max|n-h|=4.0531e-06 n_diff=511 absmax=1.722e+00 init_mismatch=0 []
+innet low max|n-h|=1.1921e-07 n_diff=427 absmax=1.997e+00 init_mismatch=0 []
+innet DELTA native {'high': 0.00996387004852295, 'low': 0.4422271251678467} hybrid {'high': 0.00996387004852295, 'low': 0.4422271251678467} ratio 44.38

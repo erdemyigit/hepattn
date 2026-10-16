@@ -1,0 +1,4 @@
+enc_lin: control 8.2768e-01 tol 1.431e-06 ratio 5.79e+05
+lin_enc: control 3.5701e-01 tol 4.174e-07 ratio 8.55e+05
+lin_kv_ca: control 3.0777e-02 tol 3.578e-07 ratio 8.6e+04
+lin_q_ca: control 5.9919e-01 tol 5.962e-07 ratio 1.01e+06

@@ -1,0 +1,12 @@
+q_ca high x1: attention train-eval 0.0002613 out std 0.122
+q_ca high x4: attention train-eval 0.0008382 out std 1.21
+q_ca high x16: attention train-eval 0.009494 out std 5.89
+q_ca prod x1: attention train-eval 0 out std 0.123
+q_ca prod x4: attention train-eval 0 out std 1.26
+q_ca prod x16: attention train-eval 0 out std 6.08
+enc high x1: attention train-eval 0.0001634 out std 0.116
+enc high x4: attention train-eval 0.0004773 out std 1.3
+enc high x16: attention train-eval 0.002525 out std 6.22
+enc prod x1: attention train-eval 0 out std 0.117
+enc prod x4: attention train-eval 0 out std 1.35
+enc prod x16: attention train-eval 0 out std 6.43

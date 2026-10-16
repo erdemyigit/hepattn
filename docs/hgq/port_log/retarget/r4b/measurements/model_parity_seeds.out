@@ -1,0 +1,16 @@
+seed 0: bools True (4) outs 4.489e-06 (final.mask.pflow_node_logit) losses 4.913e-08 (layer_2.mask.mask_bce) 3.0s
+seed 1: bools True (4) outs 3.619e-06 (final.mask.pflow_node_logit) losses 9.395e-08 (layer_0.mask.mask_bce) 2.4s
+seed 2: bools True (4) outs 3.891e-06 (layer_0.mask.pflow_node_logit) losses 1.066e-07 (layer_2.mask.mask_bce) 2.5s
+seed 3: bools True (4) outs 5.088e-06 (final.mask.pflow_node_logit) losses 3.437e-08 (layer_1.mask.mask_dice) 2.3s
+seed 4: bools True (4) outs 4.192e-06 (final.mask.pflow_node_logit) losses 1.057e-07 (final.regression.l1) 2.5s
+seed 5: bools True (4) outs 4.071e-06 (final.mask.pflow_node_logit) losses 1.075e-07 (layer_3.classification.object_ce) 2.5s
+seed 6: bools True (4) outs 4.708e-06 (final.mask.pflow_node_logit) losses 9.509e-08 (final.mask.mask_bce) 2.5s
+seed 7: bools True (4) outs 3.667e-06 (final.mask.pflow_node_logit) losses 9.128e-08 (layer_3.mask.mask_bce) 2.5s
+seed 8: bools True (4) outs 4.162e-06 (final.mask.pflow_node_logit) losses 1.875e-07 (layer_1.mask.mask_bce) 2.3s
+seed 9: bools True (4) outs 4.382e-06 (final.mask.pflow_node_logit) losses 1.575e-07 (layer_3.classification.object_ce) 2.5s
+seed 10: bools True (4) outs 4.037e-06 (layer_3.mask.pflow_node_logit) losses 1.012e-07 (layer_1.mask.mask_bce) 2.5s
+seed 11: bools True (4) outs 4.656e-06 (layer_2.mask.pflow_node_logit) losses 6.761e-08 (final.incidence.kl_div) 2.4s
+seed 12: bools True (4) outs 4.315e-06 (final.mask.pflow_node_logit) losses 9.730e-08 (layer_3.mask.mask_bce) 2.4s
+seed 13: bools True (4) outs 3.917e-06 (layer_1.mask.pflow_node_logit) losses 1.444e-07 (layer_3.mask.mask_bce) 2.3s
+seed 14: bools True (4) outs 4.235e-06 (layer_2.mask.pflow_node_logit) losses 1.530e-07 (layer_0.mask.mask_bce) 2.5s
+seed 15: bools True (4) outs 4.251e-06 (final.mask.pflow_node_logit) losses 9.603e-08 (layer_2.mask.mask_bce) 2.5s

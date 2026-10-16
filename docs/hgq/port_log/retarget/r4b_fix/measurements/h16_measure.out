@@ -1,0 +1,8 @@
+h16.high.q_ca.eval       max 0.0001656 n_diff 64 rows [[0, 7, 56], [0, 7, 120], [0, 7, 143], [0, 14, 41]] lsb 1.53e-05 size 76800
+h16.high.q_ca.train      max 7.875e-05 n_diff 16 rows [[0, 14, 41]] lsb 1.53e-05 size 76800
+h16.high.kv_ca.eval      max 0.0001437 n_diff 48 rows [[0, 12, 115], [1, 1, 147], [1, 4, 133]] lsb 1.53e-05 size 81920
+h16.high.kv_ca.train     max 0.0001069 n_diff 112 rows [[0, 1, 128], [0, 9, 66], [0, 12, 115], [1, 4, 152]] lsb 1.53e-05 size 81920
+h16.prod.q_ca.eval       max 0 n_diff 0 rows [] lsb 0.00391 size 76800
+h16.prod.q_ca.train      max 0 n_diff 0 rows [] lsb 0.00391 size 76800
+h16.prod.kv_ca.eval      max 0 n_diff 0 rows [] lsb 0.00391 size 81920
+h16.prod.kv_ca.train     max 0 n_diff 0 rows [] lsb 0.00391 size 81920

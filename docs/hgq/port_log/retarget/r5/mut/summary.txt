@@ -1,0 +1,8 @@
+m00_none 103 passed, 15 deselected, 70 warnings in 204.72s (0:03:24)
+m01_no_kv_sort_gather 14 failed, 89 passed, 15 deselected, 70 warnings in 198.57s (0:03:18)
+m02_tail_not_in_renorm 12 failed, 91 passed, 15 deselected, 70 warnings in 197.81s (0:03:17)
+m03_encoder_no_sort 17 failed, 86 passed, 15 deselected, 70 warnings in 192.07s (0:03:12)
+m04_decoder_order_ignored 11 failed, 92 passed, 15 deselected, 70 warnings in 191.72s (0:03:11)
+m05_swiglu_no_silu 24 failed, 79 passed, 15 deselected, 70 warnings in 191.85s (0:03:11)
+m06_project_renorm_off 23 failed, 80 passed, 15 deselected, 70 warnings in 170.74s (0:02:50)
+m07_old_cross_event_bce 1 failed, 102 passed, 15 deselected, 70 warnings in 173.55s (0:02:53)

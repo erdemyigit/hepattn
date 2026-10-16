@@ -1,0 +1,19 @@
+TRAINMODE q_ca high 0.0004330575466156006
+FTRAINMODE q_ca prod 37.33872985839844
+.TRAINMODE enc high 0.0003938525915145874
+FTRAINMODE enc prod 45.369476318359375
+        print("TRAINMODE", shape, spec_name, float((train - evaluated).abs().max()))
+E       assert 0.0004330575466156006 > 0.01
+E        +  where 0.0004330575466156006 = float(tensor(0.0004))
+E        +    where tensor(0.0004) = <built-in method max of Tensor object at 0x164450320>()
+E        +      where <built-in method max of Tensor object at 0x164450320> = tensor([[[[5.9258e-05, 4.6027e-05, 1.9127e-04,  ..., 2.1469e-04,\n           3.5487e-05, 2.0268e-04],\n          [1.5531...5, 7.6089e-05],\n          [1.0507e-04, 4.5326e-05, 5.7533e-05,  ..., 8.2508e-05,\n           1.5932e-04, 3.1963e-05]]]]).max
+E        +        where tensor([[[[5.9258e-05, 4.6027e-05, 1.9127e-04,  ..., 2.1469e-04,\n           3.5487e-05, 2.0268e-04],\n          [1.5531...5, 7.6089e-05],\n          [1.0507e-04, 4.5326e-05, 5.7533e-05,  ..., 8.2508e-05,\n           1.5932e-04, 3.1963e-05]]]]) = <built-in method abs of Tensor object at 0x17559ce60>()
+E        +          where <built-in method abs of Tensor object at 0x17559ce60> = (tensor([[[[ 5.2188e-02,  1.5432e-02, -1.5026e-01,  ..., -1.9034e-02,\n            9.6935e-02,  7.3814e-02],\n          [...916e-02],\n          [-1.9170e-01,  3.5306e-02,  2.1610e-01,  ..., -2.0303e-01,\n            9.7147e-02,  7.9599e-02]]]]) - tensor([[[[ 5.2129e-02,  1.5386e-02, -1.5007e-01,  ..., -1.8819e-02,\n            9.6900e-02,  7.3611e-02],\n          [...840e-02],\n          [-1.9180e-01,  3.5351e-02,  2.1615e-01,  ..., -2.0311e-01,\n            9.7306e-02,  7.9567e-02]]]])).abs
+        print("TRAINMODE", shape, spec_name, float((train - evaluated).abs().max()))
+E       assert 0.0003938525915145874 > 0.01
+E        +  where 0.0003938525915145874 = float(tensor(0.0004))
+E        +    where tensor(0.0004) = <built-in method max of Tensor object at 0x175bb1d10>()
+E        +      where <built-in method max of Tensor object at 0x175bb1d10> = tensor([[[[3.4578e-05, 8.4065e-05, 7.0106e-05,  ..., 1.5571e-05,\n           5.4240e-05, 2.1409e-05],\n          [3.0942...5, 1.6454e-04],\n          [2.6822e-05, 2.6852e-05, 3.0007e-05,  ..., 2.4825e-05,\n           3.1918e-05, 5.8919e-05]]]]).max
+E        +        where tensor([[[[3.4578e-05, 8.4065e-05, 7.0106e-05,  ..., 1.5571e-05,\n           5.4240e-05, 2.1409e-05],\n          [3.0942...5, 1.6454e-04],\n          [2.6822e-05, 2.6852e-05, 3.0007e-05,  ..., 2.4825e-05,\n           3.1918e-05, 5.8919e-05]]]]) = <built-in method abs of Tensor object at 0x175b7df40>()
+E        +          where <built-in method abs of Tensor object at 0x175b7df40> = (tensor([[[[ 6.7169e-02,  1.2201e-01,  2.6645e-02,  ..., -1.3390e-03,\n            1.4446e-01,  6.0884e-02],\n          [...864e-01],\n          [ 4.3174e-02, -1.4911e-01,  4.5651e-02,  ...,  6.0223e-02,\n            8.1711e-03, -2.1810e-01]]]]) - tensor([[[[ 6.7204e-02,  1.2192e-01,  2.6716e-02,  ..., -1.3234e-03,\n            1.4441e-01,  6.0906e-02],\n          [...880e-01],\n          [ 4.3148e-02, -1.4914e-01,  4.5681e-02,  ...,  6.0198e-02,\n            8.1392e-03, -2.1816e-01]]]])).abs
+2 failed, 2 passed, 66 deselected, 14 warnings in 2.56s

@@ -1,0 +1,23 @@
+== m00_unmutated: 107 passed, 16 deselected in 167.56s (0:02:47) EXIT 0
+== m08_core_built_outside_scopes: 2 failed, 105 passed, 16 deselected in 167.81s (0:02:47) EXIT 1
+FAILED test_linformer_parity.py::test_paired_delta_high_vs_coarse
+FAILED test_linformer_parity.py::test_core_leaves_built_at_the_first_forward_take_the_factory_spec
+== m09_no_core_copy_in_warm_start: 1 failed, 106 passed, 16 deselected in 166.96s (0:02:46) EXIT 1
+FAILED test_linformer_parity.py::test_float_cores_warm_start_the_quantized_model
+== m13_callbacks_top_level_walk: 6 failed, 101 passed, 16 deselected in 167.98s (0:02:47) EXIT 1
+FAILED test_beta_reaches_every_leaf.py::test_beta_from_the_callback_scales_every_ebops_term[linformer-scheduler]
+FAILED test_beta_reaches_every_leaf.py::test_beta_from_the_callback_scales_every_ebops_term[linformer-pid]
+FAILED test_beta_reaches_every_leaf.py::test_ebops_monitor_counts_every_leaf_once[linformer]
+FAILED test_beta_reaches_every_leaf.py::test_beta_from_the_callback_scales_every_ebops_term[dense-scheduler]
+FAILED test_beta_reaches_every_leaf.py::test_beta_from_the_callback_scales_every_ebops_term[dense-pid]
+FAILED test_beta_reaches_every_leaf.py::test_ebops_monitor_counts_every_leaf_once[dense]
+== m14_leaves_top_level_only: 4 failed, 103 passed, 16 deselected in 167.27s (0:02:47) EXIT 1
+FAILED test_beta_reaches_every_leaf.py::test_quantized_leaves_include_the_nested_ones[linformer]
+FAILED test_beta_reaches_every_leaf.py::test_ebops_monitor_counts_every_leaf_once[linformer]
+FAILED test_beta_reaches_every_leaf.py::test_quantized_leaves_include_the_nested_ones[dense]
+FAILED test_beta_reaches_every_leaf.py::test_ebops_monitor_counts_every_leaf_once[dense]
+== m15_monitor_reads_ebops_property: 4 failed, 103 passed, 16 deselected in 168.10s (0:02:48) EXIT 1
+FAILED test_beta_reaches_every_leaf.py::test_ebops_monitor_counts_every_leaf_once[linformer]
+FAILED test_beta_reaches_every_leaf.py::test_beta_from_the_callback_scales_every_ebops_term[dense-scheduler]
+FAILED test_beta_reaches_every_leaf.py::test_beta_from_the_callback_scales_every_ebops_term[dense-pid]
+FAILED test_beta_reaches_every_leaf.py::test_ebops_monitor_counts_every_leaf_once[dense]

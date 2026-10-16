@@ -1,0 +1,3 @@
+no_sort outs 3.465e+00 losses 2.389e-02 bools 0/4
+query_update_order outs 3.254e+00 losses 4.965e-04 bools 1/4
+self_attn_norm_kv outs 2.414e+00 losses 5.569e-04 bools 1/4

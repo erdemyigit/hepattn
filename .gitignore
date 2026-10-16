@@ -123,6 +123,8 @@ tmp/
 *.npz
 # S2 golden files (hybrid oracle outputs, 4.8 MB) are test data and must be tracked
 !tests/keras_native/golden/*.npz
+# R4b backend-consistency golden (gate H0)
+!tests/keras/golden/*.npz
 
 # Log files
 src/hepattn/experiments/cld/plots/

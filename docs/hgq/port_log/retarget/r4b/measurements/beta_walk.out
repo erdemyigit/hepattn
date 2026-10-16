@@ -1,0 +1,2 @@
+linformer: beta layers top 165 all 377 missed-by-scheduler 212 (['QEinsum', 'QEinsumDense', 'QSoftmax', 'QUnaryFunctionLUT']); EBOPs total(all leaves own) 2.5091e+11, of which missed 6.6411e+10 (26.4678%); top-level read 2.1167e+11
+dense: beta layers top 219 all 257 missed-by-scheduler 38 (['QUnaryFunctionLUT']); EBOPs total(all leaves own) 1.9073e+15, of which missed 1.9070e+15 (99.9885%); top-level read 1.9073e+15

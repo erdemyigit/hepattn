@@ -1,0 +1,8 @@
+f0-1 high.q_ca.eval: max 0.000759 n_diff 76544
+f0-1 high.q_ca.train: max 0.000561 n_diff 76540
+f0-1 high.kv_ca.eval: max 0.0007988 n_diff 81664
+f0-1 high.kv_ca.train: max 0.0005739 n_diff 81660
+f0-1 prod.q_ca.eval: max 1.129 n_diff 57686
+f0-1 prod.q_ca.train: max 0.1438 n_diff 76529
+f0-1 prod.kv_ca.eval: max 0.6679 n_diff 60287
+f0-1 prod.kv_ca.train: max 0.1393 n_diff 81641

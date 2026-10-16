@@ -1,6 +1,7 @@
 # Plan: move HGQ2 QAT training to pure Keras on JAX
 
-Status: G1 GO; S1-S4 merged into `keras-jax` on 2026-10-15 (see "Status" below). Originally a proposal that waited for G1.
+Status: G1 GO; S1-S4 merged into `keras-jax` on 2026-10-15; retargeted to the org/main float Linformer model (`ac0da8f`)
+on 2026-10-16 ([RETARGET_ORG_MAIN.md](RETARGET_ORG_MAIN.md), stages R0-R5; see "Status" below). Originally a proposal that waited for G1.
 Date: 2026-10-14. Branch: `keras-jax` (pushed only up to `197ede2`), worktree `hepattn-keras-jax`.
 Scope: only the CLIC HGQ2 quantization-aware training, evaluation and export path. The other
 experiments (`atlas_muon`, `trackml`, `tide`, ...) and the float torch model stay on torch and Lightning.
@@ -8,6 +9,19 @@ experiments (`atlas_muon`, `trackml`, `tide`, ...) and the float torch model sta
 All paths are relative to the `hepattn-keras-jax` worktree unless they start with `SP/`, which means
 `.venv-jax/lib/python3.12/site-packages/` (keras 3.15.0, hgq2 0.1.9, jax 0.11.2, scipy 1.18.1).
 Commits are on `keras-jax` (`git log main..keras-jax`).
+
+## Status update (2026-10-16, after the retarget R0-R5)
+
+Both HGQ2 implementations now target org/main `ac0da8f` (`base.yaml` + `linformer.yaml`): masked Linformer
+(`masked_linformer` `dce2e15`, k = 64) in every attention, phi sorting, the PR #8 layers (FastLayerNorm, legacy dense-norm
+placement, `ca_sa_dense`, `self_attn_norm_kv`), SwiGLU everywhere (quantized as two dense halves and an elementwise
+`QEinsum`), bugs 1 (`a4263c1`, per-event mask losses) and 2 (PR #3, class cost on the logits), and the `nan_to_num` /
+`lap1015_late` matcher (solved with scipy). The hybrid reuses the native quantized masked-Linformer core (`keras_native/
+masked_linformer.py`, gate H0). Helen's Linformer (`models/linformer.py`, `keras/linformer.py`, `keras_native/linformer.py`)
+is deleted. Logs: [port_log/R0.md](port_log/R0.md) .. [port_log/R5.md](port_log/R5.md), [port_log/R-merge.md](port_log/R-merge.md).
+Polaris G2 (`15_g2_forward.pbs`) now builds the org model from the generated config in both arms (R5).
+Rows of the table below that mention Helen's Linformer, `mask_bce` `inf` or the cross-event mask losses describe the
+S1-S4 state; the retarget replaced them (R1, R2, R5). The plan's model description in section 3.2 is updated in place.
 
 ## Status (2026-10-15, after the S1-S4 merge)
 
@@ -29,7 +43,7 @@ Logs: `docs/hgq/port_log/` (one file per stage, plus `merge.md`). Lanes `kn/lane
 | S3 all-False-row restore + restore-off control; 1 compile over 3 batches; unsupported configs raise | pass | `test_maskformer.py`, `test_mf_jit.py`; S3.md |
 | S3 quantized MaskFormer vs hybrid golden files | pass, prod (WRAP) rows gated at layer 0 only | `test_mf_golden.py`; S3.md deviations 8, 12 |
 | **G2** (Polaris) jitted native fwd+bwd <= 0.5x hybrid bare-loop step | **not run** | `polaris/15_g2_forward.pbs`, validated on CPU only. Decided at b16 fp32, not the plan's b32 (S3.md "G2 decision rule") |
-| S4 loss rows 1e-4/1e-3 incl. `mask_bce` inf | pass | `test_objective_e2e.py`; [S4.md](port_log/S4.md) Gates (max abs 1.9e-6) |
+| S4 loss rows 1e-4/1e-3 incl. `mask_bce` inf (since R1: finite, per-event, bug 1) | pass | `test_objective_e2e.py`; [S4.md](port_log/S4.md) Gates (max abs 1.9e-6) |
 | S4 task costs to 1e-5; matched total over 100 batches (rel 1e-6) | pass | `test_objective_parity.py`, `test_matching.py` (rel 0.0; identity control worse 100/100) |
 | S4 `pure_callback` gradients = fixed-index reference, 1 callback per step | pass | `test_matching.py` (grad diff 0.0; identity control 0.649) |
 | S4 NaN targets, weighted CE, permutation | pass | S4.md Gates. The NaN control needs a squared residual (deviation 2) |
@@ -43,13 +57,15 @@ hybrid `tests/keras` 104 passed / 8 skipped, same as S1; `tests/polaris` 3 passe
 - G2 is decided at batch 16 fp32, because torch fp32 OOMed at b32 in G1. The G2 torch arms have no optimizer, so b32
   may fit; a reviewer suggests also trying it (S3 review).
 - Torch `mask_bce` / `mask_dice` average across events at B > 1 (probably an upstream bug). S4 keeps the torch
-  semantics. **This needs a user decision** (S4.md deviation 1).
+  semantics. **This needs a user decision** (S4.md deviation 1). *Resolved upstream:* org `a4263c1` (bug 1)
+  normalises per event; torch, hybrid and native follow it since R1 ([R1.md](port_log/R1.md)).
 - The plan's claim that `where(mask, |out - nan|, 0)` gives NaN gradients is false in JAX for l1 (S4.md deviation 2).
 - The hybrid's `quant_losses()` counts the task heads twice; S5 must use `stateless_call(return_losses=True)`
   (S3.md deviation 9). Eager `model.losses` over-counts too.
 - Exact mask equality only in float; prod WRAP rows gated before the first mask feedback (S3.md deviations 8, 11).
 - Golden rows measured at 0 have tolerance 0; re-measure on the first Linux/GPU run (S2.md deviation 7, S3.md).
-- The single Linformer layer separates high/low only 5.3x/8.5x in the hybrid itself (S2.md deviation 6).
+- The single Linformer layer separates high/low only 5.3x/8.5x in the hybrid itself (S2.md deviation 6). *Gone with
+  Helen's layer:* the masked-Linformer golden cases separate >= 121x ([R5.md](port_log/R5.md)).
 
 **What remains:**
 - Polaris: G2 (`bash polaris/submit.sh 15_g2_forward.pbs`), then G3 (S5) and G4 (S8).
@@ -63,7 +79,7 @@ hybrid `tests/keras` 104 passed / 8 skipped, same as S1; `tests/polaris` 3 passe
   `particle_valid`); S7 converter + export (key quantizer variables by leaf name and position, not `var.path`);
   S8 Polaris validation.
 - Minor review items not fixed in the lanes: `LinformerAttention` accepts any keyword (`**_ignored`, as this plan's
-  3.2 row asks); the G2 hybrid-07 arm calls `quant_losses()` inside the timed step (as 07 does); dense-attention
+  3.2 row asks; *gone*: the class is deleted and `build_attention` raises on unknown keys since R2); the G2 hybrid-07 arm calls `quant_losses()` inside the timed step (as 07 does); dense-attention
   quantized parity is loose (S3.md deviation 12). Fixed in the critique ([critique.md](port_log/critique.md)): the
   JIT gate now rejects NaN gradients, a test pins the `>=` mask threshold, G2 records `hepattn.__file__`, and the
   `MaskFormer` docstring no longer calls eager `model.losses` equivalent.
@@ -187,13 +203,13 @@ not a fallback: it is unmeasured, it compiles through the same XLA, and HGQ2's m
 | Component | Torch construct today | Keras-native replacement |
 |---|---|---|
 | Dense / FFN / heads | `KerasDense(nn.Module)`, built lazily at the first forward (`src/hepattn/keras/dense.py:63,174-190`). SwiGLU uses `torch.chunk` + `F.silu` (198-199). | A `Layer` that builds its HGQ2 sublayers in `build(input_shape)` from the static shape. SwiGLU becomes `keras.ops.split` + `keras.activations.silu`. `training` is passed through `call`. |
-| Linformer (CLIC uses it in the encoder and decoder, `pflow_hgq.yaml:142`) | `proj_k`/`proj_v` are `nn.Parameter` (`src/hepattn/keras/linformer.py:70-71`). `keep` is built by an in-place slice write (131-133). | `add_weight` with `keras.initializers.RandomUniform(-1/sqrt(k), 1/sqrt(k))`, and `keep = keras.ops.pad(mask, ...)`. **Keep Helen's semantics:** `kv_mask`, `q_mask` and `qkv_norm` stay ignored (`**_ignored`, lines 34 and 96). |
+| Linformer (org/main PR #9: masked Linformer in every attention, k = 64; RETARGET_ORG_MAIN.md section 5.6) | `Attention(attn_type="linformer")` with `proj_k`/`proj_v` (seq_len, k) `nn.Parameter`s; `masked_linformer.project` (encoder, decoder query self-attention) and `attend` (decoder cross-attentions), keys gathered by `kv_sort_idx` first (`src/hepattn/models/attention.py:317-331`) | A branch of native `Attention` on the quantizable core of `keras_native/masked_linformer.py` (`AttendCore`, `ProjectCore`: `QEinsumDense` sequence projections, renorm by a 1-bit-mask `QEinsum` and a rank-2 rsqrt `QUnaryFunctionLUT`, unmasked `QSoftmax` over the k slots). The core kind is fixed per call site (static graph). The hybrid's `KerasAttention` runs the same core under the torch backend (gate H0, [R4b.md](port_log/R4b.md)). *Before the retarget this row kept Helen's layer (`kv_mask`, `q_mask`, `qkv_norm` ignored); that layer is deleted.* |
 | Dense attention (`attn_type: torch`; used by parity tests) | `unflatten`/`transpose`, torch norms, `merge_masks` with `torch.full` (`src/hepattn/models/attention.py:62,64`) | `keras.ops.reshape`/`transpose`; `merge_masks` via `keras.ops.logical_and`; `keras.layers.LayerNormalization(epsilon=1e-5)` (the Keras default is 1e-3). The value residual is returned explicitly instead of written into a dict. |
 | Encoder, Residual, register tokens | torch `Residual`/LayerNorm/LayerScale; `register_tokens = nn.Parameter(torch.randn(1,8,dim))` (`src/hepattn/keras/encoder.py:111`) | A Keras `Residual` (pre/post/hybrid norm). Register tokens use `add_weight(RandomNormal(stddev=1))` + `keras.ops.broadcast_to` + `keras.ops.concatenate`, then a static slice. DropPath stays off (`drop_path=0`). If it is ever enabled, it needs `keras.random.SeedGenerator` state. |
 | Input net + Fourier posenc | in-place `x += posenc` (`src/hepattn/models/input.py:57`). `B` is a `Buffer` (`src/hepattn/models/posenc.py:131`); in-place `xs @= B` (137). | Functional. `B` becomes a **non-trainable** `add_weight`, so it is saved and restored. Its value is ported from torch for parity. |
 | Decoder (4 layers) | Inherited torch forward (`src/hepattn/keras/decoder.py:23,82`). Tasks OR their masks in place (`src/hepattn/models/decoder.py:276`). The boolean-mask scatter at line 291 and the gather at `src/hepattn/utils/model_utils.py:17` have data-dependent shapes. | A static Python loop over layers and tasks; `keras.ops.logical_or`. There is a single input type (`node`, `pflow_hgq.yaml:105,116`), so `key_is_node` is all True: the scatter and the `unmerge_inputs` gather become identity / static slices. Use `keras.ops.stop_gradient` for `.detach()`. **All-False-row restore** (`unmask_all_false`, default True, `decoder.py:40,296`): `keras.ops.where(keras.ops.all(~m, axis=-1, keepdims=True), True, m)`. `initial_queries` becomes `add_weight`. Outputs are a nested dict pytree per layer. |
 | Classification task | `torch.softmax`; `loss_weights` buffer (`src/hepattn/models/task.py:187-193,212`) | `keras.ops.softmax`; class weights are a constant. |
-| Hit-mask task | `torch.einsum`, then the in-place `logit[~valid] = finfo.min` (`task.py:557,562`); the quantized variant uses `masked_fill`; `attn_mask = sigmoid(.detach()) >= thresh` (571) | A `QEinsum`/einsum built through `LayerFactory`, then `keras.ops.where(valid, logit, finfo.min)`. **Keep the `finfo.min` sentinel for parity:** `mask_bce` is `inf` at random init in both frameworks (`docs/hgq/PARITY.md`, "Known, deliberate numerical semantics"). |
+| Hit-mask task | `torch.einsum`, then the in-place `logit[~valid] = finfo.min` (`task.py:557,562`); the quantized variant uses `masked_fill`; `attn_mask = sigmoid(.detach()) >= thresh` (571) | A `QEinsum`/einsum built through `LayerFactory`, then `keras.ops.where(valid, logit, finfo.min)`. **Keep the `finfo.min` sentinel for parity** (torch writes it too). Since org `a4263c1` (bug 1) padded nodes are multiplied by the event's pad mask, so `mask_bce` stays finite at random init and on dummy targets ([R1.md](port_log/R1.md)); before, it was `inf` in both frameworks. |
 | Incidence task | `QEinsum` + `QSoftmax(axis=1)` via a class swap (`src/hepattn/keras/tasks.py:51-60,99`) | Built directly through `LayerFactory`. The class-swap mechanism is dropped. |
 | Incidence-based regression | `torch.cat`/`bmm`; `get_proxy_feats` uses topk on axis -2 + `torch.scatter` (`src/hepattn/utils/masks.py:304-307`), and in-place column writes (`task.py:1623-1632`) | Transpose, then `keras.ops.top_k`, then a `keras.ops.one_hot` sum to build the boolean mask. Columns are rebuilt with `keras.ops.stack`/`concatenate` (or `keras.ops.slice_update`). Uses `keras.ops.cosh`, `keras.ops.einsum`, and `FeatureScaler` rewritten in `keras.ops` (`log`/`log1p`/`sqrt`). |
 | Quantization losses | `quant_losses()` walks the torch module tree (`src/hepattn/keras/maskformer.py:96-106`) | The `losses` list returned by `stateless_call(..., return_losses=True)` (`SP/keras/src/layers/layer.py:1089-1189`). |
@@ -205,7 +221,8 @@ The torch versions use boolean indexing (`src/hepattn/models/loss.py:78-79,212-2
 `task.py:828-829,1589-1590`), which gives data-dependent shapes. Every masked reduction becomes
 `sum(where(m, l, 0)) / maximum(sum(m), 1)` with `keras.ops.where`/`sum`/`maximum`, keeping each torch
 normalisation exactly:
-- `mask_bce`: the sum per object / the valid count clamped at 1 (`loss.py:225`), then the mean over valid objects.
+- `mask_bce`, `mask_dice`: per object over its OWN event's valid nodes (count clamped at 1), then the mean over the valid
+  objects (`_mean_over_valid_objects`, org `a4263c1`, bug 1; R1). Before R1 the torch formula averaged across events.
 - Weighted `object_ce`: `F.cross_entropy(weight=...)` means sum(w_i l_i)/sum(w_i) (`loss.py:37`). It ignores the mask.
 - `mask_dice`, `kl_div` (`loss[mask].mean()`, `loss.py:263`), regression `l1`: as in torch.
 - BCE with logits in the stable `keras.ops.softplus` form. Costs are cast to fp32 explicitly; this replaces
@@ -454,7 +471,10 @@ S5 needs lanes A and B. S8 needs all four lanes.
 - **S2:**
   - Float parity at the PARITY.md tolerances: dense 1e-6/1e-5; attention 1e-6/1e-5; `encoder.clic_shaped`
     2e-6/2e-5; hybrid-norm and register-token rows; Linformer 2e-5/2e-4 (`tests/keras/test_linformer_parity.py:39,52`).
-  - The fully-masked-query key-independence test, with its positive control (`test_linformer_parity.py:72-73`).
+    *Retarget (R2): the masked-Linformer rows are against `masked_linformer.attend`/`project` and org `Attention` at 2x
+    measured (`tests/keras_native/test_masked_linformer.py`).*
+  - The fully-masked-query key-independence test, with its positive control (`test_linformer_parity.py:72-73`). *Since R2
+    the masked attend makes it exact for the Linformer too.*
   - Quantized parity against the golden files: first record the measured maxima, then fix each tolerance
     at 2x that. The paired delta criterion must reproduce: high bitwidth ~0.30 vs low bitwidth ~31, with
     at least 10x separation (PARITY.md, "Quantized deltas"). If the quantizers were inert, the two would not separate.
@@ -470,7 +490,7 @@ S5 needs lanes A and B. S8 needs all four lanes.
     EBOPs every step in both, and the same precision: `07_profile.py:134` runs bf16 autocast, so either
     run the JAX arm in `mixed_bfloat16` or rerun 07 in fp32). If not, stop before S4-S8 merge.
 - **S4:**
-  - `maskformer.loss` rows at 1e-4/1e-3, including the `mask_bce` `inf` semantics.
+  - `maskformer.loss` rows at 1e-4/1e-3, including the `mask_bce` `inf` semantics (*since R1 every row is finite: bug 1*).
   - Each task's cost matrix matches the torch `task.cost` to 1e-5.
   - Over 100 random batches, the **matched total cost** equals the torch `Matcher`'s (rel 1e-6).
     Indices are not compared, because ties can differ.

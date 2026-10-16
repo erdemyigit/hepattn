@@ -1,0 +1,2 @@
+high native np.float64(0.13103069365024567) hybrid np.float64(0.1310243457555771) diff 6.348e-06
+low native np.float64(16.154367603361607) hybrid np.float64(16.154367864131927) diff 2.608e-07

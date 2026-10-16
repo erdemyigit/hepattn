@@ -1,0 +1,15 @@
+OK   (expected) E[:n] attend  QEinsumDense bhqn,nk->bhqk                       -> ['Input', 'EinsumDense'] firmware ['myproject.cpp']
+OK   (expected) F[:n] attend  QEinsumDense bhqk,nk->bhqn                       -> ['Input', 'EinsumDense'] firmware ['myproject.cpp']
+OK   (expected) E project     QEinsumDense bhnd,nk->bhkd                       -> ['Input', 'EinsumDense'] firmware ['myproject.cpp']
+FAIL (expected) GAP kept attend   QEinsum bqn,znk->bqk (1-bit mask, table lane) -> AssertionError: Error in eq: bqn,znk->bqk: Batch dim mismatch for the inputs and output.
+FAIL (expected) GAP kept project  QEinsum bn,znk->bk (1-bit mask, table lane)  -> AssertionError: Error in eq: bn,znk->bk: Batch dim mismatch for the inputs and output.
+OK   (expected) kept attend   S7 form QEinsumDense bqn,nk->bqk (1-bit mask, W kernel) -> ['Input', 'EinsumDense'] firmware ['myproject.cpp']
+OK   (expected) kept project  S7 form QEinsumDense bn,nk->bk (1-bit mask, W kernel) -> ['Input', 'EinsumDense'] firmware ['myproject.cpp']
+OK   (expected) rsqrt         QUnaryFunctionLUT rank 2, production lanes       -> ['Input', 'UnaryLUT'] firmware ['myproject.cpp']
+OK   (expected) mul_k         QEinsum bhqk,bqk->bhqk                           -> ['Input', 'Input', 'Einsum'] firmware ['myproject.cpp']
+OK   (expected) qk            QEinsum bhqd,bhnd->bhqn                          -> ['Input', 'Input', 'Einsum'] firmware ['myproject.cpp']
+OK   (expected) pv            QEinsum bhqn,bhnd->bhqd                          -> ['Input', 'Input', 'Einsum'] firmware ['myproject.cpp']
+OK   (expected) softmax       QSoftmax over the k slots, no mask               -> ['Input', 'Softmax'] firmware ['myproject.cpp']
+OK   (expected) SwiGLU        QEinsum bnc,bnc->bnc                             -> ['Input', 'Input', 'Einsum'] firmware ['myproject.cpp']
+FAIL (expected) CONTROL rsqrt QUnaryFunctionLUT rank 3 (must fail)             -> RuntimeError: Exception encountered when calling Quantizer.call().
+hls4ml 1.3.0, keras 3.15.0; 0 unexpected

@@ -1,0 +1,15 @@
+### generated /private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/r5/g2/g2_tiny.config.yaml
+| mode | batch | median ms | p10-p90 ms | first step s | peak dev GB | peak RSS GB | grads nonzero | penalty |
+|---|---|---|---|---|---|---|---|---|
+| jax | 2 | 59.9 | 52.8-71.5 | 11.9 | - | 1.94 | 416/416 | 0.1312 |
+| jax | 4 | 33.3 | 33.2-35.2 | 11.1 | - | 1.91 | 416/416 | 0.1312 |
+| jax | 8 | 62.1 | 61.5-66.0 | 11.2 | - | 2.01 | 416/416 | 0.1312 |
+| hybrid-07 | 2 | 327.3 | 317.1-338.0 | 6.1 | - | 0.79 | 371/416 | 0.1643 |
+| hybrid-07 | 4 | 369.1 | 360.5-375.8 | 1.9 | - | 0.86 | 371/416 | 0.1643 |
+| hybrid-surrogate | 2 | 321.8 | 312.5-325.3 | 0.3 | - | 0.73 | 416/416 | 0.1312 |
+| hybrid-surrogate | 4 | 390.3 | 375.5-476.5 | 0.7 | - | 0.84 | 416/416 | 0.1312 |
+| batch | jax ms | hybrid-07 ms | jax / hybrid-07 (G2: <= 0.5) | hybrid-surrogate ms | jax / hybrid-surrogate |
+|---|---|---|---|---|---|
+| 2 | 59.9 | 327.3 | 0.183 | 321.8 | 0.186 |
+| 4 | 33.3 | 369.1 | 0.090 | 390.3 | 0.085 |
+| 8 | 62.1 | - | - | - | - |

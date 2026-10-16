@@ -43,10 +43,13 @@ criterion than any float tolerance.
 - **Large max-relative errors on near-zero elements are expected** (the rel column is
   dominated by elements where the reference is ~0); the combined atol+rtol criterion
   is the pass/fail bar, and the abs column is the physically meaningful one there.
-- **`mask_bce` can be `inf` on randomly-initialized models** (the mask task pads
-  invalid-key logits to `finfo.min`, which saturates BCE): the torch reference itself
-  is `inf` and the keras twin reproduces it exactly. Trained models do not sit in
-  this regime.
+- **Padded mask logits are `finfo.min`** (as torch writes them). Since org `a4263c1`
+  (bug 1, per-event mask losses) the padded-node terms are multiplied by the event's
+  pad mask, so `mask_bce` is finite at random init and on dummy targets; before, it was
+  `inf` in both frameworks.
+- **Linformer rows are org/main's masked Linformer** (`masked_linformer` `dce2e15`,
+  PR #9), whose core the hybrid runs from `hepattn.keras_native.masked_linformer`
+  under the torch backend. Helen's Linformer layer is gone.
 - Regression outputs in `mode=scale` are exponentially scaled, so their max-abs error
   scales with the output magnitude; the relative error (~1e-5, i.e. fp32 precision)
   is the meaningful metric.
