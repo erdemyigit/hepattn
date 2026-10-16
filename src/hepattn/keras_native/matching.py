@@ -1,9 +1,11 @@
 """Hungarian matching on the host inside a jitted JAX step, and the output permutation.
 
 ``host_match`` is the numpy/scipy logic of ``hepattn.models.matcher.Matcher`` (scipy solver, no
-``query_valid_mask``): per problem, keep the first ``n_valid`` target rows of the transposed cost, solve
-with ``scipy.optimize.linear_sum_assignment``, then append the unmatched prediction indices in ascending
-order (``matcher.py:96-104``). Valid targets must come first in each event, as in torch.
+``query_valid_mask``): replace non-finite costs as ``Matcher._prepare_costs`` does (NaN and +inf by
+``big = f32max / 10``, -inf by ``-big``), keep the first ``n_valid`` target rows of the transposed cost
+per problem, solve with ``scipy.optimize.linear_sum_assignment``, then append the unmatched prediction
+indices in ascending order (``matcher.match_individual``). Valid targets must come first in each event,
+as in torch.
 
 ``match`` calls it through ``jax.pure_callback`` on ``stop_gradient(costs)`` (plan section 3.4, option A),
 so one compiled step solves every layer and event with one host call. JAX-backend only.
@@ -18,6 +20,8 @@ import numpy as np
 from keras import ops
 from scipy.optimize import linear_sum_assignment
 
+# The finite sentinel of matcher.Matcher._prepare_costs.
+_BIG = float(np.finfo(np.float32).max / 10)
 _POOLS: dict[int, ThreadPoolExecutor] = {}
 _POOLS_LOCK = threading.Lock()
 
@@ -44,7 +48,7 @@ def match_one(cost_t: np.ndarray, n_valid: int) -> np.ndarray:
 
 def host_match(costs: np.ndarray, target_valid: np.ndarray, n_jobs: int = 1) -> np.ndarray:
     """Match a stack of problems. costs [M, P, T] (prediction x target), target_valid [M, T] -> [M, P] int32."""
-    costs = np.asarray(costs, dtype=np.float32)
+    costs = np.nan_to_num(np.asarray(costs, dtype=np.float32), nan=_BIG, posinf=_BIG, neginf=-_BIG)
     lengths = np.asarray(target_valid, dtype=np.bool_).sum(axis=1)
     costs_t = costs.swapaxes(1, 2)
     if n_jobs <= 1 or len(costs_t) <= 1:

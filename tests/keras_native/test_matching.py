@@ -8,6 +8,7 @@ import keras
 import numpy as np
 import pytest
 import torch
+from scipy.optimize import linear_sum_assignment
 
 from hepattn.keras_native import matching
 from hepattn.keras_native import objective as O
@@ -26,23 +27,59 @@ def _matched_total(costs: np.ndarray, valid: np.ndarray, idx: np.ndarray) -> np.
     return np.array(totals)
 
 
-def _random_problem(rng, batch, num=P):
+# The finite sentinel of torch Matcher._prepare_costs (matcher.py), written out independently of matching._BIG.
+BIG = float(np.finfo(np.float32).max / 10)
+
+
+def _random_problem(rng, batch, num=P, nonfinite=False):
+    """Random costs; with ``nonfinite``, 2 NaN, 2 -inf and 2 +inf entries in the valid target columns of each event."""
     costs = rng.normal(size=(batch, num, num)).astype(np.float32)
     lengths = rng.integers(0, num + 1, size=batch)
     lengths[rng.random(batch) < 0.15] = num  # some events with every target valid
     valid = np.arange(num)[None] < lengths[:, None]
+    if nonfinite:
+        for b in np.flatnonzero(lengths > 0):
+            pred = rng.choice(num, size=6, replace=False)
+            costs[b, pred, rng.integers(0, lengths[b], size=6)] = [np.nan, np.nan, -np.inf, -np.inf, np.inf, np.inf]
     return costs, valid
 
 
-def test_matched_total_cost_equals_torch_matcher_over_100_batches():
+def _sanitised(costs):
+    return np.nan_to_num(costs, nan=BIG, posinf=BIG, neginf=-BIG)
+
+
+def test_sentinel_equals_torch_prepare_costs():
+    """``matching._BIG`` and the local ``BIG`` equal the sentinel torch ``Matcher._prepare_costs`` writes for
+    NaN/+inf/-inf. scipy gives the same assignment for f32max and f32max/10, so the matched-total tests cannot
+    see a wrong sentinel; this pins the value itself.
+    """
+    costs = np.array([[[np.nan, np.inf], [-np.inf, 0.5]]], dtype=np.float32)
+    prepared, _ = Matcher(default_solver="scipy", adaptive_solver=False)._prepare_costs(torch.from_numpy(costs))  # noqa: SLF001
+    prepared = prepared.swapaxes(1, 2)  # back to [B, P, T]
+    torch_big = float(prepared[0, 0, 0])
+    assert torch_big == float(prepared[0, 0, 1]) == -float(prepared[0, 1, 0])
+    assert prepared[0, 1, 1] == np.float32(0.5)
+    assert np.float32(matching._BIG) == np.float32(torch_big)  # noqa: SLF001
+    assert np.float32(BIG) == np.float32(torch_big)
+    np.testing.assert_array_equal(_sanitised(costs), prepared)
+
+
+@pytest.mark.parametrize("nonfinite", [False, True], ids=["finite", "nan-and-inf"])
+def test_matched_total_cost_equals_torch_matcher_over_100_batches(nonfinite):
+    """Matched totals equal torch ``Matcher`` (scipy) to rel 1e-6. With NaN/inf costs both sanitise to
+    +-f32max/10 first; the totals are then taken on the sanitised costs and the indices must be identical.
+    """
     rng = np.random.default_rng(0)
     jit_match = jax.jit(matching.match)
     torch_matcher = Matcher(default_solver="scipy", adaptive_solver=False, parallel_solver=True, n_jobs=4)
     worst_rel, identity_worse = 0.0, 0
     for _ in range(100):
-        costs, valid = _random_problem(rng, int(rng.integers(1, 9)))
+        costs, valid = _random_problem(rng, int(rng.integers(1, 9)), nonfinite=nonfinite)
         idx = np.asarray(jit_match(costs, valid))
         ref = torch_matcher(torch.from_numpy(costs), torch.from_numpy(valid)).numpy()
+        if nonfinite:
+            np.testing.assert_array_equal(idx, ref)
+            costs = _sanitised(costs)
         total, total_ref = _matched_total(costs, valid, idx), _matched_total(costs, valid, ref)
         rel = np.abs(total - total_ref) / np.maximum(np.abs(total_ref), 1e-12)
         worst_rel = max(worst_rel, float(rel.max()))
@@ -54,7 +91,34 @@ def test_matched_total_cost_equals_torch_matcher_over_100_batches():
         identity_worse += int((identity[has_targets] > total[has_targets] + 1e-3).all())
     print(f"matched total cost: max rel diff to torch Matcher {worst_rel:.2e}; identity worse in {identity_worse}/100 batches")
     assert worst_rel <= 1e-6
-    assert identity_worse == 100
+    # with +-f32max/10 entries the totals cannot resolve O(1) differences; the identical indices are the check there
+    if not nonfinite:
+        assert identity_worse == 100
+
+
+def test_non_finite_costs_need_the_sanitising_step():
+    """Control for the nan-and-inf row: scipy rejects NaN and -inf (the torch Matcher replaces them first);
+    -inf entries become -f32max/10 and are matched, NaN and +inf become +f32max/10 and are avoided.
+    Event 1 holds the +inf case: mapping +inf to -f32max/10 would pick its diagonal.
+    """
+    cost = np.array([[0.0, 1.0], [1.0, 0.0]], np.float32)
+    for bad in (np.nan, -np.inf):
+        raw = cost.copy()
+        raw[0, 1] = bad
+        with pytest.raises(ValueError, match="invalid numeric entries"):
+            linear_sum_assignment(raw)
+    plus_inf = cost.copy()
+    plus_inf[0, 0] = np.inf
+    linear_sum_assignment(plus_inf)  # accepted by scipy; sanitised anyway, as in torch
+
+    costs = np.zeros((2, 2, 2), np.float32)
+    costs[0, 0, 1] = -np.inf  # prediction 0 -> target 1 is attractive
+    costs[0, 1, 1] = np.nan  # prediction 1 -> target 1 is forbidden
+    costs[1] = [[np.inf, 0.0], [0.0, 1.0]]  # prediction 0 -> target 0 is forbidden
+    valid = np.ones((2, 2), bool)
+    ref = Matcher(default_solver="scipy", adaptive_solver=False)(torch.from_numpy(costs), torch.from_numpy(valid)).numpy()
+    np.testing.assert_array_equal(ref, [[1, 0], [1, 0]])  # target 0 <- prediction 1, target 1 <- prediction 0
+    np.testing.assert_array_equal(matching.host_match(costs, valid), ref)
 
 
 def test_unmatched_default_indices_equal_torch_matcher():

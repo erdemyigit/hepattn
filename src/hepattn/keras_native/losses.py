@@ -1,20 +1,19 @@
 """``keras.ops`` ports of the cost and loss functions in ``hepattn.models.loss`` that the CLIC config uses.
 
+The semantics are those of org/main ``ac0da8f``, which includes ``a4263c1`` (per-event mask losses) and
+PR #3 (``a2bc9c7``, the class cost reads logits).
+
 Every function takes arrays with static shapes and returns float32. Boolean indexing in torch
-(``x[mask]``, a data-dependent shape) becomes ``sum(where(mask, x, 0)) / maximum(count, 1)``. The
-normalisation is the torch one, with one deliberate difference: when the mask selects nothing, torch
-takes the mean of an empty tensor (NaN) and these functions return 0.
+(``x[mask]``, a data-dependent shape) becomes ``sum(where(mask, x, 0)) / maximum(count, 1)``. One
+deliberate difference stays for ``kl_div_loss`` and ``regr_l1_loss``: when the mask selects nothing,
+torch takes the mean of an empty tensor (NaN) and these functions return 0. ``mask_bce_loss`` and
+``mask_dice_loss`` have no such difference: torch now divides by ``clamp_min(1.0)`` and also gives 0.
 
-Two torch semantics are kept on purpose, because the hybrid trains with them:
-
-- ``mask_bce_loss`` and ``mask_dice_loss`` index the objects to ``[Nv, N]`` and then multiply by
-  ``input_pad_mask.unsqueeze(1)`` (``[B, 1, N]``). That broadcasts to ``[B, Nv, N]``: each valid object of
-  each event is weighted by the node mask of EVERY event ``b`` and divided by ``b``'s node count, and the
-  mean runs over ``B * Nv`` terms. Here this is an einsum over a second batch axis. With a finfo.min logit
-  at a padded node and a target of 1 there, the cross-event term overflows to ``inf``
-  (``docs/hgq/PARITY.md``, "mask_bce can be inf").
-- ``object_ce_cost`` receives the class PROBABILITIES (``ObjectClassificationTask.cost`` passes
-  ``*_class_prob``) and applies a softmax again.
+- ``mask_bce_loss`` and ``mask_dice_loss`` (``a4263c1``): each object is reduced over the valid
+  constituents of its OWN event, then the mean runs over the valid objects
+  (``loss._mean_over_valid_objects``). Padded nodes are multiplied by that event's pad mask (0), so a
+  ``finfo.min`` logit with target 1 at a padded node gives a finite loss.
+- ``object_ce_cost`` (PR #3) receives LOGITS and applies one softmax.
 
 Shapes: ``B`` batch, ``P`` predicted objects (queries), ``T`` target objects, ``N`` constituents (nodes),
 ``C`` classes (including the null class), ``F`` regression fields.
@@ -46,14 +45,14 @@ def _count(mask):
 # Costs have shape [B, P, T]. Callers apply stop_gradient; invalid targets are dropped by the matcher.
 
 
-def object_ce_cost(class_probs, target_class):
-    """``loss.object_ce_cost``: ``-softmax(class_probs)[b, p, target_class[b, t]]``.
+def object_ce_cost(logits, target_class):
+    """``loss.object_ce_cost``: ``-softmax(logits)[b, p, target_class[b, t]]``.
 
     Args:
-        class_probs: [B, P, C]. The task passes probabilities, which are soft-maxed again (torch semantics).
+        logits: [B, P, C] class logits (``ObjectClassificationTask.cost`` passes ``*_logit``).
         target_class: [B, T] integer class labels in [0, C).
     """
-    probs = ops.softmax(f32(class_probs), axis=-1)
+    probs = ops.softmax(f32(logits), axis=-1)
     b, p, _ = probs.shape
     index = ops.broadcast_to(ops.expand_dims(ops.cast(target_class, "int32"), 1), (b, p, target_class.shape[1]))
     return -ops.take_along_axis(probs, index, axis=2)
@@ -110,19 +109,14 @@ def object_ce_loss(logits, target_class, weight=None):
     return ops.sum(w * nll) / ops.sum(w)
 
 
-def _cross_event_object_mean(term, object_valid_mask):
-    """Mean of ``term`` [B (pad event b), B (object event q), P] over b and the valid objects (q, p).
-
-    This is the torch broadcast of ``x[object_valid_mask] * input_pad_mask.unsqueeze(1)`` (module docstring).
-    """
-    batch = object_valid_mask.shape[0]
-    valid = ops.broadcast_to(ops.expand_dims(object_valid_mask, 0), term.shape)
-    total = ops.sum(ops.where(valid, term, 0.0))
-    return total / ops.maximum(batch * _count(object_valid_mask), 1.0)
+def _mean_over_valid_objects(per_object, object_valid_mask):
+    """``loss._mean_over_valid_objects``: ``sum(per_object * valid) / max(sum(valid), 1)``. per_object [B, P]."""
+    weight = f32(object_valid_mask)
+    return ops.sum(per_object * weight) / ops.maximum(ops.sum(weight), 1.0)
 
 
 def mask_bce_loss(logits, targets, object_valid_mask, input_pad_mask, sample_weight=None):
-    """``loss.mask_bce_loss`` with both masks, including the cross-event broadcast of torch.
+    """``loss.mask_bce_loss`` with both masks: per object, the mean over its own event's valid nodes.
 
     Args:
         logits: [B, P, N] (outputs already permuted to target order).
@@ -135,23 +129,23 @@ def mask_bce_loss(logits, targets, object_valid_mask, input_pad_mask, sample_wei
     if sample_weight is not None:
         loss *= f32(sample_weight)
     pad = f32(input_pad_mask)
-    counts = ops.maximum(ops.sum(pad, axis=-1), 1.0)  # [B]
-    term = ops.einsum("qpn,bn->bqp", loss, pad) / counts[:, None, None]
-    return _cross_event_object_mean(term, object_valid_mask)
+    counts = ops.maximum(ops.sum(pad, axis=-1, keepdims=True), 1.0)  # [B, 1]
+    per_object = ops.sum(loss * ops.expand_dims(pad, 1), axis=-1) / counts
+    return _mean_over_valid_objects(per_object, object_valid_mask)
 
 
 def mask_dice_loss(logits, targets, object_valid_mask, input_pad_mask):
-    """``loss.mask_dice_loss`` with both masks, including the cross-event broadcast of torch.
+    """``loss.mask_dice_loss`` with both masks: per-object DICE, mean over the valid objects.
 
-    The target sum is not masked (torch semantics). Shapes as in ``mask_bce_loss``.
+    The probabilities are multiplied by the event's pad mask; the target sum is not masked (torch
+    semantics). Shapes as in ``mask_bce_loss``.
     """
-    probs = ops.sigmoid(f32(logits))
+    probs = ops.sigmoid(f32(logits)) * ops.expand_dims(f32(input_pad_mask), 1)
     targets = f32(targets)
-    pad = f32(input_pad_mask)
-    numerator = 2.0 * ops.einsum("qpn,bn->bqp", probs * targets, pad)
-    denominator = ops.einsum("qpn,bn->bqp", probs, pad) + ops.sum(targets, axis=-1)[None]
-    term = 1.0 - (numerator + 1.0) / (denominator + 1.0)
-    return _cross_event_object_mean(term, object_valid_mask)
+    numerator = 2.0 * ops.sum(probs * targets, axis=-1)
+    denominator = ops.sum(probs, axis=-1) + ops.sum(targets, axis=-1)
+    per_object = 1.0 - (numerator + 1.0) / (denominator + 1.0)
+    return _mean_over_valid_objects(per_object, object_valid_mask)
 
 
 def kl_div_loss(pred, true, mask, eps=DEFAULT_EPS):

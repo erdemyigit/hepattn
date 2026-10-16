@@ -8,8 +8,8 @@ methods of the four CLIC tasks (``src/hepattn/models/task.py``) inside a jitted 
     losses = model_losses(permute_outputs(outputs, idx, specs), targets, specs)
     total = total_loss(losses)
 
-``matched_loss`` runs these four lines. Only the task configurations of ``pflow_hgq.yaml`` are
-supported; anything else raises (``specs_from_config``).
+``matched_loss`` runs these four lines. Only the task configurations of ``pflow_hgq.yaml`` and org/main
+``base.yaml`` (the same task block) are supported; anything else raises (``specs_from_config``).
 
 Interface (B batch, P = 150 queries, T = 150 target particles, N = 160 nodes, registers already removed)
 -----------------------------------------------------------------------------------------------------------
@@ -50,12 +50,14 @@ NaN regression targets are replaced by 0 BEFORE the loss. For the l1 loss in JAX
 needed (the ``abs`` JVP is a select, so ``where(mask, |out - nan|, 0)`` has a finite gradient), but any
 residual-weighted loss (l2, smooth_l1, a mask-multiply form) gives NaN gradients without it
 (``docs/hgq/port_log/S4.md`` finding 2). The matcher settings are read from the YAML matcher block with
-``matcher_n_jobs_from_config`` (``pflow_hgq.yaml`` uses 16 threads; the default here is 1). The costs
+``matcher_n_jobs_from_config`` (org ``base.yaml`` uses 16 threads; the default here is 1). The costs
 keep the torch NaN columns (they are under ``stop_gradient``, and the matcher reads only the valid target
-rows).
+rows); ``matching.host_match`` sanitises non-finite entries as the torch ``Matcher`` does.
 """
 
+import logging
 from dataclasses import dataclass
+from functools import cache
 from typing import Any
 
 import numpy as np
@@ -63,6 +65,8 @@ from keras import ops
 
 from hepattn.keras_native import losses as L
 from hepattn.keras_native.matching import match, permute
+
+logger = logging.getLogger(__name__)
 
 ENCODER_KEY = "encoder"
 
@@ -128,9 +132,10 @@ class ObjectClassificationSpec:
         return weights
 
     def cost(self, outputs: dict, targets: dict) -> dict:
-        probs = outputs[self.output_object + "_class_prob"]
+        # PR #3 (a2bc9c7): object_ce_cost softmaxes, so it takes the logits, not *_class_prob
+        logits = outputs[self.output_object + "_logit"]
         target = targets[self.target_object + "_class"]
-        return {name: w * L.object_ce_cost(probs, target) for name, w in self.costs.items()}
+        return {name: w * L.object_ce_cost(logits, target) for name, w in self.costs.items()}
 
     def loss(self, outputs: dict, targets: dict) -> dict:
         logits = outputs[self.output_object + "_logit"]
@@ -346,23 +351,55 @@ def specs_from_config(task_entries: list[dict[str, Any]]) -> list[TaskSpec]:
     return [spec_from_config(e["class_path"], e.get("init_args", {})) for e in task_entries]
 
 
+# Matcher init args that do not change the assignment (thread/process backend, timing, logging).
+_MATCHER_ARGS = {
+    "default_solver",
+    "adaptive_solver",
+    "adaptive_check_interval",
+    "parallel_solver",
+    "parallel_backend",
+    "n_jobs",
+    "device_solver",
+    "verbose",
+}
+# Solvers whose optimum scipy reproduces. org/main base.yaml uses lap1015_late (matcher.py SOLVERS).
+_HOST_SOLVERS = {"scipy", "lap1015_late"}
+
+
+@cache
+def _log_lap1015_fallback() -> None:
+    # torch keeps lap1015's own full permutation, scipy's path appends the unmatched predictions in ascending order
+    # (matcher.match_individual). Unmatched slots get the null class only, so the loss is unchanged.
+    logger.warning(
+        "keras_native solves default_solver=lap1015_late with scipy: the optimal total cost is the same, "
+        "but ties between equal-cost assignments may break differently and the unmatched predictions follow "
+        "in ascending order, not in lap1015's order; compare permuted outputs with a lap1015_late run only "
+        "on the matched (valid-target) slots"
+    )
+
+
 def matcher_n_jobs_from_config(matcher_entry: dict[str, Any]) -> int:
     """Host-matching threads from the YAML ``matcher`` block (``class_path`` + ``init_args``).
 
-    Only the ``pflow_hgq.yaml`` matcher is supported (``Matcher`` with the scipy solver and no adaptive
-    solver); anything else raises ``NotImplementedError``. Returns ``n_jobs`` (torch default 8) when
-    ``parallel_solver`` is set, else 1.
+    Supported: ``Matcher`` with ``default_solver`` scipy or lap1015_late, ``adaptive_solver: false`` and no
+    ``device_solver``. lap1015_late is solved with scipy (same optimum, but tie breaks and the order of the
+    unmatched predictions can differ; logged once). Anything else raises
+    ``NotImplementedError``. Returns ``n_jobs`` (torch default 8) when ``parallel_solver`` is set, else 1.
     """
     kind = matcher_entry.get("class_path", "").rsplit(".", 1)[-1]
     args = matcher_entry.get("init_args", {})
     if kind != "Matcher":
         raise NotImplementedError(f"matcher {matcher_entry.get('class_path')!r} is not supported by keras_native")
-    if args.get("default_solver", "scipy") != "scipy" or args.get("adaptive_solver", True):
-        raise NotImplementedError(f"only default_solver=scipy with adaptive_solver=false is supported, got {args}")
-    # parallel_backend (thread/process) and adaptive_check_interval do not change the assignment
-    unknown = set(args) - {"default_solver", "adaptive_solver", "adaptive_check_interval", "parallel_solver", "parallel_backend", "n_jobs", "verbose"}
+    unknown = set(args) - _MATCHER_ARGS
     if unknown:
         raise NotImplementedError(f"unsupported matcher options {sorted(unknown)}")
+    solver = args.get("default_solver", "scipy")
+    if solver not in _HOST_SOLVERS or args.get("adaptive_solver", True):
+        raise NotImplementedError(f"only default_solver in {sorted(_HOST_SOLVERS)} with adaptive_solver=false is supported, got {args}")
+    if args.get("device_solver") is not None:
+        raise NotImplementedError(f"device_solver={args['device_solver']!r} is not supported by keras_native")
+    if solver == "lap1015_late":
+        _log_lap1015_fallback()
     return int(args.get("n_jobs", 8)) if args.get("parallel_solver", False) else 1
 
 
