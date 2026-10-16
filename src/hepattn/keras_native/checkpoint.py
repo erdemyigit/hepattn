@@ -22,9 +22,17 @@ reference variable and the slot name; other optimizer variables (``iterations``,
 Export: ``export_weights`` assigns a state into the variables and calls ``Model.save_weights`` (``.weights.h5``,
 keyed by the layer tracking structure, not by paths); a freshly built model loads it with ``load_weights``.
 
-Policy (production, ``polaris/03_make_config.py``): every ``every_n_steps`` (1000), ``last``, and the best on
-``val/loss``. ``CheckpointManager`` writes ``step-<step>.npz`` and ``best-step-<step>.npz`` files and two pointer
-files, ``last.json`` and ``best.json``, each replaced atomically after the checkpoint it names is complete.
+Policy: the two Lightning callbacks of the CLIC configs (``config.CheckpointConfig``). ``CheckpointManager`` writes
+- ``epoch-<epoch>-step-<step>.npz`` at every validation end (``save_epoch``; hepattn ``Checkpoint``, ``save_top_k=-1``:
+  never deleted), with ``best`` pointing at the one with the best finite ``val/loss``;
+- ``step-<step>.npz`` every ``every_n_steps`` (``maybe_save_step``; Polaris ``ModelCheckpoint``, the newest
+  ``keep_last_k``), and ``last-<step>.npz`` at a validation end or the train end (``save_last``; Lightning rewrites
+  ``last.ckpt`` there when ``save_last``), with ``last`` pointing at the newest of the two;
+- ``best-step-<step>.npz`` (``maybe_save_best``): only the best one is kept (``save_top_k=1`` with a monitor; no CLIC
+  config uses it).
+The pointer files ``last.json`` and ``best.json`` are each replaced atomically after the checkpoint they name is
+complete. Files get the mode of a plain ``open(..., "w")`` (0o666 minus the umask), so a shared project area can read
+them (``mkstemp`` alone gives 0o600).
 """
 
 import contextlib
@@ -48,6 +56,8 @@ GROUPS = ("tv", "ntv", "ov")
 META_KEY = "__meta__"
 _AUTO_SUFFIX = re.compile(r"_\d+$")
 _STEP_FILE = re.compile(r"step-(?P<step>\d+)(?:-r(?P<rev>\d+))?\.npz")
+_LAST_FILE = re.compile(r"last-\d+(?:-r\d+)?\.npz")
+_BEST_FILE = re.compile(r"best-step-\d+(?:-r\d+)?\.npz")
 
 
 class CheckpointError(RuntimeError):
@@ -164,12 +174,19 @@ def _atomic(path: Path, mode: str = "wb"):
             yield f
             f.flush()
             os.fsync(f.fileno())
+        Path(tmp).chmod(0o666 & ~_umask())
         Path(tmp).replace(path)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             Path(tmp).unlink()
         raise
     _fsync_directory(path.parent)
+
+
+def _umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -404,10 +421,17 @@ class CheckpointManager:
                 found.append(((int(match["step"]), int(match["rev"] or 0)), path))
         return [path for _, path in sorted(found)]
 
+    def _point_last(self, path: Path, step: int) -> None:
+        """Point ``last`` at ``path``, then remove the ``last-*`` checkpoints it no longer names."""
+        self._set_pointer("last", path, step=step)
+        for old in self.directory.glob("last-*.npz"):
+            if _LAST_FILE.fullmatch(old.name) and old != path:
+                self._remove(old)
+
     def save(self, step: int, model, optimizer, state, meta: dict) -> Path:
         """Write ``step-<step>.npz`` (a new name if it exists), point ``last`` at it, prune old step checkpoints."""
         path = save_checkpoint(self._new_path("step", step), model, optimizer, state, {**meta, "step": step})
-        self._set_pointer("last", path, step=step)
+        self._point_last(path, step)
         protected = {p["file"] for p in (self._pointer("best"),) if p}
         steps = self._step_files()
         for old in steps[: max(0, len(steps) - self.keep_last_k)]:
@@ -418,8 +442,39 @@ class CheckpointManager:
     def maybe_save_step(self, step: int, model, optimizer, state, meta: dict) -> Path | None:
         return self.save(step, model, optimizer, state, meta) if self.policy.step_due(step) else None
 
+    def save_last(self, step: int, model, optimizer, state, meta: dict) -> Path:
+        """``last`` at a validation end or the train end: a no-op if ``last`` already holds ``step``.
+
+        Lightning writes ``last.ckpt`` there when ``save_last`` is set (and skips a step it already saved); call this
+        when ``CheckpointCallback.save_last`` is true, else ``last`` is up to ``every_n_steps - 1`` steps old.
+        """
+        pointer = self._pointer("last")
+        if pointer is not None and pointer.get("step") == step and (self.directory / pointer["file"]).is_file():
+            return self.directory / pointer["file"]
+        path = save_checkpoint(self._new_path("last", step), model, optimizer, state, {**meta, "step": step})
+        self._point_last(path, step)
+        return path
+
+    def save_epoch(self, epoch: int, step: int, metrics: dict, model, optimizer, state, meta: dict) -> Path:
+        """Write ``epoch-<epoch>-step-<step>.npz`` (kept for good); point ``best`` at it if ``metrics[monitor]`` improves.
+
+        As hepattn ``Checkpoint`` (``save_top_k=-1``): every validation end is saved, a NaN or missing monitor value
+        included (it is never the best).
+        """
+        value = metrics.get(self.policy.monitor) if self.policy.monitor else None
+        if value is not None:  # NaN as a string: a NaN read back from JSON never equals the sidecar's
+            value = float(value) if math.isfinite(float(value)) else str(float(value))
+        extra = {"monitor": self.policy.monitor, "value": value}
+        path = save_checkpoint(
+            self._new_path(f"epoch-{epoch:03d}-step", step), model, optimizer, state, {**meta, "epoch": epoch, "step": step, **extra}
+        )
+        if self.policy.is_better(metrics):
+            self._set_pointer("best", path, step=step, epoch=epoch, monitor=self.policy.monitor, value=value)
+            self.policy.best_value = value
+        return path
+
     def maybe_save_best(self, step: int, metrics: dict, model, optimizer, state, meta: dict) -> Path | None:
-        """Write ``best-step-<step>.npz`` if ``metrics[monitor]`` improves; replace the previous best."""
+        """Write ``best-step-<step>.npz`` if ``metrics[monitor]`` improves; remove the previous ``best-step`` file."""
         if not self.policy.is_better(metrics):
             return None
         value = float(metrics[self.policy.monitor])
@@ -433,7 +488,7 @@ class CheckpointManager:
         )
         self._set_pointer("best", path, step=step, monitor=self.policy.monitor, value=value)
         self.policy.best_value = value
-        if previous is not None and previous["file"] != path.name:
+        if previous is not None and previous["file"] != path.name and _BEST_FILE.fullmatch(previous["file"]):
             self._remove(self.directory / previous["file"])
         return path
 

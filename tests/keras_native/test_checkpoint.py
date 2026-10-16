@@ -424,3 +424,104 @@ def test_manager_keeps_last_k_and_the_best(tmp_path, uninterrupted, fresh):
     assert reopened.best() == tmp_path / "best-step-000003200.npz"
     _, meta = C.load_checkpoint(reopened.best(), fresh.model, fresh.optimizer)
     assert (meta["step"], meta["value"], meta["monitor"]) == (3200, 3.0, "val/loss")
+
+
+def tiny_run(optimizer_class=keras.optimizers.AdamW):
+    """A built ``Tiny`` model and optimizer (no compile): for checks of the format and the manager only."""
+    model = Tiny()
+    model(np.zeros((1, 1), np.float32))
+    optimizer = optimizer_class(learning_rate=1e-3)
+    optimizer.build(model.trainable_variables)
+    return model, optimizer, C.current_state(model, optimizer)
+
+
+@pytest.mark.parametrize(("saved_with", "loaded_with"), [("AdamW", "Lion"), ("Lion", "AdamW")])
+def test_checkpoint_of_another_optimizer_is_rejected(tmp_path, saved_with, loaded_with):
+    """AdamW has momentum + velocity slots, Lion momentum only: a swap must not load half of the slots."""
+    model, optimizer, state = tiny_run(getattr(keras.optimizers, saved_with))
+    path = C.save_checkpoint(tmp_path / "ck.npz", model, optimizer, state)
+    same, same_optimizer, _ = tiny_run(getattr(keras.optimizers, saved_with))
+    C.load_checkpoint(path, same, same_optimizer)  # control: the same optimizer class loads
+    other, other_optimizer, _ = tiny_run(getattr(keras.optimizers, loaded_with))
+    with pytest.raises(C.CheckpointError, match="ov: keys differ"):
+        C.load_checkpoint(path, other, other_optimizer)
+
+
+def test_stored_shape_other_than_the_models_is_rejected(tmp_path):
+    """E.g. a linformer k=32 checkpoint for a k=64 model: same keys, other shapes, a consistent sidecar."""
+    model, optimizer, state = tiny_run()
+    path = C.save_checkpoint(tmp_path / "ck.npz", model, optimizer, state)
+    C.load_checkpoint(path, *tiny_run()[:2])  # control: the rewrite helper alone keeps it loadable
+    name = "tv/tiny/a/b"
+
+    def grow(arrays):
+        arrays[name] = np.zeros((5,), arrays[name].dtype)
+
+    def layout(sidecar):
+        sidecar["layout"]["tv"]["tiny/a/b"][0] = [5]
+
+    rewrite_npz(path, grow, layout)
+    with pytest.raises(C.CheckpointError, match=r"tv/tiny/a/b: stored \(5,\)"):
+        C.load_checkpoint(path, *tiny_run()[:2])
+
+
+@pytest.mark.parametrize("umask", [0o022, 0o027, 0o002])
+def test_checkpoint_files_get_the_mode_of_a_plain_write(tmp_path, umask):
+    """Readable in a shared project area: ``mkstemp`` alone gives 0o600 (control: the temporary file's mode)."""
+    model, optimizer, state = tiny_run()
+    old = C.os.umask(umask)
+    try:
+        plain = tmp_path / "plain.txt"
+        plain.write_text("x")
+        path = C.save_checkpoint(tmp_path / "ck.npz", model, optimizer, state)
+        _, tmp = C.tempfile.mkstemp(dir=tmp_path)
+    finally:
+        C.os.umask(old)
+    expected = stat.S_IMODE(plain.stat().st_mode)
+    assert expected == 0o666 & ~umask
+    assert stat.S_IMODE(path.stat().st_mode) == expected
+    assert stat.S_IMODE(C.sidecar_path(path).stat().st_mode) == expected
+    assert stat.S_IMODE(C.Path(tmp).stat().st_mode) == 0o600 != expected  # control
+
+
+def test_nan_at_the_first_validation_is_not_the_best():
+    """Else ``x < nan`` is False for every later x and the best checkpoint would never move again."""
+    policy = C.CheckpointPolicy()
+    assert policy.best_value is None
+    assert not policy.is_better({"val/loss": float("nan")})
+    assert not policy.is_better({"val/loss": float("inf")})
+    assert policy.is_better({"val/loss": 1e6})
+
+
+def test_manager_keeps_every_epoch_checkpoint_and_points_at_the_best(tmp_path):
+    """Hepattn ``Checkpoint`` (``save_top_k=-1``): one file per validation end, none deleted; NaN is saved, not best."""
+    model, optimizer, state = tiny_run()
+    manager = C.CheckpointManager(tmp_path, C.CheckpointPolicy(every_n_steps=None))
+    losses = [4.0, float("nan"), 3.0, 3.5]
+    paths = [manager.save_epoch(epoch, 100 * (epoch + 1), {"val/loss": loss}, model, optimizer, state, {}) for epoch, loss in enumerate(losses)]
+    assert sorted(p.name for p in tmp_path.glob("*.npz")) == [f"epoch-{e:03d}-step-{100 * (e + 1):09d}.npz" for e in range(4)]
+    assert manager.best() == paths[2]
+    for path, loss in zip(paths, losses, strict=True):
+        _, meta = C.load_checkpoint(path, model, optimizer)  # the NaN epoch included
+        assert meta["value"] == (loss if np.isfinite(loss) else "nan")
+    reopened = C.CheckpointManager(tmp_path)
+    assert (reopened.best(), reopened.policy.best_value) == (paths[2], 3.0)
+    # a maybe_save_best of the top-1 mode never removes an epoch checkpoint
+    best = reopened.maybe_save_best(500, {"val/loss": 2.0}, model, optimizer, state, {})
+    assert all(p.is_file() for p in paths) and reopened.best() == best
+
+
+def test_manager_save_last_follows_validation_ends(tmp_path):
+    """``save_last`` at a validation end moves ``last`` between step checkpoints, as Lightning's ``last.ckpt``."""
+    model, optimizer, state = tiny_run()
+    manager = C.CheckpointManager(tmp_path, C.CheckpointPolicy(every_n_steps=1000), keep_last_k=1)
+    step = manager.maybe_save_step(1000, model, optimizer, state, {})
+    assert manager.save_last(1000, model, optimizer, state, {}) == step  # already saved at this step: no new file
+    assert not list(tmp_path.glob("last-*.npz"))
+    last = manager.save_last(1500, model, optimizer, state, {})
+    assert last == tmp_path / "last-000001500.npz" and manager.last() == last
+    assert C.load_checkpoint(last, model, optimizer)[1]["step"] == 1500
+    newer = manager.maybe_save_step(2000, model, optimizer, state, {})
+    assert manager.last() == newer
+    assert not last.exists()  # the stale last-* file goes once last points elsewhere
+    assert sorted(p.name for p in tmp_path.glob("*.npz")) == ["step-000002000.npz"]
