@@ -28,10 +28,10 @@ def build_functional_dense(kdense: KerasDense, input_shape: tuple[int, ...], nam
         A keras.Model sharing the KerasDense's weights.
 
     Raises:
-        NotImplementedError: For gated (SwiGLU) nets, whose gating is torch glue.
+        NotImplementedError: For gated (SwiGLU) nets: their x1/x2/product branch is not assembled here yet.
     """
     if kdense.gate:
-        raise NotImplementedError("SwiGLU-gated KerasDense cannot be exported as a functional model")
+        raise NotImplementedError("SwiGLU-gated KerasDense cannot be exported as a functional model yet")
     inputs = keras.Input(shape=input_shape, name=f"{name}_input")
     x = inputs
     for layer in [*kdense.hidden, kdense.final]:
