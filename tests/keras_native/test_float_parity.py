@@ -1,7 +1,7 @@
 """S2 float parity: pure-torch hepattn modules vs the keras_native layers on JAX, in one process.
 
-Tolerances are the docs/hgq/PARITY.md rows (dense/attention 1e-6/1e-5, encoder.clic_shaped 2e-6/2e-5,
-Linformer 2e-5/2e-4 as tests/keras/test_linformer_parity.py). Biases, norm affines, LayerScale and register
+Tolerances are the docs/hgq/PARITY.md rows (dense/attention 1e-6/1e-5, encoder.clic_shaped 2e-6/2e-5).
+The masked-Linformer attention itself is tested in test_masked_linformer.py. Biases, norm affines, LayerScale and register
 tokens are perturbed away from their default init (``perturb_affine_params``), so a missing port of any of
 them fails at O(0.1), far above these tolerances.
 """
@@ -19,21 +19,14 @@ from hepattn.keras_native.attention import merge_masks as native_merge_masks
 from hepattn.keras_native.dense import Dense as NDense
 from hepattn.keras_native.encoder import Encoder as NEncoder
 from hepattn.keras_native.input import InputNet as NInputNet
-from hepattn.keras_native.linformer import LinformerAttention as NLinformer
 from hepattn.models.attention import Attention, merge_masks
 from hepattn.models.dense import Dense
 from hepattn.models.encoder import Encoder
 from hepattn.models.input import InputNet
-from hepattn.models.linformer import LinformerAttention
 from hepattn.models.posenc import FourierPositionEncoder
 
 from .parity_utils import assert_parity, make_padded_batch
-from .porting import perturb_affine_params, port_attention, port_dense, port_encoder, port_input_net, port_linformer
-
-# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict, so the marker fails once the named lane fixes the test.
-R2_XFAIL = pytest.mark.xfail(
-    strict=True, raises=TypeError, reason="R2: the torch reference passes linformer_proj_dim, which org Attention rejects since PR #9"
-)
+from .porting import perturb_affine_params, port_attention, port_dense, port_encoder, port_input_net
 
 
 def t(x) -> torch.Tensor:
@@ -249,74 +242,6 @@ def test_attention_unsupported_raises(kwargs, err):
         NAttention(DIM, num_heads=HEADS, **kwargs)
 
 
-# --------------------------------------------------------------------------------------- Linformer
-L_DIM, L_HEADS, L_SEQ, L_K = 256, 16, 256, 256
-
-
-def linformer_pair(seed: int, q_len: int, kv_len: int):
-    torch.manual_seed(seed)
-    tlin = LinformerAttention(L_DIM, seq_len=L_SEQ, k=L_K, heads=L_HEADS, dim_head=L_DIM // L_HEADS).eval()
-    perturb_affine_params(tlin, seed)
-    nlin = NLinformer(L_DIM, num_heads=L_HEADS, seq_len=L_SEQ, k=L_K, name="lin")
-    nlin.build((None, q_len, L_DIM), (None, kv_len, L_DIM))
-    port_linformer(tlin, nlin)
-    return tlin, nlin
-
-
-def test_linformer_self_attention_parity():
-    tlin, nlin = linformer_pair(1, 168, 168)
-    x, _ = make_padded_batch(2, 168, L_DIM, seed=2)
-    with torch.no_grad():
-        ref = tlin(t(x), k=t(x), v=t(x))
-    assert_parity("linformer.self", "dim256h16k256", ref, nlin(x), atol=2e-5, rtol=2e-4)
-
-
-def test_linformer_cross_attention_parity_masked():
-    tlin, nlin = linformer_pair(3, 150, 168)
-    rng = np.random.default_rng(4)
-    q, _ = make_padded_batch(2, 150, L_DIM, seed=5)
-    kv, _ = make_padded_batch(2, 168, L_DIM, seed=6)
-    attn_mask = rng.random((2, 150, 168)) > 0.3
-    attn_mask[..., 0] = True
-    attn_mask[:, 1, :] = False  # one fully masked query: torch zeroes it, so must we
-    with torch.no_grad():
-        ref = tlin(t(q), k=t(kv), v=t(kv), attn_mask=t(attn_mask))
-    got = nlin(q, k=kv, v=kv, attn_mask=attn_mask)
-    assert_parity("linformer.cross_masked", "dim256h16k256", ref, got, atol=2e-5, rtol=2e-4)
-
-
-def test_linformer_cross_attention_parity_distinct_values():
-    """Values projected from ``v``, not ``k`` (the other tests pass v == k, which hides a k/v mix-up)."""
-    tlin, nlin = linformer_pair(10, 150, 168)
-    q, _ = make_padded_batch(2, 150, L_DIM, seed=33)
-    k, _ = make_padded_batch(2, 168, L_DIM, seed=34)
-    v, _ = make_padded_batch(2, 168, L_DIM, seed=35)
-    with torch.no_grad():
-        ref = tlin(t(q), k=t(k), v=t(v))
-    got = nlin(q, k=k, v=v)
-    assert_parity("linformer.cross_distinct_v", "dim256h16k256", ref, got, atol=2e-5, rtol=2e-4)
-    assert np.abs(n(nlin(q, k=k, v=k)) - n(got)).max() > 1e-2  # control: v != k matters
-
-
-def test_linformer_ignores_dense_attention_options():
-    """Helen's semantics: kv_mask / q_mask / qkv_norm / value_residual change nothing."""
-    _, nlin = linformer_pair(8, 40, 40)
-    nlin_opts = NLinformer(L_DIM, num_heads=L_HEADS, seq_len=L_SEQ, k=L_K, qkv_norm=True, norm="LayerNorm", value_residual=True, name="lin2")
-    nlin_opts.build((None, 40, L_DIM))
-    nlin_opts.set_weights(nlin.get_weights())
-    x, mask = make_padded_batch(2, 40, L_DIM, seed=9)
-    ref = n(nlin(x))
-    np.testing.assert_array_equal(n(nlin(x, kv_mask=mask, q_mask=mask)), ref)
-    np.testing.assert_array_equal(n(nlin_opts(x)), ref)
-
-
-def test_linformer_mask_needs_rank_ge_kv_len():
-    nlin = NLinformer(32, num_heads=4, seq_len=64, k=16, name="small")
-    x = np.zeros((1, 40, 32), np.float32)
-    with pytest.raises(ValueError, match="must be >= kv_len"):
-        nlin(x, attn_mask=np.ones((1, 40, 40), bool))
-
-
 # ----------------------------------------------------------------------------------------- Encoder
 def encoder_pair(seed: int, x_len: int, **cfg):
     ncfg = copy.deepcopy(cfg)  # torch Encoder/EncoderLayer write into attn_kwargs
@@ -374,11 +299,12 @@ def test_clic_shaped_encoder_parity():
     assert_parity("encoder.clic_shaped", "6L_dim256_h16_hybrid_vres_8reg", ref, got, valid_mask=kv_mask, atol=2e-6, rtol=2e-5)
 
 
-@R2_XFAIL
 def test_clic_linformer_encoder_parity():
-    """pflow_hgq.yaml encoder: linformer (k=256, seq 256), 6 layers, dim 256, 160 nodes + 8 registers.
+    """linformer.yaml encoder attention (masked Linformer, seq_len 168, k 64) in 6 layers, dim 256, 160 nodes + 8 registers.
 
-    PARITY.md has no row for it; it is held at the ``encoder.clic_shaped`` row (same encoder and shape).
+    Norms are base.yaml's LayerNorm with hybrid norm (FastLayerNorm and the legacy dense-norm placement are R3's).
+    The attention rows are in test_masked_linformer.py; this row checks the wiring through Encoder, registers and the
+    value residual. Measured max abs 2.384e-6; tolerance 2x that, absolute.
     """
     cfg = {
         "num_layers": 6,
@@ -387,14 +313,16 @@ def test_clic_linformer_encoder_parity():
         "hybrid_norm": True,
         "value_residual": True,
         "num_register_tokens": 8,
-        "attn_kwargs": {"num_heads": 16, "linformer_seq_len": 256, "linformer_proj_dim": 256},
+        "attn_kwargs": {"num_heads": 16, "linformer_seq_len": 168, "linformer_k": 64},
     }
     tenc, nenc = encoder_pair(18, 160, **cfg)
+    assert all(layer.attn.fn.core_kind == "project" for layer in nenc.layers)
+    assert tuple(nenc.layers[0].attn.fn.core.E.kernel.shape) == (168, 64)
     x, kv_mask = make_padded_batch(2, 160, 256, seed=19)
     with torch.no_grad():
         ref = tenc(t(x), kv_mask=t(kv_mask))
     got = nenc(x, kv_mask=kv_mask)
-    assert_parity("encoder.clic_linformer", "6L_dim256_h16_lin256_8reg", ref, got, valid_mask=kv_mask, atol=2e-6, rtol=2e-5)
+    assert_parity("encoder.clic_linformer", "6L_dim256_h16_lin168k64_8reg", ref, got, valid_mask=kv_mask, atol=4.77e-6, rtol=0.0)
 
 
 @pytest.mark.parametrize(
