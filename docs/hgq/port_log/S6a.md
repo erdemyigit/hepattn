@@ -35,7 +35,11 @@ fixtures generated in the hybrid env `hepattn/.venv` (lightning 2.5.2).
 3. **Checkpoint integrity.** The sidecar is renamed last, so it marks completeness; load checks the sidecar's sha256 of
    the `.npz`, the zip CRCs (`np.load`), keys, shapes, dtypes, sidecar layout and metadata. `last` / `best` are pointer
    files replaced atomically, so a crash never tears them. A config change without a variable change (e.g.
-   `input_sort_field`) loads by layout; only `expect_config_hash` catches it (tested).
+   `input_sort_field`) loads by layout; only `expect_config_hash` catches it (tested). Fix round: the directory is
+   fsynced after every rename (a rename is durable only then); `save_checkpoint` refuses to replace an existing
+   checkpoint unless `overwrite=True` (between the two renames the new `.npz` sits next to the old sidecar, rejected
+   on load); `CheckpointManager` never overwrites: a second save at one step (e.g. a walltime save at the resumed
+   step) becomes `step-<N>-r<k>.npz`, and retention orders by (step, revision).
 4. **Padding = invalid events.** Every `*_valid` False, class 5 at `particle_class`, NaN in the per-object float
    targets (as `CLICDataset` writes invalid particles), 0 elsewhere, `event_number` -1. Measured: the native forward and
    the matched loss of an all-invalid event are finite (float and quantized), and the real events of a padded batch are
@@ -44,10 +48,34 @@ fixtures generated in the hybrid env `hepattn/.venv` (lightning 2.5.2).
    (`lightning_module.py:20-24,45-53`), so Lightning logs the pooled value under each layer name. Measured with a
    minimal Lightning 2.5.2 validate run (scratch `lightning_shared_metric.py`): layer recalls 1.0 and 0.0 are both
    logged as 0.5. `ClicMetrics` keeps one object per layer (the intended value); `test_lightning_module_pools_layers_and_native_does_not`
-   pins the difference. Comparisons with hybrid runs must use the final layer or pooled values.
+   pins the difference. Comparisons with hybrid runs must use the final layer or pooled values; fix round:
+   `ClicMetrics(pool_layers=True)` gives the pooled (Lightning) values, equal to a real `Trainer.validate` with two
+   layers. `ClicMetrics("train")` logs only the task metrics, as `MPflow.log_custom_metrics` (returns early for
+   train); Lightning logs train metrics per step, so the driver calls `reset` before each logged step.
 6. **Saved-config fixtures** are generated, not hand-written: `--print_config` is what `SaveConfig` writes. The Polaris
    one is `main_hgq fit --config <03_make_config output>`; its absolute paths are rewritten to `/polaris/home/hepattn`, so
    loading it exercises the packaged scale-dict fallback.
+7. **Model hash = hash of `model_description`** (fix round). The first `model_hash` hashed the normalised `model:`
+   section as text. Measured: each raw/saved pair that builds a bit-identical model hashed differently (org
+   a86f7b9cc3a2 vs dc6f9c7ad999, pflow_hgq a3b908209665 vs 3b29d1f8062e, Polaris 706dbef2cf7c vs 5feab1feaacd),
+   because the saved form spells out defaults, writes `2.0` for `2`, other class-path spellings
+   (`hepattn.models.posenc.FourierPositionEncoder` vs `hepattn.models.FourierPositionEncoder`, `torch.nn.SiLU`
+   vs `SiLU`, `KerasMaskFormer`), and because the hash covered the resolved absolute scale-dict path, `lrs_config`
+   and `optimizer`. `model_description` keeps `model.model` only, reduces class paths to class names (with the
+   hybrid aliases), drops every entry equal to the native constructor default (`inspect.signature`; the encoder also
+   takes `EncoderLayer` defaults, as it forwards its kwargs), turns numbers into floats, replaces each
+   `scale_dict_path` by the sha256 of the file, and drops the matcher and the encoder's repeated `dim`. Native and
+   torch defaults agree for every expanded key of the three saved fixtures (otherwise the pair would hash
+   differently, as it then builds a different model). All three pairs now hash equal (re-measured: old hashes
+   above reproduced; new org b4f17323e5bc, pflow_hgq e88127de42ca, Polaris 01526c395845, each for both forms); a byte-identical scale-dict
+   copy elsewhere hashes equal; other scale-dict content, `input_sort_field`, `linformer_k`, an activation, or a
+   non-default `mask_attn` change it. This also closes the silent-fallback concern: a saved config that falls back to
+   a packaged scale dict with other content now gets another hash.
+8. **Beta-controller arguments completed** (fix round). Raw configs omit BetaPID defaults, saved ones spell them out;
+   the loader fills `p, i, d, warmup_epochs, max_beta, min_beta, damp_beta_on_target` (and BetaScheduler's three)
+   from one table, casts to the hybrid types (`"1.0e15"` as a string -> 1e15, as the hybrid does), and rejects
+   unknown or missing required arguments. A test reads the hybrid constructor defaults from
+   `hepattn/keras/callbacks.py` with `ast` (importing it needs lightning and the torch backend) and compares.
 
 ## Gates
 
@@ -56,22 +84,28 @@ Test runs (macOS CPU): `test_config` + `test_data` + `test_data_real` + `test_me
 train step compile at test width: 190-200 s of it). Whole native suite after the last commit: 614 passed, 4 skipped
 (requiresdata) in 1140 s (`HEPATTN_PARITY_LEDGER=0`).
 
+Fix round 2026-10-16 (`af0da5f`..`d063c99`): the 7 S6a test files + `test_import_hygiene.py` at `d063c99` gave 111
+passed, 4 skipped (requiresdata) in 293 s (hepattn resolved to this worktree's `src`); `prek run` on the 8 changed files
+passes; mutants M29-M56 killed 28/28, the earlier checkpoint mutants M6, M8, M10, M11, M12 re-killed 5/5 (M11 still
+caught by the interrupted-write test, which now passes `overwrite=True`); tree clean afterwards.
+
 Re-verified 2026-10-16 in a new session at `a2bab07`: the 7 S6a test files + `test_import_hygiene.py` gave 92 passed,
 4 skipped (requiresdata) in 360 s; `prek run` on all 18 changed files passes; `S6a_mutations.py --only
 M1,M3,M13,M14,M19,M22,M24,M25` killed 8/8, and the tree was clean afterwards.
 
 | Gate | Result | Evidence and control |
 |---|---|---|
-| Loader reads every form | pass | `test_loader_reads_every_form` x6: org raw (base + linformer), org saved, `pflow_hgq.yaml`, its saved form, the generated Polaris config (run in the test), its saved form. Each gives `clic_specs()`, 16 matcher threads, the expected optimizer / quant / accumulation / PeriodicEBOPs period. Controls: `test_unsupported_run_options_raise` x5 (each also loads the unedited config first), activation / decoder rejection tests. |
+| Loader reads every form | pass | `test_loader_reads_every_form` x6: org raw (base + linformer), org saved, `pflow_hgq.yaml`, its saved form, the generated Polaris config (run in the test), its saved form. Each gives `clic_specs()`, 16 matcher threads, the expected optimizer / quant / accumulation / PeriodicEBOPs period; fix round: the whole `OptimizerConfig` (org Lion 1e-6 / 8e-5 / 1e-6, pflow_hgq and Polaris AdamW 1e-6 / 5e-5 / 1e-6, pct_start 0.05, wd 1e-4, clip 0.1, accumulation 1 / 1 / 4), the whole `CheckpointConfig` (every_n_train_steps None / None / 1000, `val/loss`, min, save_last, dirpath), batch size / workers / num_* (512 / 128 / 32; 16 / 16 / 8; -1, 5000, -1), seed 42, the completed BetaPID dict; `test_raw_and_saved_forms_give_the_same_run_sections` x3 (raw == saved except the host dirpath and the CLICDataset defaults the saved form adds); `test_beta_callback_defaults_are_the_hybrid_ones` x2. Controls: `test_unsupported_run_options_raise` x5 (each also loads the unedited config first), activation / decoder rejection tests. |
 | Same native model from each form | pass | `test_raw_and_saved_forms_build_the_same_model` x3 at production dims: same keys, shapes, dtypes (335 / 3967 / 4223 variables: float org, quantized `pflow_hgq`, quantized Polaris), outputs bit-identical with copied values. `test_generated_polaris_config_is_the_org_model_with_the_quant_spec`: org raw + the Polaris quant block == generated config (4223). Controls: no input sorting -> same keys, forward differs; `linformer_k` 32 -> shapes differ; `from_config` of the saved config without the loader raises `TypeError: activation must be a name` (the R-critique open issue, closed here by the loader). |
 | Checkpoint save -> load bitwise | pass | `test_save_load_is_bitwise_into_a_fresh_model`: all `tv`, `ntv`, `ov` arrays equal in value and dtype after loading into an independently built model + optimizer. Non-vacuous: `test_steps_change_every_state_group` (each step changes all three groups). |
 | Resume = uninterrupted (plan S6 gate, CPU) | pass | `test_resume_equals_the_uninterrupted_run`: step 2 from the loaded step-1 state equals the uninterrupted step 2 bitwise; the fresh model with the loaded state gives the first model's forward. Control: +1e-3 on one kernel element of the loaded state -> differs. The resumed step uses the first model's compiled step (a second compile costs 145 s, measured); a new process compiles anyway. |
-| Keys stable across builds | pass | `test_keys_are_stable_across_independent_builds`; control in the same test: raw paths and optimizer names differ (> 100 each). `test_optimizer_slots_are_keyed_by_their_variable`: 2 slots per trainable variable, all mapped. |
-| Corrupted / partial rejected | pass | flipped byte (sha256), truncated file with a rewritten sidecar hash (zip error), flipped byte inside an array member with a rewritten hash (CRC), foreign sidecar, missing sidecar, config-hash mismatch, a float model's keys; interrupted write (savez raises mid-file) leaves the previous checkpoint loadable and no temporary file. |
+| Model hash form-independent (fix round) | pass | `test_model_hash_is_the_same_for_every_form_of_one_model` x3 (the sections differ as text, the hashes are equal); controls in the same test: `input_sort_field`, `mask_attn: false`, `activation: GELU` in the saved form each change it. `test_model_hash_follows_the_scale_dict_content_not_its_path`: a byte-identical copy elsewhere is equal, one changed number is not. `test_model_hash_follows_the_model_section_only`: data, LR, optimizer and matcher changes keep it, `linformer_k` changes it. |
+| Keys stable across builds | pass | `test_keys_are_stable_across_independent_builds`; control in the same test: raw paths and optimizer names differ (> 100 each). `test_optimizer_slots_are_keyed_by_their_variable`: 2 slots per trainable variable, all mapped. Fix round: `test_optimizer_slots_take_the_longest_matching_variable` (variables `a/b` and `a/b_c`, whose slot names are prefixes of each other). |
+| Corrupted / partial rejected | pass | flipped byte (sha256), truncated file with a rewritten sidecar hash (zip error), flipped byte inside an array member with a rewritten hash (CRC), foreign sidecar, missing sidecar, config-hash mismatch, a float model's keys; interrupted write (savez raises mid-file) leaves the previous checkpoint loadable and no temporary file. Fix round: a stored float16 array with a consistent sidecar (dtype check); `__meta__` other than the sidecar's with a rewritten hash (control: the rewrite alone loads); an existing checkpoint is not overwritten without `overwrite=True`; each rename is followed by a directory fsync; a second manager save at one step goes to `-r1` and `last` follows it. |
 | Export | pass | `test_export_weights_loads_into_a_fresh_model`: `.weights.h5` loads bit-exactly; control: the fresh model differs before loading. |
-| Metrics == torchmetrics | pass | Streaming micro/macro accuracy over 3 batches, BinaryRecall / BinaryPrecision (incl. the zero-division 0), macro with absent classes (0.75), `MaskInference`, and the whole `MPflow.log_metrics` dict for one layer (31 names). Count-based values exactly equal; float32 means up to 3 ulps and macro 1 ulp different (measured over 10 seeds, summation order); tolerance 2x (6 / 2 ulps). Controls: one perturbed class, mask bit, regression value, proxy value each change their metric by > 100x the tolerance, and then match torch again. |
+| Metrics == torchmetrics | pass | Streaming micro/macro accuracy over 3 batches, BinaryRecall / BinaryPrecision (incl. the zero-division 0), macro with absent classes (0.75), `MaskInference`, and the whole `MPflow.log_metrics` dict for one layer (31 names). Count-based values exactly equal; float32 means up to 3 ulps and macro 1 ulp different (measured over 10 seeds, summation order); tolerance 2x (6 / 2 ulps). Controls: one perturbed class, mask bit, regression value, proxy value each change their metric by > 100x the tolerance, and then match torch again. Fix round: `test_epoch_reduction_over_unequal_batches_equals_lightning` x2 runs a real Lightning `Trainer.validate` over batches of 3, 1 and 2 events (one layer; and two layers with `pool_layers=True`): every name equal, counters exact, float means within the per-batch tolerance + 2.4 ulps (WeightedMean sums in float64, Lightning in float32: measured up to 1.17 ulps over 10 cases; 2x). Control: the other weighting (equal weights for a regression mean, event counts for a mask mean) is > 100x the tolerance away. `test_train_stage_logs_only_the_task_metrics` equals `MPflow.log_metrics(..., "train")` (24 names). |
 | Prediction h5 == `PflowPredictionWriter` | pass | `test_h5_layout_and_values_equal_the_torch_writer`: same groups, field names, dtypes, shapes, chunks, compression, attributes; values equal (inverse transforms exact, measured 0.0); `load_convert_h5` gives equal arrays. `predict` == torch task `predict` (mask probabilities within 2x the measured 1.19e-7, 0 threshold flips). Controls: a renamed field (`pred_e` -> `pred_E`) changes the layout; a changed class changes exactly `object_class/pflow_class`; padding events are not written. |
-| Data adapter | pass | `test_data.py` (9): train drop_last (10 events / batch 4 -> 2), static int32 / float32 / bool device arrays; val padded (`event_valid` [T, T, F, F], invalid-event values, real events unchanged, `event_number` int64 [8, 9, -1, -1]); one val epoch compiles the jitted eval forward + `predict` once. Controls: the torch batch has int64 and a short last batch; `pad_to_batch=False` raises on it; the unpadded short batch compiles a second executable; an int64 above int32 raises; a new shape raises. |
+| Data adapter | pass | `test_data.py` (10, fix round: `test_float64_is_cast_to_float32_on_the_host`): train drop_last (10 events / batch 4 -> 2), static int32 / float32 / bool device arrays; val padded (`event_valid` [T, T, F, F], invalid-event values, real events unchanged, `event_number` int64 [8, 9, -1, -1]); one val epoch compiles the jitted eval forward + `predict` once. Controls: the torch batch has int64 and a short last batch; `pad_to_batch=False` raises on it; the unpadded short batch compiles a second executable; an int64 above int32 raises; a new shape raises. |
 | Real CLIC batches (requiresdata) | **deferred to Polaris/falcon** | `test_data_real.py`: no target at padded nodes, prefix-contiguous `particle_valid` with class 5 exactly at invalid particles, static batches; records the equal-phi rate (RETARGET risk 6). Not runnable here (no ROOT files). Dry run on dummy events: the padded-node check fails on raw dummy events (targets at padded nodes) and passes after cleaning; the prefix check fails with a residual first (3 of 10 events). |
 | S6 gate: train `_cache_size() <= 2` over an epoch | **S6b** | Needs the train loop. Eval + predict part done (above). |
 
@@ -114,6 +148,43 @@ M24 (`valid = classes <= num_classes`) survived because the untrained test model
 | M27 | padding events written | `test_padding_events_are_not_written` |
 | M28 | mask logits shifted by 0.01 before the sigmoid | `test_predict_equals_torch_task_predict` |
 
+Fix round: 28 more mutants (M29-M56; the reviewer's R1-R14 and the new code), **28/28 killed**. The config ones run
+only the config tests that build no model (`FAST` in the runner), M52/M53 only the two small checkpoint tests.
+The reviewer reported that its mutants R3-R8 and R12-R14 survived `test_config.py` before this round, R1/R2
+`test_metrics.py`, R9-R11 `test_checkpoint.py`, and a float64 mutant `test_data.py` (not re-run here on the old
+tests); M29-M56 include those changes and are killed by the new tests.
+
+| Mutant | Change | Killed by |
+|---|---|---|
+| M29 | `lr_max` read from `initial` (R3) | `test_loader_reads_every_form[org_raw]` |
+| M30 | `every_n_train_steps = None` (R4) | `test_loader_reads_every_form[polaris_generated]` |
+| M31 | `save_last = False` (R5) | `test_loader_reads_every_form[org_raw]` |
+| M32 | `weight_decay = 0.0` (R6) | same |
+| M33 | `seed = None` (R7) | same |
+| M34 | `num_val = -1` (R8) | same |
+| M35 | `pct_start = 0.3` (R12) | same |
+| M36 | `dirpath = None` (R13) | `test_loader_reads_every_form[polaris_generated]` |
+| M37 | `mode = "max"` (R14) | `test_loader_reads_every_form[org_raw]` |
+| M38 | `batch_size = 32` | same |
+| M39 | defaults not removed from the model description | `test_model_hash_is_the_same_for_every_form_of_one_model[org_raw-org_normalised]` |
+| M40 | scale dict hashed by path | `test_model_hash_follows_the_scale_dict_content_not_its_path` |
+| M41 | `model_hash` of the raw section (the old hash) | `test_model_hash_follows_the_model_section_only` |
+| M42 | numbers not canonicalised | `test_model_hash_is_the_same_for_every_form_of_one_model[org_raw-org_normalised]` |
+| M43 | BetaPID defaults not filled | `test_loader_reads_every_form[pflow_hgq_raw]` |
+| M44 | BetaPID default `p` 2.0 | same (and, run alone, `test_beta_callback_defaults_are_the_hybrid_ones[BetaPID]`) |
+| M45 | classification-task means weighted 1 (R1) | `test_epoch_reduction_over_unequal_batches_equals_lightning[False]` |
+| M46 | mask means weighted by batch size (R2) | same |
+| M47 | regression means weighted 1 | same |
+| M48 | train stage logs the custom metrics | `test_train_stage_logs_only_the_task_metrics` |
+| M49 | `pool_layers` ignored | `test_epoch_reduction_over_unequal_batches_equals_lightning[True]` |
+| M50 | stored dtype not compared (R10) | `test_stored_dtype_other_than_the_models_is_rejected` |
+| M51 | metadata not compared with the sidecar (R11) | `test_metadata_other_than_the_sidecars_is_rejected` |
+| M52 | slot reference matched shortest first (R9) | `test_optimizer_slots_take_the_longest_matching_variable` |
+| M53 | no directory fsync | `test_renames_are_made_durable_by_a_directory_fsync` |
+| M54 | overwrite guard removed | `test_save_does_not_overwrite_a_checkpoint` |
+| M55 | manager writes `step-<N>.npz` again at one step | `test_manager_keeps_last_k_and_the_best` |
+| M56 | float64 not cast | `test_float64_is_cast_to_float32_on_the_host` |
+
 Checkpoint mutants take 200-270 s each (the train-step compile); the others 6-25 s.
 
 ## Deviations
@@ -121,7 +192,8 @@ Checkpoint mutants take 200-270 s each (the train-step compile); the others 6-25
 1. New files outside the listed ones: `src/hepattn/experiments/clic/native_data.py` (the torch half of the adapter, as
    RULES require), `tests/keras_native/s6_fixtures/` (fixtures + generator), `docs/hgq/port_log/S6a_mutations.py`.
 2. Plan 3.9 says "keyed by `variable.path`"; the keys strip auto-generated suffixes (decision 2).
-3. `ClicMetrics` reports per-layer values; the Lightning module pools layers (decision 5).
+3. `ClicMetrics` reports per-layer values by default; the Lightning module pools layers (decision 5;
+   `pool_layers=True` reproduces it).
 4. The resume gate steps with the first model's compiled function (cost); the fresh model is checked by an eager forward.
 5. The `on_test_end` ROOT file of the torch writer is not written (only the h5); `load_convert_h5` reads the native h5.
 
@@ -134,12 +206,17 @@ Checkpoint mutants take 200-270 s each (the train-step compile); the others 6-25
   `val/loss` by real events (Lightning's epoch mean weights by batch size).
 - **S6b:** metrics and the writer need `predict` of the *matched* (permuted) outputs, as torch's `validation_step` /
   `test_step` (after `model.loss`); `permute_outputs` with `matched_loss`'s `idx`.
-- **S6b:** pass `expect_config_hash=rc.model_hash` to `load_checkpoint`; resume data position at an optimizer-step
+- **S6b:** pass `expect_config_hash=rc.model_hash` to `load_checkpoint` (safe since the fix round: the hash is the same
+  for the raw, generated and saved forms, on any host, and for another LR / optimizer / matcher / data setting; a
+  checkpoint written before the fix round has an old-style hash and needs `expect_config_hash=None`); resume data position at an optimizer-step
   boundary with accumulation (`EpochSampler(start_batch)`); call `CheckpointManager.save` at the end of an epoch /
   before walltime (`last` points at the latest step checkpoint).
 - **S6b / S8:** the generated Polaris config defaults to `precision: bf16-mixed`; the user decided fp32 first, so the
   driver must ignore it or the config be generated with `HGQ_PRECISION=32`. `RunConfig.trainer["precision"]` carries it.
-- **S5:** the saved Polaris config's BetaPID has `min_beta: 0.0` (the default); plan 3.6's EBOPs read-out needs beta > 0.
+- **S5:** BetaPID's `min_beta` is 0.0 (the hybrid default, now filled in by the loader for raw configs too); plan 3.6's
+  EBOPs read-out (sum(losses) / beta) needs beta > 0: S5/S6b must clamp or read EBOPs another way when beta is 0.
+- **S6b:** use `ClicMetrics(pool_layers=True)` when comparing with hybrid logs (G4); `ClicMetrics("train")` per
+  logged step with `reset`.
 - **Polaris:** run `CLIC_DATA_DIR=/eagle/hgcal-maskformer-fpga/clic_data CLIC_DATA_REQUIRED=1 python -m pytest -m requiresdata tests/keras_native/test_data_real.py -s`.
   Risk found by reading: `pflow_data.py:461-462` sets `particle_valid` only for non-residual particles among the first
   `n_particles` (pdgid -999 -> class 5, `pflow_data.py:687`), so a residual before a real particle breaks the prefix
