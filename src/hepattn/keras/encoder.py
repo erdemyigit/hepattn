@@ -4,11 +4,14 @@ Residual wrapping (norms, LayerScale, DropPath) and the hybrid-norm schedule are
 REUSED from the torch implementation — norms are the float boundary of the
 quantized model. Only the attention and feed-forward leaves are factory-built.
 
-The keras encoder implements the dense-mask path (torch-SDPA semantics): sequence
-sorting, sliding windows, score mods, and the flash/flex backends are torch-side
-performance features with identical math to the dense path, and are rejected here.
-A torch-model attn_type of flash/flash-varlen is coerced to "torch" with a warning
-so configs written for the GPU model can be ported directly.
+The keras encoder implements the dense-mask path (torch-SDPA semantics): sliding windows,
+score mods, and the flash/flex backends are torch-side performance features with
+identical math to the dense path, and are rejected here. A torch-model attn_type of
+flash/flash-varlen is coerced to "torch" with a warning so configs written for the GPU
+model can be ported directly. Input sorting (``x_sort_value``, org PR #9) is kept: the
+tokens are sorted with the torch ``sort_index`` before the register tokens are added and
+unsorted after they are removed, as in ``hepattn.models.encoder.Encoder.forward``. It is
+invisible to dense attention but sets which Linformer projection row each token uses.
 """
 
 import warnings
@@ -21,7 +24,7 @@ from torch import Tensor, nn
 from hepattn.keras.attention import build_keras_attention
 from hepattn.keras.dense import KerasDense
 from hepattn.keras.factory import LayerFactory
-from hepattn.models.encoder import Residual
+from hepattn.models.encoder import Residual, sort_index
 from hepattn.models.norm import get_hybrid_norm_config
 
 ALLOWED_ATTN_TYPES = {"torch", "flash", "flash-varlen", "linformer"}
@@ -131,10 +134,15 @@ class KerasEncoder(nn.Module):
             raise ValueError(f"KerasEncoder cannot switch to backend '{attn_type}'")
 
     def forward(self, x: Tensor, x_sort_value: Tensor | None = None, kv_mask: Tensor | None = None, **kwargs) -> Tensor:
-        if x_sort_value is not None:
-            raise NotImplementedError("input sorting is a windowed-attention feature, not supported by KerasEncoder")
-
         batch_size = x.shape[0]
+
+        # Sort the tokens by x_sort_value, padding last (torch Encoder.forward)
+        x_sort_idx = None
+        if x_sort_value is not None:
+            x_sort_idx = sort_index(x_sort_value, kv_mask)
+            x = torch.gather(x, dim=-2, index=x_sort_idx.unsqueeze(-1).expand_as(x))
+            if kv_mask is not None:
+                kv_mask = torch.gather(kv_mask, dim=-1, index=x_sort_idx)
 
         # Add register tokens at the beginning of the sequence
         if self.register_tokens is not None:
@@ -152,5 +160,10 @@ class KerasEncoder(nn.Module):
         # Remove register tokens
         if self.register_tokens is not None:
             x = x[:, self.num_register_tokens :]
+
+        # Undo the sort
+        if x_sort_idx is not None:
+            x_unsort_idx = torch.argsort(x_sort_idx, dim=-1)
+            x = torch.gather(x, -2, x_unsort_idx.unsqueeze(-1).expand_as(x))
 
         return x

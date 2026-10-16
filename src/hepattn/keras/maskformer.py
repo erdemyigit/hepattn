@@ -32,6 +32,7 @@ class KerasMaskFormer(MaskFormer):
         target_object: str = "particle",
         matcher: nn.Module | None = None,
         encoder_tasks: nn.ModuleList | None = None,
+        input_sort_field: str | None = None,
         quant: dict | None = None,
     ):
         """Build the keras-backed MaskFormer.
@@ -45,6 +46,9 @@ class KerasMaskFormer(MaskFormer):
             target_object: Target object name used during matching.
             matcher: Hungarian matcher module (reused unchanged, training-only).
             encoder_tasks: Optional tasks run on post-encoder features (Dense nets swapped in place).
+            input_sort_field: Optional input field to order the constituents by (e.g. "phi", org PR #9). The
+                inherited forward concatenates it into key_<field>, the encoder sorts and unsorts, and the decoder
+                passes the sort index to its query cross-attention.
             quant: None for the float reference model, or an HGQ2 QuantSpec dict
                 (keys: weight, datalane, ebops) for the quantization-aware model.
         """
@@ -78,6 +82,7 @@ class KerasMaskFormer(MaskFormer):
             target_object=target_object,
             matcher=matcher,
             encoder_tasks=encoder_tasks,
+            input_sort_field=input_sort_field,
         )
         self.factory = factory
 
