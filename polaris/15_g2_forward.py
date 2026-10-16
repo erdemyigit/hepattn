@@ -87,7 +87,7 @@ def parse_args(argv=None):
 def model_config(args) -> dict:
     """The CLIC MaskFormer as plain dicts (YAML structure). 07_profile.py's model at the default arguments."""
     dim = args.dim
-    lin = {"num_heads": args.heads, "linformer_seq_len": args.linformer_k, "linformer_proj_dim": args.linformer_k}
+    lin = {"num_heads": args.heads, "linformer_seq_len": args.linformer_k, "linformer_k": args.linformer_k}
     task = {"input_object": "query", "output_object": "pflow", "target_object": "particle"}
     return {
         "dim": dim,
