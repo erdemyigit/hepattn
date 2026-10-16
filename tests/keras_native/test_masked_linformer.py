@@ -452,6 +452,10 @@ def test_projection_fractional_bits_are_capped_and_the_table_fits_hls4ml():
         lut, kept = getattr(nattn.core, f"lut_{part}"), getattr(nattn.core, f"kept_{part}")
         assert kif_bits(lut.iq) == {(0, *bits["lane"])}
         assert kif_bits(lut.oq) == {(0, *bits["lut_out"])}
+        # one homogeneous table: one scalar k, i, f per quantizer (kif_bits compares value sets, so it cannot see this)
+        for quantizer in (lut.iq, lut.oq):
+            z = quantizer.quantizer
+            assert [np.size(n(x)) for x in (z.k, z.i, z.f)] == [1, 1, 1], (lut.name, [np.shape(n(x)) for x in (z.k, z.i, z.f)])
         mask_lane, table_lane = kept.iq
         assert kif_bits(mask_lane) == {(0, 1, 0)}  # the plan's 1-bit unsigned mask lane
         assert kif_bits(table_lane) == {(0, *bits["lane"])}
@@ -542,6 +546,8 @@ def test_renorm_and_projection_use_the_quantized_rows(shape):
     core.build()
     rows, gaps = {}, {}
     for label, proj in (("E", core.E), ("F", core.F)):
+        # design decision 3: f starts at min(spec f0, cap) = min(6, 7); the numpy model below reads f, so pin it here
+        assert kif_bits(proj.proj.kq) == kif_bits(proj.tail_q) == {(1, 2, 6)}
         head, tail = n(proj.proj.kernel), n(proj.tail)
         assert tail.shape == (seq_len - kv_len, K)
         hq, tq = quantize_kif_rnd(head, proj.proj.kq), quantize_kif_rnd(tail, proj.tail_q)
@@ -582,8 +588,10 @@ def test_renorm_and_projection_use_the_quantized_rows(shape):
     refs = {variant: reference(rows["E"][variant], rows["F"][variant]) for variant in ("quantized", "float", "float tail")}
     tol = QUANT_E_CORE_TOL[shape]
     assert_parity("masked_linformer.quantized_rows", shape, refs["quantized"], got, atol=tol, rtol=0.0)
-    for variant in ("float", "float tail"):  # controls
-        assert np.abs(got - refs[variant]).max() > 2 * tol, variant
+    # controls: the float rows exceed the tolerance by >= 10x (measured 94x / 120x). The float tail alone does so only
+    # 5.9x for kv_ca (enc_short 19x), so its >= 10x control is the energy check above (>= 1e4x).
+    assert np.abs(got - refs["float"]).max() > 10 * tol
+    assert np.abs(got - refs["float tail"]).max() > 2 * tol
 
 
 EXPECTED_LEAVES = {
@@ -597,9 +605,10 @@ LIVE_MIN_CHANGE = 5e-3  # half the smallest measured change: q_ca 0.134 (rsqrt_k
 
 
 @pytest.mark.parametrize("shape", ["q_ca", "enc", "q_sa"])
-def test_leaf_inventory_and_every_leaf_is_live(shape):
+def test_leaf_inventory_and_every_leaf_is_live(shape, monkeypatch):
     """Quantized: every multiply of the core is the listed HGQ2 class (no float twin left), and coarsening any one leaf's
-    quantizers to 1 fractional bit moves the output, so no leaf is bypassed or inert.
+    quantizers to 1 fractional bit moves the output, so no leaf is bypassed or inert. The rsqrt tables see rank-2
+    inputs (plan 5.6: a rank-3 input fails hls4ml conversion).
     """
     kind = SHAPES[shape][3]
     tattn = torch_attention(shape, 20, qkv_norm=True, norm="LayerNorm")
@@ -615,7 +624,18 @@ def test_leaf_inventory_and_every_leaf_is_live(shape):
     ]
     assert floats == []
     x = make_inputs(shape, 21, sort=shape == "q_ca")
-    base = n(native_out(nattn, x))
+    lut_ranks = []
+    lut_call = QUnaryFunctionLUT.call
+
+    def recording_call(self, inputs, *args, **kwargs):
+        lut_ranks.append((self.name, len(inputs.shape)))
+        return lut_call(self, inputs, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(QUnaryFunctionLUT, "call", recording_call)
+        base = n(native_out(nattn, x))
+    rsqrt = {call for call in lut_ranks if "_rsqrt_" in call[0]}  # QSoftmax's own tables are QUnaryFunctionLUT too
+    assert rsqrt == (set() if kind == "project_unmasked" else {(f"a_{kind}_rsqrt_k", 2), (f"a_{kind}_rsqrt_v", 2)}), lut_ranks
     weak = {}
     for name, leaf in leaves.items():
         with coarsened(leaf) as count:
@@ -627,31 +647,54 @@ def test_leaf_inventory_and_every_leaf_is_live(shape):
     np.testing.assert_array_equal(n(native_out(nattn, x)), base)  # restored
 
 
-# measured on q_ca (B=2, perturbed affines, sort): max |native - org float| high 2.503e-2, coarse 0.7552
-HIGH_TOL = 5.01e-2
+def precision_case() -> tuple[Attention, dict, np.ndarray]:
+    """q_ca (B=2, perturbed affines, qkv_norm, sort) with the q/k/v/out projection biases at 0.
+
+    No QuantSpec place reaches the QDense bias quantizers: they keep HGQ2's default (KBI b 8, i 2, so 6 fractional
+    bits) at every spec. With the perturbed (off-grid) biases that rounding is a floor of 1.11e-2 at every setting
+    from (14, 12) up, which hides the attention's own precision. Zero biases are on every grid.
+    """
+    tattn = torch_attention("q_ca", 0, qkv_norm=True, norm="LayerNorm")
+    with torch.no_grad():
+        tattn.in_proj_bias.zero_()
+        tattn.out_proj.bias.zero_()
+    x = make_inputs("q_ca", 22, sort=True)
+    return tattn, x, torch_out(tattn, x)
+
+
+def precision_model(tattn: Attention, spec) -> NAttention:
+    nattn = native_attention("q_ca", tattn, spec=spec, qkv_norm=True, norm="LayerNorm")
+    assert not any(np.any(n(layer.bias)) for layer in (nattn.q_proj, nattn.k_proj, nattn.v_proj, nattn.out_proj))
+    return nattn
+
+
+# measured max |native - org float|: high 2.147e-2 (cap 7 holds E/F at f = 7; with the cap at 18: 2.985e-4), coarse
+# 0.7650 (35.6x). With the perturbed biases (see precision_case): high 2.529e-2, coarse 0.7898.
+HIGH_TOL = 4.29e-2
 
 
 def test_paired_delta_high_vs_coarse():
-    tattn = torch_attention("q_ca", 0, qkv_norm=True, norm="LayerNorm")
-    x = make_inputs("q_ca", 22, sort=True)
-    ref = torch_out(tattn, x)
-    high = n(native_out(native_attention("q_ca", tattn, spec=QUANT_SPECS["high"], qkv_norm=True, norm="LayerNorm"), x))
-    coarse = n(native_out(native_attention("q_ca", tattn, spec=COARSE_SPEC, qkv_norm=True, norm="LayerNorm"), x))
+    tattn, x, ref = precision_case()
+    high = n(native_out(precision_model(tattn, QUANT_SPECS["high"]), x))
+    coarse = n(native_out(precision_model(tattn, COARSE_SPEC), x))
     err_high, err_coarse = np.abs(high - ref).max(), np.abs(coarse - ref).max()
     assert err_high <= HIGH_TOL
     assert coarse.std(axis=1).mean() > 0.05, "the coarse spec must still depend on the input"
     assert err_coarse >= 10 * err_high, (err_high, err_coarse)
 
 
-# measured: 0.7727, 0.04861, 0.009735, 0.007950
-SWEEP = [(6, 4), (10, 8), (14, 12), (20, 18)]  # (weight b0, datalane/table f0); seq_proj_frac_cap = b0 - i0
+# (weight b0, datalane/table f0); seq_proj_frac_cap = b0 - i0. Measured: 0.7353, 4.479e-2, 2.707e-3, 2.710e-4, so each
+# step falls by 16.4x, 16.6x, 9.99x. Past (20, 18) the error stays at 2.3e-4 to 2.6e-4, and refining every leaf to f = 40
+# raises it to 3.9e-3: consistent with lanes wider than the float32 mantissa. With the perturbed biases: 0.7976, 5.353e-2, 1.169e-2,
+# 1.110e-2 (the bias floor, see precision_case).
+SWEEP = [(6, 4), (10, 8), (14, 12), (20, 18)]
+SWEEP_MIN_STEP = 5.0  # half the smallest measured step
+SWEEP_LAST_TOL = 5.42e-4
 
 
 def test_error_falls_monotonically_with_bitwidth():
     """Above cap 7 the renorm table exceeds hls4ml's limit: these settings are a precision study, not deployable."""
-    tattn = torch_attention("q_ca", 0, qkv_norm=True, norm="LayerNorm")
-    x = make_inputs("q_ca", 22, sort=True)
-    ref = torch_out(tattn, x)
+    tattn, x, ref = precision_case()
     errors = []
     for b0, f0 in SWEEP:
         spec = {
@@ -660,9 +703,9 @@ def test_error_falls_monotonically_with_bitwidth():
             "table": {"default_q_type": "kif", "i0": 2, "f0": f0},
             "seq_proj_frac_cap": b0 - 2,
         }
-        errors.append(float(np.abs(n(native_out(native_attention("q_ca", tattn, spec=spec, qkv_norm=True, norm="LayerNorm"), x)) - ref).max()))
-    assert all(a > b for a, b in itertools.pairwise(errors)), errors
-    assert errors[-1] <= 1.59e-2, errors  # 2x the measured 7.950e-3
+        errors.append(float(np.abs(n(native_out(precision_model(tattn, spec), x)) - ref).max()))
+    assert all(a >= SWEEP_MIN_STEP * b for a, b in itertools.pairwise(errors)), errors
+    assert errors[-1] <= SWEEP_LAST_TOL, errors
 
 
 @pytest.mark.parametrize("shape", ["q_ca", "kv_ca", "enc", "q_sa"])
