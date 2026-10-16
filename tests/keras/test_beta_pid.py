@@ -114,6 +114,13 @@ def test_matches_hgq2_reference(name, impl):
         assert r == pytest.approx(o, rel=1e-12, abs=0), f"{name} epoch {epoch}: hgq2={r!r} port={o!r}"
 
 
+@pytest.mark.parametrize("gains", [{"p": 0.7, "i": 0.3, "d": 0.1}, {"p": 1.3, "i": 0.9, "d": 0.0}])
+def test_matches_hgq2_reference_with_other_gains(gains, impl):
+    """The default gains (p 1, i 0.5, d 0) alone cannot see a law that hard-codes them (S5 mutation M17)."""
+    seq = SEQUENCES["decaying"]
+    assert drive_port(seq, impl=impl, **gains) == pytest.approx(drive_reference(seq, **gains), rel=1e-12, abs=0)
+
+
 def test_reference_test_is_discriminating(impl):
     """The agreement test above fails under any perturbation of the control law.
 

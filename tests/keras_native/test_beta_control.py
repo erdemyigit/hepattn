@@ -66,6 +66,12 @@ def test_controller_equals_hgq2_beta_pid(name, damp):
     assert ours == pytest.approx(ref, rel=1e-12, abs=0)
 
 
+@pytest.mark.parametrize("gains", [{"p": 0.7, "i": 0.3, "d": 0.1}, {"p": 1.3, "i": 0.9, "d": 0.0}])
+def test_controller_equals_hgq2_beta_pid_with_other_gains(gains):
+    seq = SEQUENCES["decaying"]
+    assert drive_native(seq, **gains) == pytest.approx(drive_reference(seq, **gains), rel=1e-12, abs=0)
+
+
 @pytest.mark.parametrize("kwargs", [{"p": 1.05}, {"i": 0.55}, {"d": 0.05}, {"init_beta": INIT_BETA * 1.05}, {"target": TARGET * 1.05}, {"warmup": 3}])
 def test_comparison_is_discriminating(kwargs):
     seq = SEQUENCES["decaying"]
