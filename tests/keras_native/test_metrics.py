@@ -163,7 +163,14 @@ ULP_TOLERANCE = {"regression": 6, "mask_recall": 6, "mask_purity": 6, "accuracy_
 
 
 def ulps(a: float, b: float) -> float:
-    return abs(a - b) / float(np.spacing(np.float32(abs(b)))) if b else abs(a)
+    """``|a - b|`` in float32 spacings at ``b``; at ``b == 0`` the spacing is the smallest subnormal, so 0 needs ~exact 0."""
+    return abs(a - b) / float(np.spacing(np.float32(abs(b))))
+
+
+def test_ulps_of_an_exact_zero_reference_is_strict():
+    assert ulps(0.0, 0.0) == 0.0
+    assert ulps(1e-6, 0.0) > 1e30  # an absolute error of 1e-6 is not "6 ulps" of 0
+    assert ulps(1.0 + float(np.spacing(np.float32(1.0))), 1.0) == 1.0
 
 
 def tolerance(key: str) -> int:
