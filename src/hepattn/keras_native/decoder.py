@@ -84,7 +84,12 @@ class MaskFormerDecoderLayer(keras.layers.Layer):
         self.self_attn_norm_kv = self_attn_norm_kv
 
         def attn(part: str):
-            return build_attention(dim, attn_type=attn_type, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_{part}", **attn_kwargs)
+            part_kwargs = dict(attn_kwargs)
+            if attn_type == "linformer" and part == "q_sa":
+                # org q_sa runs project with mask=None: proj[:Q] only, no renorm. The masked core that a self-attention
+                # build picks by default has renorm and tail rows with no gradient (plan 5.6: native creates no tail here).
+                part_kwargs["linformer_core"] = "project_unmasked"
+            return build_attention(dim, attn_type=attn_type, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_{part}", **part_kwargs)
 
         def residual(fn, part: str, res_norm, post_norm: bool = False):
             return Residual(fn, dim=dim, norm=res_norm, post_norm=post_norm, name=f"{name}_{part}_res", prefix=f"{name}_{part}")
