@@ -26,9 +26,12 @@ API for the S6 driver
     steps.assign_to_model(state)                     # copy the state into the Keras variables (save_weights, export)
     state = steps.init_state()                       # after loading weights into the model
 
-Compiled programs: ``train_step`` one per ``ebops_on`` value (PeriodicEBOPs: 2), ``eval_step`` 1, ``predict_step`` 1, for a
-fixed batch shape (``compile_counts``). Gradient accumulation is the optimizer's (``optim.build_optimizer``): call
-``train_step`` once per micro-batch; every k-th call applies the averaged gradient. Each call makes one host matching call.
+Traces (``compile_counts``): ``train_step`` one per ``ebops_on`` value (PeriodicEBOPs: 2), ``eval_step`` 1, ``predict_step`` 1,
+for a fixed batch shape. Each trace is one compiled program. ``jax.jit``'s dispatch cache is keyed on the Python argument
+types too, so mixing numpy and ``jax.Array`` batches adds cache entries without a retrace; the counts do not see those.
+
+Gradient accumulation is the optimizer's (``optim.build_optimizer``): call ``train_step`` once per micro-batch; every k-th
+call applies the averaged gradient. Each call makes one host matching call.
 
 Speed: Keras' compiled trainer donates its state to ``jax.jit`` (``keras/src/backend/jax/trainer.py``
 ``make_train_function``: ``jit(train_step, donate_argnums=0)``); the G1 spike's custom step did not. ``train_step``
@@ -126,6 +129,7 @@ class TrainStep:
         self.matmul_precision = matmul_precision
         self.with_grad_norm = grad_norm
         self.ebops_leaves = EbopsLeaves(model)
+        self._traces = {"train": 0, "eval": 0, "predict": 0}  # incremented at trace time only (Python side effect)
         self._train = jax.jit(self._train_impl, static_argnames=("ebops_on",), donate_argnums=(0,) if donate else ())
         self._eval = jax.jit(self._eval_impl)
         self._predict = jax.jit(self._predict_impl)
@@ -155,12 +159,14 @@ class TrainStep:
         return grads, ntv, StepOutput(loss, task, losses, penalty, regularization, norm)
 
     def _train_impl(self, state: TrainState, batch, ebops_on: bool):
+        self._traces["train"] += 1
         grads, ntv, out = self._grads_impl(state, batch, ebops_on)
         with self._precision():
             tv, ov = self.optimizer.stateless_apply(state.ov, grads, state.tv)
         return TrainState(tv, ntv, ov), out
 
     def _eval_impl(self, state: TrainState, batch):
+        self._traces["eval"] += 1
         inputs, targets = batch
         with self._precision():
             outputs, _ = self.model.stateless_call(state.tv, state.ntv, inputs, training=False)
@@ -168,6 +174,7 @@ class TrainStep:
         return EvalOutput(outputs, task, losses)
 
     def _predict_impl(self, state: TrainState, inputs):
+        self._traces["predict"] += 1
         with self._precision():
             outputs, _ = self.model.stateless_call(state.tv, state.ntv, inputs, training=False)
         return outputs
@@ -219,8 +226,5 @@ class TrainStep:
         return ebops_readout(float(out.penalty), beta)
 
     def compile_counts(self) -> dict[str, int]:
-        return {
-            "train": self._train._cache_size(),  # noqa: SLF001
-            "eval": self._eval._cache_size(),  # noqa: SLF001
-            "predict": self._predict._cache_size(),  # noqa: SLF001
-        }
+        """Number of traces (= compiled programs) of each jitted step so far, not ``jax.jit`` dispatch-cache entries."""
+        return dict(self._traces)
