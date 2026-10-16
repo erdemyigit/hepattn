@@ -1,8 +1,13 @@
 """Keras-native twins of ``hepattn.models.encoder.{LayerScale, Residual, EncoderLayer, Encoder}``.
 
-Only the dense-mask path exists (as in the hybrid ``hepattn.keras.encoder``): input sorting, sliding windows,
-score mods, flash-varlen unpadding and DropPath raise. ``flash``/``flash-varlen`` are coerced to ``torch`` with a
-warning (identical math on the dense-mask path); ``linformer`` builds ``LinformerAttention``.
+Only the dense-mask path exists (as in the hybrid ``hepattn.keras.encoder``): sliding windows, score mods,
+flash-varlen unpadding and DropPath raise. ``flash``/``flash-varlen`` are coerced to ``torch`` with a warning
+(identical math on the dense-mask path); ``linformer`` goes to ``attention.build_attention``.
+
+Input sorting (org ``encoder.py`` ``sort_index`` and ``Encoder.forward``): with ``x_sort_value`` the encoder sorts the
+tokens and the padding mask (padding last), prepends the registers, runs the layers, strips the registers and
+unsorts. ``keras.ops.argsort`` is stable and torch's is not, so the two order tied values (the ``+inf`` padding)
+differently; valid outputs do not depend on that order.
 
 Names: attention and FFN leaves as in the hybrid (``encoder_l{i}_attn_*``, ``encoder_l{i}_ffn_*``); the parts that
 are torch modules in the hybrid are named ``encoder_l{i}_attn_norm`` / ``_ffn_norm`` (Residual norms),
@@ -20,6 +25,21 @@ from hepattn.keras_native.norm import check_norm, get_hybrid_norm_config, make_n
 
 ALLOWED_ATTN_TYPES = {"torch", "flash", "flash-varlen", "linformer"}
 COERCE_TO_TORCH = {"flash", "flash-varlen"}
+
+
+def sort_index(value, valid=None):
+    """Argsort of ``value`` (B, N) along the last axis with the padding (``valid`` False) last (org ``sort_index``)."""
+    if valid is not None:
+        value = keras.ops.where(valid, value, float("inf"))
+    return keras.ops.argsort(value, axis=-1)
+
+
+def gather_tokens(x, index):
+    """``x[b, index[b, n]]`` for (B, N) or (B, N, D) ``x`` and a (B, N) ``index``."""
+    if len(x.shape) == 2:
+        return keras.ops.take_along_axis(x, index, axis=-1)
+    index = keras.ops.broadcast_to(keras.ops.expand_dims(index, -1), keras.ops.shape(x))
+    return keras.ops.take_along_axis(x, index, axis=-2)
 
 
 class LayerScale(keras.layers.Layer):
@@ -113,6 +133,7 @@ class EncoderLayer(keras.layers.Layer):
         value_residual: bool = False,
         qkv_norm: bool = False,
         hybrid_norm: bool = False,
+        dense_norm_placement: str = "hybridnorm",
         dense_kwargs: dict | None = None,
         attn_kwargs: dict | None = None,
         attn_type: str = "torch",
@@ -120,15 +141,19 @@ class EncoderLayer(keras.layers.Layer):
         name: str = "encoder_layer",
         **kwargs,
     ) -> None:
-        """Residual self-attention + residual feed-forward, as hepattn EncoderLayer."""
+        """Residual self-attention + residual feed-forward, as hepattn EncoderLayer (``dense_norm_placement``: see
+        ``norm.get_hybrid_norm_config``).
+        """
         super().__init__(name=name, **kwargs)
         factory = factory or LayerFactory()
         attn_kwargs = dict(attn_kwargs or {})
         dense_kwargs = dict(dense_kwargs or {})
 
-        attn_norm, dense_post_norm, qkv_norm = get_hybrid_norm_config(norm, depth, hybrid_norm, qkv_norm)
+        attn_norm, dense_post_norm, qkv_norm = get_hybrid_norm_config(norm, depth, hybrid_norm, qkv_norm, dense_norm_placement)
         attn_kwargs["value_residual"] = value_residual
         attn_kwargs["is_first_layer"] = depth == 0
+        if attn_type == "linformer":
+            attn_kwargs["linformer_core"] = "project"  # org encoder self-attention: project with the padding mask (renorm)
 
         self.dim = dim
         attn = build_attention(dim, attn_type=attn_type, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_attn", **attn_kwargs)
@@ -211,8 +236,16 @@ class Encoder(keras.layers.Layer):
             layer.build((None, seq, self.dim))
 
     def call(self, x, kv_mask=None, x_sort_value=None, training=None):
+        """Encode ``x`` (B, N, D); with ``x_sort_value`` (B, N) the layers see the tokens sorted by it, padding last.
+
+        The output is in the input order.
+        """
+        sort_idx = None
         if x_sort_value is not None:
-            raise NotImplementedError("input sorting is a windowed-attention feature, not supported by the keras_native Encoder")
+            sort_idx = sort_index(x_sort_value, kv_mask)
+            x = gather_tokens(x, sort_idx)
+            if kv_mask is not None:
+                kv_mask = gather_tokens(kv_mask, sort_idx)
         num_reg = self.num_register_tokens
         if num_reg is not None:
             batch = keras.ops.shape(x)[0]
@@ -227,4 +260,6 @@ class Encoder(keras.layers.Layer):
 
         if num_reg is not None:
             x = x[:, num_reg:]
+        if sort_idx is not None:
+            x = gather_tokens(x, keras.ops.argsort(sort_idx, axis=-1))
         return x

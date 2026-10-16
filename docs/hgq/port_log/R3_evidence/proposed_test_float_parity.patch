@@ -1,0 +1,43 @@
+diff --git a/tests/keras_native/test_float_parity.py b/tests/keras_native/test_float_parity.py
+index 1d5a235..6b70ee8 100644
+--- a/tests/keras_native/test_float_parity.py
++++ b/tests/keras_native/test_float_parity.py
+@@ -82,11 +82,14 @@ def test_dense_parity(name):
+
+
+ def test_dense_structure_and_names():
+-    """SwiGLU doubles the inner projection; names follow the hybrid ({name}_hidden{i}, {name}_final)."""
++    """SwiGLU splits the packed inner projection into x1 and x2 halves joined by an elementwise einsum (plan 5.4);
++    names follow the hybrid ({name}_hidden{i}_x1, {name}_hidden{i}_x2, {name}_hidden{i}_glu, {name}_final).
++    """
+     gated = NDense(64, activation="SwiGLU", name="ffn")
+     gated.build((None, 5, 64))
+-    assert gated.hidden[0].kernel.shape == (64, 256)
+-    assert [layer.name for layer in (*gated.hidden, gated.final)] == ["ffn_hidden0", "ffn_final"]
++    assert gated.hidden[0].kernel.shape == gated.gates[0].kernel.shape == (64, 128)
++    names = [layer.name for layer in (*gated.hidden, *gated.gates, *gated.products, gated.final)]
++    assert names == ["ffn_hidden0_x1", "ffn_hidden0_x2", "ffn_hidden0_glu", "ffn_final"]
+     plain = NDense(64, hidden_layers=2, name="ffn")
+     plain.build((None, 5, 64))
+     assert [layer.kernel.shape for layer in plain.hidden] == [(64, 128), (128, 128)]
+@@ -95,7 +98,6 @@ def test_dense_structure_and_names():
+ @pytest.mark.parametrize(
+     ("kwargs", "err"),
+     [
+-        ({"activation": "SwiGLU"}, NotImplementedError),
+         ({"dropout": 0.1}, NotImplementedError),
+         ({"activation": "Mish"}, ValueError),
+     ],
+@@ -411,12 +413,6 @@ def test_encoder_unsupported_raises(kwargs, err):
+         NEncoder(num_layers=1, dim=32, attn_kwargs={"num_heads": 4}, **kwargs)
+
+
+-def test_encoder_rejects_sorting():
+-    nenc = NEncoder(num_layers=1, dim=32, attn_kwargs={"num_heads": 4})
+-    with pytest.raises(NotImplementedError):
+-        nenc(np.zeros((1, 4, 32), np.float32), x_sort_value=np.zeros((1, 4), np.float32))
+-
+-
+ def test_encoder_layer_names_follow_hybrid():
+     nenc = NEncoder(num_layers=2, dim=32, hybrid_norm=True, value_residual=True, num_register_tokens=8, attn_kwargs={"num_heads": 4})
+     nenc.build((None, 10, 32))

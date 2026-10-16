@@ -17,11 +17,9 @@ from hepattn.keras_native.dense import Dense
 from hepattn.keras_native.encoder import Encoder, LayerScale
 from hepattn.keras_native.factory import LayerFactory
 from hepattn.keras_native.input import FourierPositionEncoder, InputNet
-from hepattn.keras_native.linformer import LinformerAttention
 from hepattn.models.dense import Dense as TorchDense
 from hepattn.models.encoder import Encoder as TorchEncoder
 from hepattn.models.encoder import LayerScale as TorchLayerScale
-from hepattn.models.linformer import LinformerAttention as TorchLinformer
 from hepattn.models.posenc import FourierPositionEncoder as TorchFourier
 
 from .golden.cases import QUANT_SPECS
@@ -67,24 +65,6 @@ def test_fourier_b_is_frozen_normal_with_std_scale(scale):
         assert abs(sample.mean()) < 0.05 * scale
 
 
-@pytest.mark.parametrize("rank", [64, 256])
-def test_linformer_projections_are_uniform_in_inverse_sqrt_k(rank):
-    seq_len = 256
-    layer = LinformerAttention(32, num_heads=4, seq_len=seq_len, k=rank)
-    layer.build((None, 168, 32))
-    tlin = TorchLinformer(32, seq_len=seq_len, k=rank, heads=4)
-    bound = 1.0 / math.sqrt(rank)
-    for name in ("proj_k", "proj_v"):
-        got, ref = n(getattr(layer, name)), tn(getattr(tlin, name))
-        assert getattr(layer, name).trainable
-        assert got.shape == ref.shape == (seq_len, rank)
-        for sample in (got, ref):
-            assert np.abs(sample).max() <= bound * FP32_SLACK
-            assert np.abs(sample).max() > 0.95 * bound
-            assert sample.std() == pytest.approx(bound / math.sqrt(3), rel=STD_RTOL)
-    assert not np.array_equal(n(layer.proj_k), n(layer.proj_v)), "proj_k and proj_v must be independent draws"
-
-
 def test_register_tokens_are_standard_normal():
     regs, dim = 8, 4096
     encoder = Encoder(num_layers=0, dim=dim, num_register_tokens=regs)
@@ -99,31 +79,44 @@ def test_register_tokens_are_standard_normal():
 
 
 def dense_layers(module) -> list:
-    return [*module.hidden, module.final]
+    """Every kernel-holding leaf; a SwiGLU Dense has the x1 and x2 halves of each hidden layer."""
+    return [*module.hidden, *module.gates, module.final]
 
 
 def torch_linears(module) -> list:
     return [layer for layer in module.modules() if isinstance(layer, torch.nn.Linear)]
 
 
+def torch_pieces(module, gate: bool) -> list[tuple[torch.Tensor, torch.Tensor, int]]:
+    """(weight, bias, fan_in) in ``dense_layers`` order; a SwiGLU hidden Linear splits by rows into x1 and gate."""
+    *hidden, final = torch_linears(module)
+    if gate:
+        pieces = [(lin.weight.chunk(2, 0)[half], lin.bias.chunk(2, 0)[half], lin.in_features) for half in (0, 1) for lin in hidden]
+    else:
+        pieces = [(lin.weight, lin.bias, lin.in_features) for lin in hidden]
+    return [*pieces, (final.weight, final.bias, final.in_features)]
+
+
 @pytest.mark.parametrize("mode", ["float", "high"])
 @pytest.mark.parametrize("activation", ["SiLU", "SwiGLU"])
 def test_dense_torch_init_matches_nn_linear(mode, activation):
-    """init='torch': kernel and bias U(+-1/sqrt(fan_in)) per layer, as the torch Dense the hybrid ports from."""
-    if mode != "float" and activation == "SwiGLU":
-        pytest.skip("SwiGLU is float only")
+    """init='torch': kernel and bias U(+-1/sqrt(fan_in)) per layer, as the torch Dense the hybrid ports from.
+
+    SwiGLU: both halves of the packed torch Linear(in, 2h) have its fan-in, so both native halves take its bound.
+    """
     cfg = {"input_size": 512, "output_size": 64, "hidden_layers": [2048], "activation": activation}
     factory = LayerFactory(QUANT_SPECS[mode])
     with factory.scopes():
         dense = Dense(**cfg, init="torch", factory=factory)
         dense.build((None, 10, 512))
     tdense = TorchDense(**{**cfg, "activation": torch.nn.SiLU() if activation == "SiLU" else "SwiGLU"})
-    for layer, linear in zip(dense_layers(dense), torch_linears(tdense), strict=True):
-        fan_in = linear.in_features
+    pieces = torch_pieces(tdense, activation == "SwiGLU")
+    assert len(pieces) == (3 if activation == "SwiGLU" else 2)
+    for layer, (weight, tbias, fan_in) in zip(dense_layers(dense), pieces, strict=True):
         bound = 1.0 / math.sqrt(fan_in)
         kernel, bias = n(layer.kernel), n(layer.bias)
-        assert kernel.shape == tuple(reversed(linear.weight.shape))
-        for sample, ref in ((kernel, tn(linear.weight)), (bias, tn(linear.bias))):
+        assert kernel.shape == tuple(reversed(weight.shape))
+        for sample, ref in ((kernel, tn(weight)), (bias, tn(tbias))):
             for values in (sample, ref):
                 assert np.abs(values).max() <= bound * FP32_SLACK
                 assert np.abs(values).max() > 0.75 * bound
@@ -132,10 +125,16 @@ def test_dense_torch_init_matches_nn_linear(mode, activation):
                 assert sample.std() == pytest.approx(bound / math.sqrt(3), rel=STD_RTOL)
 
 
-def test_dense_keras_init_is_glorot_with_zero_bias():
-    """init='keras' (the default; the hybrid's encoder/decoder Dense layers): glorot-uniform kernel, zero bias."""
-    dense = Dense(input_size=512, output_size=64, hidden_layers=[2048])
+@pytest.mark.parametrize("activation", ["SiLU", "SwiGLU"])
+def test_dense_keras_init_is_glorot_with_zero_bias(activation):
+    """init='keras' (the default; the hybrid's encoder/decoder Dense layers): glorot-uniform kernel, zero bias.
+
+    SwiGLU: as in the hybrid twin (R4a), each half is its own (in, h) leaf with the keras default bound
+    sqrt(6 / (in + h)), not the bound of the packed (in, 2h) torch kernel (0.0484 vs 0.0361 here).
+    """
+    dense = Dense(input_size=512, output_size=64, hidden_layers=[2048], activation=activation)
     dense.build((None, 10, 512))
+    assert len(dense_layers(dense)) == (3 if activation == "SwiGLU" else 2)
     for layer in dense_layers(dense):
         fan_in, fan_out = layer.kernel.shape
         limit = math.sqrt(6.0 / (fan_in + fan_out))

@@ -1,0 +1,6 @@
+keys with attn_mask: ['layer_0.attn_mask', 'layer_1.attn_mask', 'layer_2.attn_mask', 'layer_3.attn_mask']
+final.mask.pflow_node_logit: n=34500 tol=8.31e-04 min|logit-logit(0.1)|=8.237e-04 ratio=0.99 n_within_10tol=12 maxerr=8.58e-06
+layer_0.mask.pflow_node_logit: n=34500 tol=4.35e-04 min|logit-logit(0.1)|=8.696e-03 ratio=20.00 n_within_10tol=0 maxerr=3.58e-06
+layer_1.mask.pflow_node_logit: n=34500 tol=2.64e-04 min|logit-logit(0.1)|=1.062e+00 ratio=4015.51 n_within_10tol=0 maxerr=1.91e-06
+layer_2.mask.pflow_node_logit: n=34500 tol=3.93e-04 min|logit-logit(0.1)|=1.842e-01 ratio=468.30 n_within_10tol=0 maxerr=2.86e-06
+layer_3.mask.pflow_node_logit: n=34500 tol=5.15e-04 min|logit-logit(0.1)|=5.410e-04 ratio=1.05 n_within_10tol=7 maxerr=5.72e-06

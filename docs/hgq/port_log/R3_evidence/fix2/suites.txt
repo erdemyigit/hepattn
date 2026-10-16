@@ -1,0 +1,46 @@
+Final runs at cdbce56 (src/tests identical to the working tree of that commit).
+## wt_full2 ($S/r3fix2/logs/wt_full2.log)
+FAILED tests/keras_native/test_float_parity.py::test_dense_structure_and_names
+FAILED tests/keras_native/test_float_parity.py::test_dense_unsupported_raises[kwargs0-NotImplementedError]
+FAILED tests/keras_native/test_float_parity.py::test_encoder_rejects_sorting
+3 failed, 394 passed, 2 skipped, 40 xfailed, 1 warning in 250.75s (0:04:10)
+EXIT 1
+## wt_patched ($S/r3fix2/logs/wt_patched.log)
+SKIPPED [1] tests/keras_native/test_collection_guard.py:41: hybrid env not found at $S/r3fix2/hepattn/.venv/bin/python
+SKIPPED [1] tests/keras_native/test_pr8_layers.py:323: needs R2's masked-Linformer Attention (RETARGET_ORG_MAIN.md section 5.6)
+SKIPPED [1] tests/keras_native/test_pr8_layers.py:740: needs R2's masked-Linformer Attention (RETARGET_ORG_MAIN.md section 5.6)
+394 passed, 3 skipped, 40 xfailed, 1 warning in 234.03s (0:03:54)
+EXIT 0
+## merged_full2 ($S/r3fix2/logs/merged_full2.log)
+FAILED tests/keras_native/test_lane_integration.py::test_native_model_outputs_train_through_the_matched_loss
+FAILED tests/keras_native/test_lane_integration.py::test_dummy_targets_give_the_documented_inf
+FAILED tests/keras_native/test_maskformer.py::test_unsupported_configs_raise[decoder__dynamic_queries-NotImplementedError]
+FAILED tests/keras_native/test_maskformer.py::test_unsupported_configs_raise[decoder__decoder_layer_config__cross_attn_mode-NotImplementedError]
+FAILED tests/keras_native/test_maskformer.py::test_unsupported_configs_raise[decoder__local_strided_attn-NotImplementedError]
+FAILED tests/keras_native/test_maskformer.py::test_unsupported_configs_raise[decoder__fast_local_ca-NotImplementedError]
+FAILED tests/keras_native/test_maskformer.py::test_unsupported_configs_raise[decoder__posenc-NotImplementedError]
+FAILED tests/keras_native/test_maskformer.py::test_unsupported_configs_raise[decoder__use_query_masks-NotImplementedError]
+FAILED tests/keras_native/test_maskformer.py::test_unsupported_configs_raise[decoder__decoder_layer_config__attn_kwargs-ValueError]
+FAILED tests/keras_native/test_maskformer.py::test_unsupported_task_options_raise
+FAILED tests/keras_native/test_maskformer.py::test_from_config_reads_pflow_hgq_yaml
+FAILED tests/keras_native/test_maskformer.py::test_decoder_does_not_track_tasks
+FAILED tests/keras_native/test_mf_golden.py::test_init_quantizer_state_matches_hybrid[mf_lin-high]
+FAILED tests/keras_native/test_mf_golden.py::test_init_quantizer_state_matches_hybrid[mf_lin-low]
+FAILED tests/keras_native/test_mf_golden.py::test_init_quantizer_state_matches_hybrid[mf_lin-prod]
+FAILED tests/keras_native/test_mf_golden.py::test_init_quantizer_state_matches_hybrid[mf_lin-prodsat]
+FAILED tests/keras_native/test_mf_jit.py::test_jitted_float_forward_equals_eager
+FAILED tests/keras_native/test_quantized_golden.py::test_init_quantizer_state_matches_hybrid[enc_lin-high]
+FAILED tests/keras_native/test_quantized_golden.py::test_init_quantizer_state_matches_hybrid[enc_lin-low]
+ERROR tests/keras_native/test_mf_jit.py::test_forward_compiles_once
+ERROR tests/keras_native/test_mf_jit.py::test_train_step_compiles_once_and_every_variable_gets_a_gradient
+ERROR tests/keras_native/test_mf_jit.py::test_quant_losses_come_back_from_stateless_call
+19 failed, 412 passed, 2 skipped, 39 xfailed, 1 warning, 3 errors in 217.24s (0:03:37)
+EXIT 1
+## m_r3c ($S/r3fix2/logs/m_r3c.log)
+36 passed in 66.74s (0:01:06)
+EXIT 0
+## hybrid ($S/r3fix2/logs/hybrid.log)
+119 passed, 8 skipped, 42541 warnings in 193.06s (0:03:13)
+EXIT 0
+merged_full2 failure set == reviewer's merged_native.log set (sorted diff empty); all 22: TypeError linformer_proj_dim
+wt_patched and hybrid ran at c93276c content minus the cdbce56 call-site cores (Helen's pre-merge layer ignores the key)

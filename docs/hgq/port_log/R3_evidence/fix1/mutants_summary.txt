@@ -1,0 +1,8 @@
+x04_numpy_sort: FAILED tests/keras_native/test_pr8_layers.py::test_pr8_layers_train_under_jit[encoder]  | 1 failed, 2 passed, 31 deselected in 38.88s | EXIT 1
+x07_extra_keys_ignored: FAILED tests/keras_native/test_pr8_layers.py::test_encoder_spec_is_unwrapped_and_dim_checked  | 1 failed, 33 deselected in 9.23s | EXIT 1
+f01_ellipsis_equation: FAILED tests/keras_native/test_pr8_layers.py::test_swiglu_leaves_and_names - ...  | 1 failed, 33 deselected in 8.92s | EXIT 1
+f02_unpacked_glorot: FAILED tests/keras_native/test_init.py::test_dense_keras_init_is_glorot_with_zero_bias[SwiGLU]  | 1 failed, 1 passed, 12 deselected in 9.08s | EXIT 1
+f03_logit_shift: FAILED tests/keras_native/test_pr8_layers.py::test_org_model_with_dense_attention_equals_torch  | 1 failed, 33 deselected in 24.38s | EXIT 1
+f04_logit_scale: FAILED tests/keras_native/test_pr8_layers.py::test_org_model_with_dense_attention_equals_torch  | 1 failed, 33 deselected in 28.78s | EXIT 1
+m07_silu_on_x1: FAILED tests/keras_native/test_pr8_layers.py::test_swiglu_leaves_and_names - ... FAILED tests/keras_native/test_pr8_layers.py::test_swiglu_float_equals_torch[ffn_64] FAILED tests/keras_native/test_pr8_layers.py::test_swiglu_float_equals_torch[innet_27_to_64] FAILED tests/keras_native/test_pr8_layers.py::test_swiglu_float_equals_torch[two_hidden] FAILED tests/keras_native/test_pr8_layers.py::test_swiglu_quantized_paired_delta[ffn_64] FAILED tests/keras_native/test_pr8_layers.py::test_swiglu_quantized_paired_delta[innet_27_to_64]  | 6 failed, 2 passed, 26 deselected in 32.71s | EXIT 1
+m08_product_not_a_leaf: FAILED tests/keras_native/test_pr8_layers.py::test_swiglu_quantized_leaves_are_live  | 1 failed, 7 passed, 26 deselected in 43.88s | EXIT 1
