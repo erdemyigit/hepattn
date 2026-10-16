@@ -12,11 +12,9 @@ import torch
 from torch import nn
 
 from hepattn.keras_native.attention import Attention as NativeAttention
-from hepattn.keras_native.linformer import LinformerAttention as NativeLinformer
 from hepattn.models.activation import SwiGLU
 from hepattn.models.attention import Attention
 from hepattn.models.encoder import LayerScale
-from hepattn.models.linformer import LinformerAttention
 
 
 def _np(t: torch.Tensor) -> np.ndarray:
@@ -94,18 +92,6 @@ def port_attention(tattn: Attention, nattn: NativeAttention) -> None:
         assert nattn.core is not None, f"{nattn.name}: build the native attention before porting"
         nattn.core.E.assign_full(_np(tattn.proj_k))
         nattn.core.F.assign_full(_np(tattn.proj_v))
-
-
-@torch.no_grad()
-def port_linformer(tlin: LinformerAttention, nlin: NativeLinformer) -> None:
-    """Helen's LinformerAttention (``hepattn.models.linformer``) -> native twin; kept for R5's old goldens until their removal."""
-    assert not tlin.share_kv, "share_kv is not ported"
-    assign_dense(nlin.to_q, tlin.to_q.weight, None)
-    assign_dense(nlin.to_k, tlin.to_k.weight, None)
-    assign_dense(nlin.to_v, tlin.to_v.weight, None)
-    assign_dense(nlin.to_out, tlin.to_out.weight, tlin.to_out.bias)
-    nlin.proj_k.assign(_np(tlin.proj_k))
-    nlin.proj_v.assign(_np(tlin.proj_v))
 
 
 def port_any_attention(tattn: Attention, nfn) -> None:
