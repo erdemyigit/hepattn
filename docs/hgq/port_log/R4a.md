@@ -17,6 +17,7 @@ branch `rt/r4` from R0 `5db27a8`. Date 2026-10-15, macOS arm64, CPU only, torch 
 | `88fc24e` | `07_profile.py`, `15_g2_forward.py`: `linformer_k` (R0 open issue); ruff debt of `07_profile.py`. |
 | `316cdb3` | `docs/hgq/USAGE.md`. |
 | `921d87b` | `test_default_is_the_linformer_model` (mutant m6 survived `test_polaris_config.py` before it). |
+| `a214354`..`a07ed1e` | Fix round 1 (section "Fix round 1" below). |
 
 ## Gates
 
@@ -27,17 +28,17 @@ The R1-R3 lanes ran their suites on the same machine at the same time, so wall t
 
 | Gate | Result | Control (makes it fail) |
 |---|---|---|
-| Hybrid float parity vs org torch, full model (2x measured) | **pass** for dense attention, seeds 0 and 1: outputs <= 2.4e-5, losses <= 3.4e-7 (metric and numbers below), 4/4 attention-mask booleans equal. Linformer rows: strict xfail (`AttributeError`), R4b (deviation 1) | PR #8 controls at model level: `ca_dense_sa` 15.6 / 3.49e-2, `self_attn_norm_kv=False` 5.35 / 3.27e-3 (>= 10x), `hybridnorm` refused. Mutants m1, m2 |
-| Quantized-SwiGLU paired delta | **pass**, 3 org shapes: high <= 2.6e-2 (measured <= 1.30e-2), low >= 10x high (11x-62x), low/float corr > 0.5; leaf classes `QDense, QDense, QEinsum`; each leaf's input quantizer live (>= 5.86e-2); EBOPs > 0 and differentiable per leaf | m2 (silu on x1), m11 (product not through the einsum: 4 rows fail) |
+| Hybrid float parity vs org torch, full model (2x measured) | **pass** for dense attention, seeds 0 and 1: outputs <= 3.3e-5 (fix round 1; was 2.4e-5), losses <= 3.4e-7 (metric and numbers below), 4/4 attention-mask booleans equal. Linformer rows: strict xfail (`AttributeError`), R4b (deviation 1) | PR #8 controls at model level: `ca_dense_sa` 15.6 / 3.49e-2, `self_attn_norm_kv=False` 5.35 / 3.27e-3 (>= 10x), `hybridnorm` refused. Mutants m1, m2 |
+| Quantized-SwiGLU paired delta | **pass**, 3 org shapes: high <= 2.6e-2 (measured <= 1.30e-2), low >= 10x high (11x-62x), low/float corr > 0.5; leaf classes `QDense, QDense, QEinsum`; each leaf's input quantizer live (>= 5.86e-2); EBOPs > 0 and differentiable per leaf; zero-bias high spec <= 8.6e-5 (measured <= 4.27e-5, fix round 1); at model level all 18 product leaves are in `keras_layers()`, the optimizer groups and `quant_losses()` (fix round 1) | m2 (silu on x1), m11 (product not through the einsum: 4 rows fail), f2, f5 |
 | Generated Polaris config builds, float and quantized | **pass**, `linformer` and `torch`: built by jsonargparse with `MPflowHGQ` (as `main_hgq.py`); `proj_k` shapes {(168, 64), (160, 64)} (R0 carried gate); FastLayerNorm, `ca_sa_dense`, `self_attn_norm_kv`, phi sort, scipy solver, SwiGLU leaves. The YAML equals the org model section up to the documented edits; the default is the Linformer model | R0's generator (`5db27a8`): 11/11 rows fail (`$S/r4a/mut/m13.log`). Mutants m5, m6, m7, m8 |
 | Generated config forward + matched loss | **pass** for `HGQ_ATTN=torch`, float and quantized: 17 finite loss terms (layer_0-3 and final). **deferred to R4b** for the default `linformer` config: strict xfail (`AssertionError`, Helen's layer refuses k=64 < 160 keys under the decoder mask) | — |
-| torch/hybrid state_dict key + shape check | **pass** (dense, float and quantized): 184 torch entries all covered exactly once by 292 hybrid entries; quantized adds only quantizer/beta/ebops entries (deviation 5). Linformer rows strict xfail (R4b) | m12 (final linear not ported): both rows fail |
-| Sorting mechanics | **pass**: round trip exact on a non-identity sort; position-stub encoder parity 7.15e-7 (tol 1.43e-6); `kv_sort_idx` = torch `sort_index` at every `q_ca`, `None` at `q_sa`/`kv_ca`, in hybrid and torch | unsorted hybrid 2.54; no `input_sort_field` gives `None`; m3, m4, m5 |
+| torch/hybrid state_dict key + shape check | **pass** (dense, float and quantized): 184 torch entries, every element covered exactly once by 292 hybrid entries (counted per element since fix round 1); quantized adds only quantizer/beta/ebops entries (deviation 5). Linformer rows strict xfail (R4b) | m12 (final linear not ported), f1 (x2 ported from the x1 chunk): both rows fail |
+| Sorting mechanics | **pass**: round trip exact on a non-identity sort; position-stub encoder parity 7.15e-7 (tol 1.43e-6), with prefix padding and with padding between valid tokens (fix round 1); `kv_sort_idx` = torch `sort_index` at every `q_ca`, `None` at `q_sa`/`kv_ca`, in hybrid and torch | unsorted hybrid 2.54 / 2.60; no `input_sort_field` gives `None`; m3, m4, m5, f3 |
 | `HEPATTN_BRANCH` | **pass**: `repo_dir.sh` defaults/overrides; all `.pbs` parse and use `$HEPATTN_DIR`; setup refuses to switch an existing clone's branch (run offline on a copy with a stub `uv`) | the right-branch control passes the guard; m9, m10 |
-| `tests/keras` + `tests/polaris` (hybrid env) | **pass**: final (`921d87b`) 169 passed, 8 skipped, 6 xfailed, 0 failed, 0 xpassed (`v1`: 168; R0: 119 / 8) | strict xfails: a premature R4b pass would be `XPASS(strict)` = FAILED |
+| `tests/keras` + `tests/polaris` (hybrid env) | **pass**: fix round 1 (`af84706`, `$S/r4a/logs/fix1.hybrid.log`) 177 passed, 8 skipped, 6 xfailed, 0 failed, 0 xpassed; `a07ed1e` only reorders two asserts (state_dict rows re-run: 2 passed, 2 xfailed). R4a final (`921d87b`) 169; R0 119 / 8 | strict xfails: a premature R4b pass would be `XPASS(strict)` = FAILED |
 | `tests/keras/test_pr8_layer_options.py` (carried from R0) | **pass** (part of the suite) | — |
-| Native `tests/keras_native` (not changed by this lane) | 314 passed, 1 skipped, 41 xfailed, 0 xpassed: same as R0 | — |
-| Torch `tests/models tests/polaris tests/loss` | 522 passed, 173 skipped, 0 failed: same as R0 | — |
+| Native `tests/keras_native` (not changed by this lane) | 314 passed, 1 skipped, 41 xfailed, 0 xpassed: same as R0 (fix round 1 re-run: same) | — |
+| Torch `tests/models tests/polaris tests/loss` | 522 passed, 173 skipped, 0 failed: same as R0 (fix round 1 re-run: same) | — |
 | `prek run --files <changed>` | pass | — |
 
 ## Mutation check
@@ -111,6 +112,23 @@ copy (never the worktree) and the named tests run there with `PYTHONPATH=<copy>/
   input-quantizer bypass changes the low output by 5.86e-2 .. 6.68e-1. The high floor is HGQ2's default bias
   quantizer, which the factory scopes do not set: a plain SiLU `Dense(256)` has the same floor (1.31e-2).
 
+## Fix round 1 (review of R4a)
+
+Evidence in `$S/r4a_fix/` (`LOG.md`, `probes/`, `logs/`, `mut/`). Mutants were applied to a `git archive` copy of
+`af84706` by `$S/r4a_fix/mut/run_mutants.sh`, which also re-ran m1-m12: every one is still killed (m6 by
+`test_default_is_the_linformer_model`, re-run in its copy: 1 failed). Results: `$S/r4a_fix/mut/results.txt`.
+
+| Review issue | Change | Proof that the test now discriminates |
+|---|---|---|
+| (major) state_dict "covered exactly once" counted only element totals per torch entry | `state_map` keeps an int cover count per element; the chunk of a relation (`chunk j/n`) adds 1 to that chunk's rows only; `check_state_map` requires every element = 1, and the test then requires the `chunk*/2.T` and `chunk*/3.T` relations | f1 (`gates[i]` gets `w1, b1`): both dense rows fail on the coverage check (`input_nets.0.net.net.0.weight`: 1458 uncovered, 1458 covered twice; `$S/r4a_fix/mut/f1_x2_gets_w1.reorder.log`). Before: passed (review) |
+| (major) SwiGLU products not checked in the model-level QAT walks | `test_swiglu_products_are_trained_with_the_model`: generated `HGQ_ATTN=torch` config, quantized; all 18 product leaves (1 input net, 6 encoder, 8 decoder, 3 task nets) are `QEinsum`, are in `keras_layers()`, have their trainable variables in `trainable_parameter_groups()`, and their EBOPs terms are in `quant_losses()` | f2 (`self.products = products`, the review's r7): fails (`innet0_net_hidden0_glu`, ... not in `keras_layers()`) |
+| (minor) high-spec SwiGLU row blind below the bias-quantizer floor | `test_quantized_swiglu_high_spec_without_bias`: biases set to 0, tolerance 8.6e-5 = 2x the max of 2.96e-5 .. 4.27e-5 (3 shapes x seeds 0-2, `$S/r4a_fix/logs/swiglu_zero_bias.out`); the biased row is kept | f5 (quantized-only 1% product scale): the 3 zero-bias rows fail (4.97e-3 .. 7.58e-3); the biased paired-delta rows still pass, which confirms the review's finding |
+| (minor, reported twice) the `kv_mask` gather after sorting is never exercised | `test_sorting.py`: the position-stub parity and its control also run with every third token padded (`test_interleaved_fixture_is_not_a_prefix` guards the fixture). Measured 7.15e-7 (same as prefix), unsorted control 2.60 | f3 (gather deleted, the review's r1): the interleaved row fails (0.813); the prefix row passes, as the review said |
+| (minor) OUT_TOL headroom | Re-measured seeds 0-7 (`$S/r4a_fix/logs/measure_seeds.out`): outputs 1.18e-5, 8.26e-6, 9.60e-6, 1.12e-5, 1.44e-5, 1.21e-5, **1.65e-5**, 1.09e-5. OUT_TOL = 3.3e-5. Losses: the maximum for the same seed changes between runs (seed 0: 5.3e-8 at R4a, 1.60e-7 now; outputs reproduce to 4 digits); the max over all runs is 1.70e-7, so LOSS_TOL stays 3.4e-7 | controls unchanged: `ca_dense_sa` 15.6 and `self_attn_norm_kv=False` 5.35 are >= 10x OUT_TOL |
+| (minor) generator-structure defects killed only through fixture errors | `test_generator_merge_is_a_deep_overlay` takes `merge()` from the generator source with `ast` (importing the script would write a config), checks a nested case, that the input is not changed, and equality with the test-local `merge` on base + linformer | f4 (`out[key] = value`): the assertion fails (not a fixture error) |
+| (minor) `15_g2_forward.py --mode jax` ignores `--linformer-k` until R2 | `check_native_linformer_k` raises `SystemExit` when a native `LinformerAttention` has another `k`; it finds nothing once R2 removes that class | probe in `.venv-jax` (`$S/r4a_fix/logs/g2_k_guard.out`): `--linformer-k 256` accepted; `--linformer-k 64` refused, the native model has k = 256 |
+| (minor) BetaPID setpoint describes the old model | `03_make_config.py`: comment and `OLD_MODEL_EBOPS`; the printout says the 1.6755e15 reference is pre-retarget and, for the Linformer config, warns that the setpoint is not re-derived | open issue below |
+
 ## Open issues
 
 - **R4b**: turn on the 6 strict xfails (`test_org_model_parity.py`: 2 parity, 2 state_dict; `test_polaris_config.py`:
@@ -136,4 +154,11 @@ copy (never the worktree) and the named tests run there with `PYTHONPATH=<copy>/
   not configure `place="bias"`. Not changed here (R2 owns the factory).
 - Evidence (`$S/r4a/`: probes, mutant copies and logs) is in `/private/tmp`, which is not durable; R5 may copy it
   into `port_log/retarget/` like R0 did.
+- **Before any QAT sweep on the new model**: re-measure total EBOPs on the R4b model and re-derive `HGQ_TARGET_EBOPS`
+  (1.0e15), `HGQ_INIT_BETA` and `HGQ_PID_I`. They and the 1.6755e15 reference come from the pre-retarget model, whose
+  EBOPs were 99.99% the masked-softmax fill term (plan section 7, risk 1). The generator prints a warning.
+- **G2 (`15_g2_forward.py`)**: `--mode jax` with `--linformer-k` other than 256 exits until R2 makes native
+  `build_attention` read `linformer_k`. Default runs (k = 256) are unaffected.
+- **Carried gate**: re-measure the full-model `OUT_TOL`/`LOSS_TOL` (and the SwiGLU zero-bias tolerance) on the first
+  Linux/GPU run; the loss maximum varies between runs on the same seed (up to 3x).
 - Nothing was pushed; no Polaris job was launched; the `hepattn` main working tree was not touched.
