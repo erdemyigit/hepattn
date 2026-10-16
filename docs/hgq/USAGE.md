@@ -50,6 +50,13 @@ on a uv-managed CPython **3.12.0** (`requires-python = "== 3.12"` means *exactly
 3.12.0 under PEP 440, so a system 3.12.x is rejected), exports `PYTHONNOUSERSITE=1`,
 skips flash-attn, and verifies the result. See `polaris/README.md`.
 
+The branch is chosen with `HEPATTN_BRANCH` (`polaris/repo_dir.sh`; set it in `polaris/env.sh`, default
+`keras-hgq2`). `keras-hgq2` keeps its clone at `$WORK_ROOT/hepattn`; any other branch gets its own clone,
+`$WORK_ROOT/hepattn-<branch>` (or `HEPATTN_DIR`), so jobs running from the `keras-hgq2` clone are never touched.
+The setup refuses to switch the branch of an existing clone, and for branches other than `keras-hgq2` it installs
+with `uv sync --locked` (masked-linformer comes from GitHub, so the login node needs outbound HTTPS). Every `.pbs`
+job runs in `$HEPATTN_DIR`, so submit with the same `HEPATTN_BRANCH`.
+
 Notes:
 - `KERAS_BACKEND` must be `torch` (or unset — `hepattn.keras` pins it on import and
   fails loudly on anything else). Always import keras via `from hepattn.keras import keras`.
@@ -58,9 +65,8 @@ Notes:
   Lightning integration handles this for you.
 - `torch.cuda.is_available()` is False on any **login node** regardless of how the
   environment was built — always confirm GPU visibility from a compute node.
-- flash-attn is **not** required: the keras/HGQ2 path never imports it, `flash` and
-  `flash-varlen` are coerced to torch SDPA, and the CLIC config uses the in-repo
-  linformer.
+- flash-attn is **not** required: the keras/HGQ2 path never imports it, and `flash` and
+  `flash-varlen` are coerced to torch SDPA.
 - da4ml has no linux-aarch64 wheels (marker-gated; only needed for FPGA conversion).
 
 ## Local training on Apple Silicon (M2/M3, MPS)
@@ -105,6 +111,35 @@ quantizer bitwidth gradients flow); the quantizers keep fp32 internal state, so
 expect higher activation memory than the float twin (dim-256 model: micro-batch
 ~32 per 40 GB — use gradient accumulation for larger effective batches. Do not rescale
 LR or grad-clip for it: Lightning averages accumulated micro-batch gradients).
+
+## The Polaris config: the org/main Linformer model
+
+`polaris/03_make_config.py` writes `polaris_hgq.yaml` from the org/main model (`ac0da8f`, docs/hgq/RETARGET_ORG_MAIN.md):
+`configs/base.yaml` with `configs/linformer.yaml` merged over it. Compared with org, it changes only:
+- `class_path` is `hepattn.keras.maskformer.KerasMaskFormer`, and the encoder is a plain dict (its `dim` is the
+  model's), so every keras layer is built inside the HGQ2 config scopes;
+- `quant:` (the HGQ2 spec) is added;
+- the matcher solver is `scipy` instead of `lap1015_late`: the Polaris env is installed with `--no-install-project`,
+  so `import lap1015` is an empty namespace package and the first match fails. scipy finds the same optimum; ties
+  may break differently;
+- trainer, data paths, batch, precision, optimizer and callbacks as listed in the script (`HGQ_*` variables).
+
+So the model is: SwiGLU in the input net and every FFN, FastLayerNorm, `dense_norm_placement: legacy`,
+`ca_sa_dense` with `self_attn_norm_kv`, constituents sorted by phi (`input_sort_field: phi`, padding last; the
+encoder sorts and unsorts, the decoder query cross-attention gets the sort index), masked-Linformer attention with
+k = 64 (seq_len 168 in the encoder, 160 in the decoder), and the PR #1/#3/a4263c1 tasks, matcher and losses.
+
+`HGQ_ATTN=torch` writes `base.yaml` alone with dense attention and no sorting (the org clic-paper tag model).
+
+Status (lane R4a, port_log/R4a.md): everything except the attention core matches org torch in float
+(`tests/keras/test_org_model_parity.py`). **The hybrid masked-Linformer core is lane R4b.** Until it lands, the
+default config builds but its forward pass fails (Helen's Linformer refuses k = 64 < 160 keys under the decoder
+mask); `HGQ_ATTN=torch` builds, runs and trains. Do not launch Linformer jobs from this branch before R4b.
+
+Quantized SwiGLU follows one leaf rule in the hybrid and in keras_native: the packed `Linear(in, 2h)` becomes two
+dense halves, `<name>_hidden<i>_x1` (linear) and `<name>_hidden<i>_x2` (`activation="silu"` inside the layer), and
+the product is an einsum `bnc,bnc->bnc` (`<name>_hidden<i>_glu`; `QEinsum` when quantized). Float mode uses the same
+graph, so a SwiGLU net's float state_dict keys changed in R4a (no earlier run used SwiGLU).
 
 ## The `quant:` section
 
@@ -208,8 +243,12 @@ events/s throughput.
 ## Tests
 
 ```bash
-PYTHONPATH=src uv run pytest tests/keras tests/experiments/clic/test_clic_hgq.py
+PYTHONPATH=src uv run pytest tests/keras tests/polaris tests/experiments/clic/test_clic_hgq.py
 ```
+
+- The org-model gates are `test_org_model_parity.py` (full-model float parity and the state_dict key/shape map
+  against org torch), `test_polaris_config.py` (the generated config), `test_sorting.py`, `test_swiglu_quantized.py`
+  and `test_polaris_scripts.py`. The Linformer rows are strict xfails until lane R4b.
 
 - Parity numbers are recorded to a ledger; regenerate the report with
   `python tests/keras/gen_parity_report.py` after a full run (see PARITY.md).
