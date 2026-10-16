@@ -16,6 +16,9 @@ REPO = Path(__file__).resolve().parents[3]
 N = "src/hepattn/keras_native/"
 T = "tests/keras_native/"
 
+FAST = [T + "test_config.py", "-k", "not build_the_same_model and not control_forward and not control_shape and not quant_spec"]
+CK_FAST = [T + "test_checkpoint.py", "-k", "longest or durable"]
+
 MUTATIONS = [
     # config.py
     ("M1", N + "config.py", "        return _activation_name(node)", "        return node", T + "test_config.py"),
@@ -146,6 +149,78 @@ MUTATIONS = [
         '        probs = ops.sigmoid(out[f"{hit}_logit"] + 0.01)',
         T + "test_predict_writer.py",
     ),
+    # fix round (reviewer findings R1-R14 and the hash / durability fixes); FAST runs only the config tests that
+    # do not build models, CK_FAST the checkpoint tests that need no compiled step
+    ("M29", N + "config.py", 'lr_max=float(lrs["max"]),', 'lr_max=float(lrs["initial"]),', FAST),
+    ("M30", N + "config.py", 'every_n_train_steps=step.get("every_n_train_steps"),', "every_n_train_steps=None,", FAST),
+    ("M31", N + "config.py", 'save_last=bool(step.get("save_last") or best.get("save_last")),', "save_last=False,", FAST),
+    ("M32", N + "config.py", 'weight_decay=float(lrs.get("weight_decay", 0.0)),', "weight_decay=0.0,", FAST),
+    ("M33", N + "config.py", 'seed=cfg.get("seed_everything"),', "seed=None,", FAST),
+    ("M34", N + "config.py", 'num_val=int(data.get("num_val", -1)),', "num_val=-1,", FAST),
+    ("M35", N + "config.py", 'pct_start=float(lrs["pct_start"]),', "pct_start=0.3,", FAST),
+    ("M36", N + "config.py", 'dirpath=step.get("dirpath") or best.get("dirpath"),', "dirpath=None,", FAST),
+    ("M37", N + "config.py", 'mode=best.get("mode", "min"),', 'mode="max",', FAST),
+    ("M38", N + "config.py", 'batch_size=int(data["batch_size"]),', "batch_size=32,", FAST),
+    ("M39", N + "config.py", "if k not in defaults or v != _canonical(defaults[k], k)}}", "}}", FAST),
+    ("M40", N + "config.py", "        return _file_digest(node)", "        return node", FAST),
+    ("M41", N + "config.py", "return config_hash(model_description(self.model_section))", "return config_hash(self.model_section)", FAST),
+    ("M42", N + "config.py", "        return float(node)  # jsonargparse", "        return node  # jsonargparse", FAST),
+    (
+        "M43",
+        N + "config.py",
+        'beta_pid=_with_defaults("BetaPID", callbacks.get("BetaPID"), BETA_PID_ARGS),',
+        'beta_pid=callbacks.get("BetaPID"),',
+        FAST,
+    ),
+    ("M44", N + "config.py", '    "p": (float, 1.0),', '    "p": (float, 2.0),', FAST),
+    (
+        "M45",
+        N + "metrics.py",
+        '    ).items():\n                        self.means[f"{prefix}{layer}_{task_name}_{key}"].update(value, batch_size)',
+        '    ).items():\n                        self.means[f"{prefix}{layer}_{task_name}_{key}"].update(value, 1.0)',
+        T + "test_metrics.py",
+    ),
+    (
+        "M46",
+        N + "metrics.py",
+        'self.means[f"{prefix}{layer}_{key}"].update(value, 1.0)',
+        'self.means[f"{prefix}{layer}_{key}"].update(value, batch_size)',
+        T + "test_metrics.py",
+    ),
+    (
+        "M47",
+        N + "metrics.py",
+        'self.fields).items():\n                        self.means[f"{prefix}{layer}_{task_name}_{key}"].update(value, batch_size)',
+        'self.fields).items():\n                        self.means[f"{prefix}{layer}_{task_name}_{key}"].update(value, 1.0)',
+        T + "test_metrics.py",
+    ),
+    ("M48", N + "metrics.py", 'custom = self.stage != "train"', "custom = True", T + "test_metrics.py"),
+    ("M49", N + "metrics.py", 'key = f"{self.stage}/*_{metric}" if self.pool_layers else name', "key = name", T + "test_metrics.py"),
+    (
+        "M50",
+        N + "checkpoint.py",
+        "if tuple(array.shape) != tuple(var.shape) or np.dtype(array.dtype) != np.dtype(var.dtype):",
+        "if tuple(array.shape) != tuple(var.shape):",
+        T + "test_checkpoint.py",
+    ),
+    ("M51", N + "checkpoint.py", '    if meta != sidecar["meta"]:', "    if False:", T + "test_checkpoint.py"),
+    ("M52", N + "checkpoint.py", "by_length = sorted(refs, key=len, reverse=True)", "by_length = sorted(refs, key=len)", CK_FAST),
+    ("M53", N + "checkpoint.py", "    _fsync_directory(path.parent)\n", "", CK_FAST),
+    (
+        "M54",
+        N + "checkpoint.py",
+        "    if not overwrite and (path.exists() or sidecar_path(path).exists()):",
+        "    if False:",
+        T + "test_checkpoint.py",
+    ),
+    (
+        "M55",
+        N + "checkpoint.py",
+        'path = save_checkpoint(self._new_path("step", step),',
+        'path = save_checkpoint(self.directory / f"step-{step:09d}.npz",',
+        T + "test_checkpoint.py",
+    ),
+    ("M56", N + "data.py", "    if array.dtype == np.float64:\n        return array.astype(np.float32)\n", "", T + "test_data.py"),
 ]
 
 
@@ -165,7 +240,18 @@ def main() -> None:
         start = time.time()
         try:
             proc = subprocess.run(
-                [sys.executable, "-m", "pytest", "-x", "-q", "-p", "no:cacheprovider", "-W", "ignore::DeprecationWarning", tests],
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "-x",
+                    "-q",
+                    "-p",
+                    "no:cacheprovider",
+                    "-W",
+                    "ignore::DeprecationWarning",
+                    *([tests] if isinstance(tests, str) else tests),
+                ],
                 cwd=REPO,
                 capture_output=True,
                 text=True,
