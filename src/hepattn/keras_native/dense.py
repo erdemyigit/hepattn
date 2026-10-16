@@ -3,6 +3,12 @@
 Same layer structure and names as the hybrid ``hepattn.keras.dense.KerasDense`` (``{name}_hidden{i}``,
 ``{name}_final``), so weights port one-to-one. Sublayers are built in ``build`` from the static input shape.
 
+SwiGLU (``x1 * silu(x2)``, x1 = the first half of torch's packed ``Linear(in, 2h)``) uses one graph in float and
+quantized mode (plan RETARGET_ORG_MAIN.md section 5.4): the packed projection is two factory denses,
+``{name}_hidden{i}`` (x1, no activation) and ``{name}_hidden{i}_gate`` (x2, ``activation="silu"`` inside the leaf, as
+every other quantized activation), and the product is the elementwise factory einsum ``{name}_hidden{i}_glu``
+(``QEinsum`` when quantized). Porting splits the torch weight rows: x1 = rows [:h], x2 = rows [h:].
+
 Initialisation (``init``): ``"keras"`` (glorot-uniform kernel, zero bias) is what the hybrid's encoder/decoder
 Dense layers get, because the hybrid builds those from the config. ``"torch"`` is ``nn.Linear``'s default,
 kernel and bias U(+-1/sqrt(fan_in)); the hybrid's input nets and task heads start from it, because
@@ -68,7 +74,7 @@ class Dense(keras.layers.Layer):
 
         Raises:
             ValueError: For SwiGLU as the final activation or an unknown ``init``.
-            NotImplementedError: For SwiGLU or dropout in quantized mode (as in the hybrid).
+            NotImplementedError: For dropout in quantized mode (as in the hybrid).
         """
         super().__init__(name=name, **kwargs)
         factory = factory or LayerFactory()
@@ -88,8 +94,6 @@ class Dense(keras.layers.Layer):
         self.output_size = output_size
         self.hidden_sizes = list(hidden_layers)
         self.gate = activation == "SwiGLU"
-        if factory.quantize and self.gate:
-            raise NotImplementedError("SwiGLU is not supported in quantized mode (not used by the CLIC config)")
         if factory.quantize and dropout:
             raise NotImplementedError("dropout is not supported in quantized mode")
 
@@ -107,17 +111,18 @@ class Dense(keras.layers.Layer):
             uniform = keras.initializers.VarianceScaling(scale=1.0 / 3.0, mode="fan_in", distribution="uniform")
             return {"kernel_initializer": uniform, "bias_initializer": keras.initializers.RandomUniform(-bound, bound)}
 
-        fan_ins = [input_size, *self.hidden_sizes]  # SwiGLU halves a hidden layer's 2 * size outputs back to size
+        fan_ins = [input_size, *self.hidden_sizes]  # both SwiGLU halves have the fan-in of the packed torch Linear
         self.hidden = [
-            factory.dense(
-                size * 2 if self.gate else size,
-                activation=None if self.gate else activation,
-                use_bias=bias,
-                name=sub(f"hidden{i}"),
-                **initializers(fan_ins[i]),
-            )
+            factory.dense(size, activation=None if self.gate else activation, use_bias=bias, name=sub(f"hidden{i}"), **initializers(fan_ins[i]))
             for i, size in enumerate(self.hidden_sizes)
         ]
+        self.gates, self.products = [], []
+        if self.gate:
+            self.gates = [
+                factory.dense(size, activation="silu", use_bias=bias, name=sub(f"hidden{i}_gate"), **initializers(fan_ins[i]))
+                for i, size in enumerate(self.hidden_sizes)
+            ]
+            self.products = [factory.einsum("...d,...d->...d", name=sub(f"hidden{i}_glu")) for i in range(len(self.hidden_sizes))]
         self.final = factory.dense(output_size, activation=final_activation, use_bias=bias, name=sub("final"), **initializers(fan_ins[-1]))
         self.dropout = keras.layers.Dropout(dropout, name=sub("dropout")) if dropout else None
 
@@ -126,17 +131,20 @@ class Dense(keras.layers.Layer):
             raise ValueError(f"{self.name}: input feature size {input_shape[-1]} != input_size {self.input_size}")
         lead = (None, *input_shape[1:-1])
         in_size = self.input_size
-        for layer, size in zip(self.hidden, self.hidden_sizes, strict=True):
+        for i, (layer, size) in enumerate(zip(self.hidden, self.hidden_sizes, strict=True)):
             layer.build((*lead, in_size))
+            if self.gate:
+                self.gates[i].build((*lead, in_size))
+                self.products[i].build([(*lead, size), (*lead, size)])
             in_size = size
         self.final.build((*lead, in_size))
 
     def call(self, x, training=None):
-        for layer in self.hidden:
-            x = layer(x, training=training)
+        for i, layer in enumerate(self.hidden):
             if self.gate:
-                x1, x2 = keras.ops.split(x, 2, axis=-1)
-                x = x1 * keras.activations.silu(x2)
+                x = self.products[i]([layer(x, training=training), self.gates[i](x, training=training)], training=training)
+            else:
+                x = layer(x, training=training)
             if self.dropout is not None:
                 x = self.dropout(x, training=training)
         return self.final(x, training=training)

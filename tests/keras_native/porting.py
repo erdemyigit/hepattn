@@ -13,6 +13,7 @@ from torch import nn
 
 from hepattn.keras_native.attention import Attention as NativeAttention
 from hepattn.keras_native.linformer import LinformerAttention as NativeLinformer
+from hepattn.models.activation import SwiGLU
 from hepattn.models.attention import Attention
 from hepattn.models.encoder import LayerScale
 from hepattn.models.linformer import LinformerAttention
@@ -34,19 +35,34 @@ def assign_dense(layer, weight: torch.Tensor, bias: torch.Tensor | None) -> None
 
 @torch.no_grad()
 def port_dense(tdense, ndense) -> None:
+    """Torch Dense -> native Dense. A SwiGLU hidden Linear (2h, in) splits by rows: [:h] -> x1, [h:] -> the gate half."""
     linears = [m for m in tdense.net if isinstance(m, nn.Linear)]
     layers = [*ndense.hidden, ndense.final]
     assert len(linears) == len(layers), f"structure mismatch: {len(linears)} torch Linears vs {len(layers)} keras Dense"
-    for lin, layer in zip(linears, layers, strict=True):
-        assign_dense(layer, lin.weight, lin.bias)
+    gated = any(isinstance(m, SwiGLU) for m in tdense.net)
+    assert gated == ndense.gate, f"SwiGLU mismatch: torch {gated}, native {ndense.gate}"
+    for i, (lin, layer) in enumerate(zip(linears, layers, strict=True)):
+        if gated and i < len(ndense.hidden):
+            w1, w2 = lin.weight.chunk(2, dim=0)
+            b1, b2 = lin.bias.chunk(2, dim=0) if lin.bias is not None else (None, None)
+            assign_dense(layer, w1, b1)
+            assign_dense(ndense.gates[i], w2, b2)
+        else:
+            assign_dense(layer, lin.weight, lin.bias)
 
 
 @torch.no_grad()
 def port_norm(tnorm: nn.Module, nnorm) -> None:
+    """Torch LayerNorm (affine or not, e.g. FastLayerNorm) -> keras LayerNormalization; the affine flags must agree."""
     assert isinstance(tnorm, nn.LayerNorm), f"only LayerNorm is ported, got {type(tnorm).__name__}"
     assert abs(tnorm.eps - nnorm.epsilon) < 1e-12, f"epsilon differs: torch {tnorm.eps} vs keras {nnorm.epsilon}"
-    nnorm.gamma.assign(_np(tnorm.weight))
-    nnorm.beta.assign(_np(tnorm.bias))
+    affine = tnorm.elementwise_affine
+    assert nnorm.scale == affine and nnorm.center == (affine and tnorm.bias is not None), f"{nnorm.name}: affine flags differ from torch"
+    if affine:
+        nnorm.gamma.assign(_np(tnorm.weight))
+        nnorm.beta.assign(_np(tnorm.bias))
+    else:
+        assert not nnorm.variables, f"{nnorm.name}: a non-affine norm must have no variables"
 
 
 @torch.no_grad()
