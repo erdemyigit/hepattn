@@ -12,10 +12,13 @@
 # Submit with:  bash polaris/submit.sh 15_g2_forward.pbs
 #
 # Gate G2 (docs/hgq/KERAS_JAX_PLAN.md section 4, S3): the native keras_native MaskFormer, jitted forward + backward
-# with a surrogate loss (output terms + EBOPs penalty), against the hybrid's bare-loop step of 07_profile.py, at the
-# production shape (dim 256, 16 heads, 6 + 4 Linformer layers, k = 256, 160 nodes + 8 registers, 150 queries), fp32 in
-# every arm, EBOPs every step, one GPU. JAX runs first (batches 8, 16, 32), then the torch arms (8, 16: torch fp32 OOMs
-# at batch 32 on a 40 GB A100, job 7746577). Results: logs/g2_<jobid>.json, written after every run.
+# with a surrogate loss (output terms + EBOPs penalty), against the hybrid's bare-loop step of 07_profile.py. Both arms
+# build the org/main model from the config polaris/03_make_config.py generates (base.yaml + linformer.yaml: dim 256,
+# 16 heads, 6 + 4 layers, masked Linformer k = 64 in every attention, phi sorting, PR #8 layers, SwiGLU; 160 nodes +
+# 8 registers, 150 queries; the generated HGQ2 quantizers with EBOPs beta0 1e-12). fp32 in every arm, EBOPs every step,
+# one GPU. JAX runs first (batches 8, 16, 32), then the torch arms (8, 16: torch fp32 OOMed at batch 32 on a 40 GB A100
+# on the pre-retarget model, job 7746577). Results: logs/g2_<jobid>.json, written after every run, and the config used
+# next to it (logs/g2_<jobid>.config.yaml). Each run refuses a model without the configured masked-Linformer cores.
 #
 # ONE-TIME SETUP on a login node (compute nodes may not reach PyPI). .venv-jax is the env of 14_backend_spike.pbs;
 # this adds what the keras_native suite needs (the S1 set of docs/hgq/KERAS_NATIVE.md) with the CUDA 12 jax and a
@@ -30,8 +33,8 @@
 #     "torch==2.10.0" "lightning==2.5.2" "pyyaml==6.0.3" "uproot==5.7.1" "awkward==2.9.0" "atlas-ftag-tools==0.2.18" \
 #     "einops==0.8.2" "lapx==0.9.4" "scipy==1.18.1" "torchmetrics==1.8.2" "pytorch-lightning==2.6.1" \
 #     "lion-pytorch==0.2.3" "torchjd==0.7.0" "jsonargparse[signatures]==4.40.1" "matplotlib==3.10.8"
-# The torch arms use the existing $REPO/.venv (01_setup_env.sh). $REPO must hold the keras_native code (branch
-# kn/lane-a or later); both envs import hepattn from $REPO/src through PYTHONPATH.
+# The torch arms use the existing $REPO/.venv (01_setup_env.sh). $REPO must hold the retargeted code (branch keras-jax
+# at the R5 merge or later: keras_native/masked_linformer.py); both envs import hepattn from $REPO/src through PYTHONPATH.
 set -uo pipefail
 cd "${PBS_O_WORKDIR:-$PWD}"
 source polaris/env.sh
@@ -45,7 +48,7 @@ REPO="$HEPATTN_DIR"; cd "$REPO"
 mkdir -p logs
 
 [ -x "$REPO/.venv-jax/bin/python" ] || { echo "ERROR: $REPO/.venv-jax missing; see ONE-TIME SETUP in this file"; exit 1; }
-[ -f "$REPO/src/hepattn/keras_native/maskformer.py" ] || { echo "ERROR: $REPO has no keras_native MaskFormer (check out kn/lane-a)"; exit 1; }
+[ -f "$REPO/src/hepattn/keras_native/masked_linformer.py" ] || { echo "ERROR: $REPO has no masked-Linformer keras_native code (check out keras-jax)"; exit 1; }
 nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv | head -2
 "$REPO/.venv-jax/bin/python" -c "import jax, torch; print('jax', jax.__version__, jax.devices(), '| torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 
