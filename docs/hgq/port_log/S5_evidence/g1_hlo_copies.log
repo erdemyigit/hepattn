@@ -1,0 +1,19 @@
+# S5_hlo_copies.py on the compiled spike-graph step (dim 64, 4+2 layers, b4, CPU), HLO_DUMP of S5_g1_probe.py
+-- stateless
+{
+ "entry / parameter / to_root": 429,
+ "nested / transpose / to_root": 142,
+ "nested / transpose / internal": 56,
+ "nested / bitcast / internal": 48,
+ "nested / bitcast / to_root": 28
+}
+-- donate
+{
+ "entry / parameter / internal": 506,
+ "entry / copy / to_root": 226,
+ "nested / transpose / to_root": 142,
+ "nested / transpose / internal": 56,
+ "nested / bitcast / internal": 48,
+ "nested / bitcast / to_root": 28,
+ "entry / parameter / to_root": 1
+}

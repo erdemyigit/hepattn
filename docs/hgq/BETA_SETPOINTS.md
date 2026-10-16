@@ -63,3 +63,11 @@ gives 8.9e-11). With PeriodicEBOPs x 8 the generated `init_beta` is 6.96e-10.
    generated config; watch `val/bits_f_mean`, `val/ebops` and `val/loss` for one epoch.
 2. Re-measure EBOPs at init on real events (the S6 smoke run logs it) and re-apply the 40% rule if it moved.
 3. Then BetaPID with the confirmed `INIT_BETA`; check that `train/pid_saturated` stays 0 for the first epochs.
+
+## Betas from `polaris/09_measure_beta.py` before and after S5
+
+`09_measure_beta.py` calibrates beta against the slope `E_eff` of `quant_losses()` (`evaluate.effective_ebops`). Before
+the S5 `quant_losses()` fix (`7f3747c`) that slope was the leaf total plus the task heads, which the walk counted twice:
+total x 1.108 on the org model (the heads are 10.8% of its EBOPs, R4b). After the fix it is the leaf total. So a beta
+that `09_measure_beta.py` computes for a given penalty fraction is about 11% larger after S5 than before; do not mix
+betas from the two versions. The setpoints above use the leaf total (`penalty / beta`), the post-fix definition.

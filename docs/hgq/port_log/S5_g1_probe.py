@@ -5,6 +5,7 @@ Usage: KERAS_BACKEND=jax python S5_g1_probe.py <path to polaris/14_backend_spike
   stateless  the spike's jax-stateless step (no donation)
   donate     the same step with donate_argnums=(0,) (what Keras' trainer does)
   trainstep  hepattn.keras_native.train_step.TrainStep (donating) with an MSE loss_fn
+  passthrough  no timing: count the state outputs of the stateless step that are its inputs unchanged (jaxpr)
 Builds the spike graph of polaris/14_backend_spike.py (imported by path), times median ms/step,
 and dumps compiled-HLO statistics (copy ops, input/output aliases).
 """
@@ -94,6 +95,17 @@ else:
         tv, ov = opt.stateless_apply(ov, grads, tv)
         return loss, (tv, ntv, ov)
 
+    if known.variant == "passthrough":
+        # an output that is an input var unchanged: without donation XLA must copy it into a fresh output buffer
+        closed = jax.make_jaxpr(train)(state, x, m, y)
+        n_tv, n_ntv = len(state[0]), len(state[1])
+        invars = closed.jaxpr.invars[: n_tv + n_ntv + len(state[2])]
+        outvars = closed.jaxpr.outvars[1:]  # (loss, (tv, ntv, ov))
+        same = [o is i for o, i in zip(outvars, invars, strict=True)]
+        info["passthrough"] = {"tv": sum(same[:n_tv]), "ntv": sum(same[n_tv : n_tv + n_ntv]), "ov": sum(same[n_tv + n_ntv :])}
+        info["passthrough"]["total"] = sum(same)
+        print("RESULT " + json.dumps(info), flush=True)
+        sys.exit(0)
     jitted = jax.jit(train, donate_argnums=(0,) if known.variant == "donate" else ())
     compiled = jitted.lower(state, x, m, y).compile()
     info["hlo"] = hlo_stats(compiled)

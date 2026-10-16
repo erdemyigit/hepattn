@@ -32,6 +32,13 @@ T_PID = "tests/keras/test_beta_pid.py"
 T_DEDUP = "tests/keras/test_quant_losses_dedupe.py"
 T_SET = "tests/polaris/test_beta_setpoints.py"
 
+# M24 spans _objective and _grads_impl: precision moves from around value_and_grad to around the forward only
+_TS_SRC = (ROOT / TS).read_text()
+_M24_OLD = _TS_SRC[_TS_SRC.index("        with self.ebops_leaves.enabled(ebops_on):\n") : _TS_SRC.index("            (loss, aux), grads")]
+_M24_NEW = _M24_OLD.replace("enabled(ebops_on):\n", "enabled(ebops_on), self._precision():\n", 1).replace(
+    "        with self._precision():\n", "        with contextlib.nullcontext():\n"
+)
+
 # (name, file, old, new, env, pytest targets)
 M = [
     (
@@ -189,6 +196,54 @@ M = [
         '    costs = ops.cast(costs, "float32")',
         "jax",
         [f"{T_TS}::test_gradients_through_matching_equal_the_fixed_index_reference"],
+    ),
+    (
+        "M21 train_step returns the input ntv (drops the training-forward assigns; review N9)",
+        TS,
+        "        return TrainState(tv, ntv, ov), out",
+        "        return TrainState(tv, state.ntv, ov), out",
+        "jax",
+        [f"{T_TS}::test_train_step_keeps_the_updated_non_trainable_state"],
+    ),
+    (
+        "M22 eval_step runs the model with training=True (review N13)",
+        TS,
+        "training=False)\n            task, losses = self.loss_fn",
+        "training=True)\n            task, losses = self.loss_fn",
+        "jax",
+        [f"{T_TS}::test_eval_and_predict_run_in_inference_mode"],
+    ),
+    (
+        "M23 predict_step runs the model with training=True",
+        TS,
+        "training=False)\n        return outputs",
+        "training=True)\n        return outputs",
+        "jax",
+        [f"{T_TS}::test_eval_and_predict_run_in_inference_mode"],
+    ),
+    (
+        "M24 HIGHEST only around the model forward, backward and loss dots at the default (review N50)",
+        TS,
+        _M24_OLD,
+        _M24_NEW,
+        "jax",
+        [f"{T_TS}::test_steps_request_highest_matmul_precision"],
+    ),
+    (
+        "M25 compile_counts reads the jit dispatch-cache size",
+        TS,
+        "        return dict(self._traces)",
+        '        return {k: getattr(self, "_" + k)._cache_size() for k in self._traces}',
+        "jax",
+        [f"{T_TS}::test_compile_counts_are_traces_not_dispatch_cache_entries"],
+    ),
+    (
+        "M26 maskformer_loss_from_config ignores the matcher block",
+        TS,
+        '    n_jobs = matcher_n_jobs_from_config(init_args["matcher"]) if init_args.get("matcher") else 1',
+        "    n_jobs = 1",
+        "jax",
+        [f"{T_TS}::test_maskformer_loss_from_config_reads_the_tasks_and_the_matcher"],
     ),
 ]
 

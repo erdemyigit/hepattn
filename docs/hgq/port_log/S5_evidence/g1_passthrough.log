@@ -1,0 +1,1 @@
+RESULT {"variant": "passthrough", "batch": 4, "device": "cpu:0", "passthrough": {"tv": 0, "ntv": 428, "ov": 1, "total": 429}}
