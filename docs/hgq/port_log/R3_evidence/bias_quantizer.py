@@ -1,8 +1,10 @@
+# ruff: noqa  (verbatim scratch evidence, run as committed)
 import sys
 
 sys.path.insert(0, ".")
-import numpy as np
-from tests.keras_native.test_pr8_layers import QUANT_SPECS, swiglu_input, swiglu_pair
+import numpy as np, torch
+from tests.keras_native.test_pr8_layers import swiglu_pair, swiglu_input, QUANT_SPECS
+from tests.keras_native.parity_utils import max_errors
 
 t, n = swiglu_pair("ffn_64", QUANT_SPECS["high"])
 l = n.hidden[0]

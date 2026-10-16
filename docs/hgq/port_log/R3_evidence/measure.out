@@ -1,0 +1,33 @@
+fast_layer_norm parity                                       4.768e-07
+swiglu float ffn_64 (|ref|max 0.66)                          3.576e-07
+  control swap ffn_64                                        3.392e-01
+swiglu float innet_27_to_64 (|ref|max 0.71)                  3.576e-07
+  control swap innet_27_to_64                                3.784e-01
+swiglu float two_hidden (|ref|max 0.19)                      2.980e-08
+  control swap two_hidden                                    6.556e-02
+swiglu high ffn_64                                           1.369e-02
+swiglu low ffn_64                                            9.103e-01
+swiglu high innet_27_to_64                                   1.184e-02
+swiglu low innet_27_to_64                                    4.585e-01
+encoder legacy depth0                                        7.153e-07
+  control hybridnorm depth0                                  9.861e-01
+encoder legacy depth1                                        9.537e-07
+  control hybridnorm depth1                                  3.516e-01
+decoder q depth0                                             9.537e-07
+decoder kv depth0                                            7.153e-07
+  control order depth0                                       4.100e-01
+  control norm_kv=False depth0                               1.732e-01
+decoder q depth1                                             4.768e-07
+decoder kv depth1                                            4.768e-07
+  control order depth1                                       2.882e-01
+  control norm_kv=False depth1                               4.768e-07
+B=1 vs B=2 torch 100 nodes                                   3.227e-01
+B=1 vs B=2 torch 160 nodes                                   1.371e-06
+model final.mask.pflow_node_logit                        abs 8.58e-06 rel 3.28e-02 frac-of-tol 0.072
+model layer_3.mask.pflow_node_logit                      abs 5.72e-06 rel 2.93e-02 frac-of-tol 0.055
+model layer_0.mask.pflow_node_logit                      abs 3.58e-06 rel 7.07e-03 frac-of-tol 0.036
+model layer_2.mask.pflow_node_logit                      abs 2.86e-06 rel 3.02e-02 frac-of-tol 0.032
+model layer_1.mask.pflow_node_logit                      abs 1.91e-06 rel 1.96e-01 frac-of-tol 0.022
+model final.regression.pflow_proxy_regr                  abs 1.27e-07 rel 1.75e-06 frac-of-tol 0.002
+  control model ca_dense_sa final mask logit                 1.383e+00
+  e2e tol at |ref| max 0.00083053584

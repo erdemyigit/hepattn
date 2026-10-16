@@ -1,0 +1,6 @@
+_iq FixedPointQuantizerKIF {'k0': True, 'i0': 8, 'f0': 16, 'round_mode': 'RND', 'overflow_mode': 'WRAP', 'ic': <hgq.constraints.MinMax object>, 'ir': <hgq.regularizers.MonoL1 object>, 'fc': <hgq.constraints.MinMax object>, 'fr': <hgq.regularizers.MonoL1 object>, 'i_decay_speed': 0.01, 'homogeneous_axis': (0,), 'heterogeneous_axis': None, 'bw_mapper': None, 'trainable': True, 'is_weight': False}
+_kq FixedPointQuantizerKBI {'k0': True, 'b0': 20, 'i0': 2, 'round_mode': 'RND', 'overflow_mode': 'SAT_SYM', 'bc': <hgq.constraints.MinMax object>, 'ic': None, 'br': <hgq.regularizers.MonoL1 object>, 'ir': None, 'i_decay_speed': inf, 'homogeneous_axis': (), 'heterogeneous_axis': None, 'bw_mapper': None, 'trainable': True, 'is_weight': True}
+_bq FixedPointQuantizerKBI {'k0': True, 'b0': 8, 'i0': 2, 'round_mode': 'RND', 'overflow_mode': 'WRAP', 'bc': <hgq.constraints.MinMax object>, 'ic': None, 'br': <hgq.regularizers.MonoL1 object>, 'ir': None, 'i_decay_speed': 0.01, 'homogeneous_axis': (), 'heterogeneous_axis': None, 'bw_mapper': None, 'trainable': True, 'is_weight': False}
+kernel err 1.9073486e-06
+bias err 0.007777218 [ 0.25823998  0.21979171 -0.01884651 -0.31855825] [ 0.265625  0.21875  -0.015625 -0.3125  ]
+input err 2.2888184e-05

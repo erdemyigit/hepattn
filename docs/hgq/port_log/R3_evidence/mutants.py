@@ -1,3 +1,4 @@
+# ruff: noqa  (verbatim scratch evidence, run as committed)
 """R3 mutants: (id, file, old, new). Each old string must occur exactly once in the pristine copy."""
 
 N = "src/hepattn/keras_native/"

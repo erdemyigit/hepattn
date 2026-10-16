@@ -1,0 +1,5 @@
+[as is] from_config OK
+[quant] OK
+specs_from_config OK: ['classification', 'mask', 'incidence', 'regression']
+[matcher] -> NotImplementedError: only default_solver=scipy with adaptive_solver=false is supported, got {'default_solver': 'lap1015_late', 'adaptive_solver': False, 'parallel_solver': True, 'n_jobs': 16}
+built after patches; encoder attn: LinformerAttention seq_len 168 k 256 | decoder q_ca: LinformerAttention seq_len 160 k 256

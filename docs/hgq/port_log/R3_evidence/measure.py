@@ -1,11 +1,11 @@
+# ruff: noqa  (verbatim scratch evidence, run as committed)
 """R3 measurements: parity maxima and control magnitudes for test_pr8_layers.py tolerances."""
 
 import sys
 
 sys.path.insert(0, ".")
-import numpy as np
+import numpy as np, torch
 import tests.keras_native.test_pr8_layers as T
-import torch
 from tests.keras_native.parity_utils import max_errors
 
 
