@@ -30,6 +30,8 @@ import torch.nn.functional as F
 
 pytest.importorskip("hepattn.keras", reason="hgq dependency group not installed")
 
+from itertools import starmap
+
 import linformer_backend_cases as C  # ty: ignore [unresolved-import]
 import masked_linformer as ml
 import numpy as np
@@ -353,7 +355,8 @@ def test_every_trainable_core_variable_gets_a_gradient_and_moves(quantized_model
 def test_float_cores_warm_start_the_quantized_model(tmp_path):
     """port_keras_to_keras (float -> QAT warm start) copies every core's projections, head, tail and q_sa rows:
     after the port the quantized model holds the float model's (seq_len, k) proj_k / proj_v at all 18 attentions,
-    which it did not before (the two models start from different seeds)."""
+    which it did not before (the two models start from different seeds).
+    """
     from hepattn.keras.porting import port_keras_to_keras  # noqa: PLC0415
 
     cfg = U.generate_polaris_config(tmp_path / "polaris_hgq.yaml")
@@ -371,9 +374,9 @@ def test_float_cores_warm_start_the_quantized_model(tmp_path):
         return [p for m in model.modules() if isinstance(m, KerasAttention) and m.attn_type == "linformer" for p in m.full_projections()]
 
     assert len(projections(kfloat)) == 2 * 18
-    assert not any(torch.equal(a, b) for a, b in zip(projections(kfloat), projections(kquant), strict=True))
+    assert not any(starmap(torch.equal, zip(projections(kfloat), projections(kquant), strict=True)))
     port_keras_to_keras(kfloat, kquant)
-    assert all(torch.equal(a, b) for a, b in zip(projections(kfloat), projections(kquant), strict=True))
+    assert all(starmap(torch.equal, zip(projections(kfloat), projections(kquant), strict=True)))
 
 
 # ---------------------------------------------------------------------- hybrid attention vs org Attention
@@ -598,6 +601,23 @@ def test_paired_delta_high_vs_coarse():
     assert err_high <= HIGH_TOL
     assert coarse.std(dim=1).mean() > 0.05, "the coarse spec must still depend on the input"
     assert err_coarse >= 10 * err_high, (err_high, err_coarse)
+
+
+def test_core_leaves_built_at_the_first_forward_take_the_factory_spec():
+    """The hybrid builds the core inside forward, outside the model's construction scopes; build_core enters them
+    again, so the leaves get the spec: at the high spec E/F weights at the fractional-bit cap 7 and the qk input lanes
+    at (i, f) = (8, 16). HGQ2's defaults would give f = 6 and (2, 6) (R2, test_core_leaves_take_the_spec_...).
+    """
+    x = make_inputs("q_ca", 33)
+    core = hybrid_attention("q_ca", None, x, spec=HIGH_SPEC).core
+
+    def values(quantizer, name: str) -> set[float]:
+        return {float(v) for v in np.ravel(np.asarray(getattr(quantizer.quantizer, name).detach().cpu()))}
+
+    for quantizer in (core.E.proj.kq, core.F.proj.kq):
+        assert values(quantizer, "f") == {7.0}
+    for lane in core.qk.iq:
+        assert (values(lane, "i"), values(lane, "f")) == ({8.0}, {16.0})
 
 
 def test_calls_that_do_not_match_the_built_core_raise():

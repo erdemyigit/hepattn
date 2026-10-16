@@ -5,9 +5,9 @@ Both models are instantiated by jsonargparse from a YAML ``model:`` section, as 
 
 - The torch reference comes straight from the org configs (``merge_org_configs``), never from the generator, so
   that the generated Polaris config (``polaris/03_make_config.py``) is checked against org and not against itself.
-- ``to_dense_attention`` swaps the masked-Linformer attention for dense attention on both sides. The hybrid
-  masked-Linformer core is lane R4b (docs/hgq/RETARGET_ORG_MAIN.md section 6); until then the full-model parity runs
-  the org model with every other part unchanged (PR #8 layers, SwiGLU, phi sorting, tasks, matcher, losses).
+- ``to_dense_attention`` swaps the masked-Linformer attention for dense attention on both sides (every other part
+  unchanged: PR #8 layers, SwiGLU, phi sorting, tasks, matcher, losses). The R4a rows ran it before the hybrid had
+  the masked-Linformer core (lane R4b); they are kept as the dense-attention twin of the full model.
 """
 
 import copy

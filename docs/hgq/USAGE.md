@@ -135,11 +135,13 @@ k = 64 (seq_len 168 in the encoder, 160 in the decoder), and the PR #1/#3/a4263c
 
 `HGQ_ATTN=torch` writes `base.yaml` alone with dense attention and no sorting (the org clic-paper tag model).
 
-Status (lane R4a, port_log/R4a.md): everything except the attention core matches org torch in float
-(`tests/keras/test_org_model_parity.py`). **The hybrid masked-Linformer core is lane R4b.** Until it lands, the
-default config builds but its forward pass fails (Helen's Linformer refuses k = 64 < 160 keys under the decoder
-mask); `HGQ_ATTN=torch` builds and runs a forward pass and the matched loss (tests/keras/test_polaris_config.py;
-no optimizer step is tested). Do not launch Linformer jobs from this branch before R4b.
+Status (lanes R4a and R4b, port_log/R4a.md and R4b.md): the full org Linformer model matches org torch in float
+(`tests/keras/test_org_model_parity.py`), and the default config runs a forward pass and the matched loss in float
+and quantized mode (`tests/keras/test_polaris_config.py`). The attention core is the keras_native masked-Linformer
+code (`hepattn.keras_native.masked_linformer`) run under the torch backend, gate H0 in
+`tests/keras/test_linformer_parity.py`. Its cores build at the first forward pass in float mode too, as the quantized
+layers already did; `MPflowHGQ.setup` runs that forward before the optimizer exists. Before a QAT sweep, re-derive
+the EBOPs setpoints of `03_make_config.py` on this model (RETARGET_ORG_MAIN.md section 7, risk 1).
 
 Quantized SwiGLU follows one leaf rule in the hybrid and in keras_native: the packed `Linear(in, 2h)` becomes two
 dense halves, `<name>_hidden<i>_x1` (linear) and `<name>_hidden<i>_x2` (`activation="silu"` inside the layer), and
@@ -253,7 +255,9 @@ PYTHONPATH=src uv run pytest tests/keras tests/polaris tests/experiments/clic/te
 
 - The org-model gates are `test_org_model_parity.py` (full-model float parity and the state_dict key/shape map
   against org torch), `test_polaris_config.py` (the generated config), `test_sorting.py`, `test_swiglu_quantized.py`
-  and `test_polaris_scripts.py`. The Linformer rows are strict xfails until lane R4b.
+  and `test_polaris_scripts.py`; gate H0 and the masked-Linformer attention are `test_linformer_parity.py`. The
+  backend-consistency golden `tests/keras/golden/linformer_backend.npz` is written under JAX by
+  `tests/keras/make_linformer_backend_golden.py` (run it in the native environment).
 
 - Parity numbers are recorded to a ledger; regenerate the report with
   `python tests/keras/gen_parity_report.py` after a full run (see PARITY.md).

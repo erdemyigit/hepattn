@@ -134,7 +134,7 @@ def port_decoder(decoder, kdecoder) -> None:
 
 @torch.no_grad()
 def port_linformer(lin, klin) -> None:
-    """Port a torch LinformerAttention into a KerasLinformerAttention."""
+    """Port a torch LinformerAttention (Helen's) into a KerasLinformerAttention; only the R5 goldens still use it."""
     from hepattn.models.linformer import LinformerAttention  # noqa: PLC0415
 
     assert isinstance(lin, LinformerAttention), "expected a torch LinformerAttention"
@@ -150,8 +150,10 @@ def port_linformer(lin, klin) -> None:
 def port_keras_to_keras(src, dst) -> None:
     """Port weights between two KerasMaskFormer twins (e.g. float -> quantized warm start).
 
-    Torch-native state (norms, posenc buffers, initial queries, register tokens) is
-    copied via a shape-matched filtered state_dict load; keras leaves are matched by
+    Torch-native state (norms, posenc buffers, initial queries, register tokens) and the
+    masked-Linformer cores (their keras variables are tracked at build under the same keys
+    in both models; the q_sa rows are buffers) are copied via a shape-matched filtered
+    state_dict load; keras leaves are matched by
     their deterministic names and their kernel/bias variables are assigned directly —
     the torch state_dict key layout differs between plain-keras and HGQ2 layers, so a
     raw state_dict load cannot express this. Both models must be built (quantized
@@ -174,12 +176,6 @@ def port_keras_to_keras(src, dst) -> None:
         src_bias = getattr(src_layer, "bias", None)
         if src_bias is not None:
             dst_layer.bias.assign(np.asarray(src_bias))
-
-    # masked-Linformer cores hold their sequence projections in sublayers (head kernel, tail rows), not as `kernel`
-    dst_modules = dict(dst.named_modules())
-    for path, module in src.named_modules():
-        if isinstance(module, KerasAttention) and module.attn_type == "linformer":
-            dst_modules[path].load_projections(*module.full_projections())
 
 
 @torch.no_grad()
