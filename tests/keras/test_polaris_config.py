@@ -7,6 +7,7 @@ masked-Linformer branch of lane R4b: Helen's layer refuses k=64 < 160 keys under
 xfails until R4b lands. ``HGQ_ATTN=torch`` (base.yaml alone, dense attention) runs now.
 """
 
+import ast
 import copy
 
 import pytest
@@ -17,6 +18,7 @@ pytest.importorskip("hepattn.keras", reason="hgq dependency group not installed"
 import org_model_utils as U  # ty: ignore [unresolved-import]
 import yaml
 
+from hepattn.keras.dense import KerasDense
 from hepattn.keras.encoder import KerasEncoder
 from hepattn.keras.linformer import KerasLinformerAttention
 
@@ -67,6 +69,60 @@ def test_default_is_the_linformer_model(generated, tmp_path, monkeypatch):
     default = U.generate_polaris_config(tmp_path / "default.yaml")
     assert default["model"] == generated["linformer"]["model"]
     assert default["model"] != generated["torch"]["model"]
+
+
+def generator_merge():
+    """The generator's own ``merge``, taken from its source: importing 03_make_config.py would write a config."""
+    tree = ast.parse(U.MAKE_CONFIG.read_text())
+    (fn,) = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "merge"]
+    namespace: dict = {}
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(U.MAKE_CONFIG), "exec"), namespace)  # noqa: S102
+    return namespace["merge"]
+
+
+def test_generator_merge_is_a_deep_overlay():
+    """Assertion-level check of the overlay rule (a broken rule otherwise surfaces only as a generator crash)."""
+    merge = generator_merge()
+    base = {"a": {"b": 1, "c": {"d": 2, "e": 3}}, "f": [1, 2], "g": 4}
+    overlay = {"a": {"c": {"d": 5}}, "f": [9], "h": {"i": 6}}
+    assert merge(base, overlay) == {"a": {"b": 1, "c": {"d": 5, "e": 3}}, "f": [9], "g": 4, "h": {"i": 6}}
+    assert base == {"a": {"b": 1, "c": {"d": 2, "e": 3}}, "f": [1, 2], "g": 4}, "merge changed its input"
+    org_base = yaml.safe_load((U.CONFIGS / "base.yaml").read_text())
+    org_overlay = yaml.safe_load((U.CONFIGS / "linformer.yaml").read_text())
+    assert merge(org_base, org_overlay) == U.merge(org_base, org_overlay)
+
+
+def test_swiglu_products_are_trained_with_the_model(generated):
+    """Every quantized SwiGLU product leaf is seen by the model-level walks that QAT relies on.
+
+    keras_layers() feeds quant_losses() and trainable_parameter_groups() (the optimizer). A product leaf that is not
+    a registered submodule still runs in the forward, but its quantizers would get no EBOPs pressure and no updates.
+    """
+    model = U.instantiate(generated["torch"], quantized=True)
+    inputs, _ = U.clic_dummy_batch()
+    with torch.no_grad():
+        model(inputs)
+    model.register_keras_parameters()
+    products = {id(leaf): leaf for m in model.modules() if isinstance(m, KerasDense) for leaf in getattr(m, "products", [])}
+    # input net 1, encoder FFNs 6, decoder q and kv FFNs 8, mask object and constituent nets 2, incidence node net 1
+    assert len(products) == 18, len(products)
+    assert all(type(leaf).__name__ == "QEinsum" for leaf in products.values())
+    layers = {id(layer) for layer in model.keras_layers()}
+    assert set(products) <= layers, [leaf.name for key, leaf in products.items() if key not in layers]
+    decay, quant = model.trainable_parameter_groups()
+    optimized = {id(p) for p in decay + quant}
+    leaf_vars = [w for leaf in products.values() for w in leaf.trainable_weights]
+    assert leaf_vars and all(id(w.value) in optimized for w in leaf_vars)
+    model.train()
+    with torch.no_grad():
+        model(inputs)
+    product_terms = sum(float(t) for leaf in products.values() for t in leaf.losses)
+    # the walk yields the task heads twice (model.tasks and model.decoder.tasks, port_log/S3.md deviation 9)
+    walked = [(id(layer) in products, float(t)) for layer in model.keras_layers() for t in layer.losses]
+    walked_products = sum(t for is_product, t in walked if is_product)
+    assert product_terms > 0
+    assert walked_products >= product_terms * (1 - 1e-6)
+    assert float(model.quant_losses()) == pytest.approx(sum(t for _, t in walked), rel=1e-5)
 
 
 @pytest.mark.parametrize("quantized", [False, True])
