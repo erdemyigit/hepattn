@@ -1,0 +1,25 @@
+R3 fix round 2 mutants (mutants.py, run.sh). Each runs on a scratch copy: pristine_wt = the rt/r3 tree with the fix-2
+changes, pristine_merged = rt/r3 f4f37db + rt/r2 7f2b53b (merge 757d49c) + the fix-2 diff + the float-parity patch,
+pristine_old = git archive f4f37db (the tests before this round). The tracked tree was never mutated.
+"Artefact": test_from_config_reads_generated_polaris_yaml fails in every scratch copy because polaris/ is not copied
+(subprocess on polaris/03_make_config.py); it fails the same way with the f4f37db tests (o11).
+
+id                        root    killed by                                                             result
+g01_qsa_masked_core       merged  (q_sa core 'project') test_linformer_projection_shapes_equal_torch    KILLED
+                                  (q_sa k: 160 rows);
+                                  test_pr8_layers_train_under_jit[decoder_layer_linformer] (zero gradient
+                                  for decoder_l0_q_sa_project_{E,F}/tail)
+g07_no_tail               merged  test_linformer_projection_shapes_equal_torch (kv_ca k: 150 rows)         KILLED
+g08_enc_unmasked          merged  test_linformer_projection_shapes_equal_torch (R2's ProjectCore raises:    KILLED
+                                  built without mask support, but a kv_mask was given)
+g02_packed_glorot         wt      test_dense_keras_init_is_glorot_with_zero_bias[SwiGLU]                  KILLED
+g03_gate_name             wt      test_swiglu_leaves_and_names (x2 named _gate)                           KILLED
+g03b_x1_unsuffixed        wt      test_swiglu_leaves_and_names (x1 named _hidden{i})                      KILLED
+g04_ellipsis              wt      test_swiglu_leaves_and_names (equation "...c,...c->...c")              KILLED
+g05_no_fold               wt      test_swiglu_leaves_and_names (rank-2 input into the rank-3 einsum)      KILLED
+y11_host_sort_model       wt      test_model_with_sorting_traces_under_jit (TracerArrayConversionError    KILLED
+                                  at maskformer.py:138); plus the artefact
+o11 = y11 on f4f37db tests old    only the artefact: test_pr8_layers + test_maskformer + test_mf_jit +    survived (as
+                                  test_lane_integration otherwise pass                                   the reviewer found)
+g06_sort_descending       wt      test_model_encoder_layers_see_tokens_sorted_by_phi (torch reference)    KILLED
+o06 = g06 on f4f37db test old     the self-referential version passes                                     survived

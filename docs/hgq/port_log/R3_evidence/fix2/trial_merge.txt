@@ -1,0 +1,22 @@
+# trial merge: 757d49c Merge remote-tracking branch 'origin/rt/r2' into trial (rt/r3 f4f37db + rt/r2 7f2b53b)
+## before fix round 2 (757d49c as merged): reviewer's probe_qsa_grad.py
+q_sa core: project
+zero-grad: ['d0/d0_q_sa/d0_q_sa_project/d0_q_sa_project_E/tail', 'd0/d0_q_sa/d0_q_sa_project/d0_q_sa_project_F/tail']
+## after fix round 2 (merge + R3 fix-2 diff + float-parity patch)
+q_sa core: project_unmasked
+zero-grad: []
+## projection rows after fix round 2 (probe_projvars.py)
+('encoder', 'E_proj/kernel', (168, 64)) 6
+('encoder', 'F_proj/kernel', (168, 64)) 6
+('kv_ca', 'E_proj/kernel', (150, 64)) 4
+('kv_ca', 'F_proj/kernel', (150, 64)) 4
+('kv_ca', 'tend_E/tail', (10, 64)) 4
+('kv_ca', 'tend_F/tail', (10, 64)) 4
+('q_ca', 'E_proj/kernel', (160, 64)) 4
+('q_ca', 'F_proj/kernel', (160, 64)) 4
+('q_sa', 'E_proj/kernel', (150, 64)) 4
+('q_sa', 'F_proj/kernel', (150, 64)) 4
+dec 0 {'q_ca': 'attend', 'q_sa': 'project_unmasked', 'kv_ca': 'attend'}
+enc0 project
+q_sa core project | q max 9.5367431640625e-07 | kv valid max 8.344650268554688e-07
+q_sa core project_unmasked | q max 9.5367431640625e-07 | kv valid max 8.344650268554688e-07
