@@ -16,10 +16,15 @@ and the native layers either accept them or raise.
 
 Relative ``scale_dict_path`` values are resolved against the working directory, then the config file's directory
 and its parents, then the packaged CLIC ``configs`` directory (by file name). Data file paths are not resolved.
+
+``RunConfig.model_hash`` (for ``checkpoint.load_checkpoint(expect_config_hash=...)``) hashes ``model_description``:
+the same for every form of one model config and for a copy on another host, different for another model option or
+scale-dict content. The LR schedule, optimizer, matcher and data settings are not part of it.
 """
 
 import copy
 import hashlib
+import inspect
 import json
 import warnings
 from dataclasses import dataclass, field
@@ -28,8 +33,13 @@ from typing import Any
 
 import yaml
 
+from hepattn.keras_native.decoder import MaskFormerDecoder
+from hepattn.keras_native.dense import Dense
+from hepattn.keras_native.encoder import Encoder, EncoderLayer
+from hepattn.keras_native.input import FourierPositionEncoder, InputNet
 from hepattn.keras_native.maskformer import MaskFormer, from_config
 from hepattn.keras_native.objective import TaskSpec, matcher_n_jobs_from_config, specs_from_config
+from hepattn.keras_native.tasks import TASK_CLASSES
 
 # not an import: the packaged CLIC configs directory, last fallback for scale dicts
 CLIC_CONFIGS = Path(__file__).resolve().parents[1] / "experiments" / "clic" / "configs"
@@ -153,6 +163,92 @@ def config_hash(section: Any) -> str:
     return hashlib.sha256(json.dumps(section, sort_keys=True, default=str).encode()).hexdigest()
 
 
+# Native classes whose constructor defaults define "not set" for a config entry; the Encoder also forwards its extra
+# kwargs to EncoderLayer. The torch defaults that jsonargparse writes into a saved config must equal these, or the
+# two forms build different models and the hashes differ (as they should).
+_DEFAULTS_FROM = {
+    "MaskFormer": (MaskFormer,),
+    "InputNet": (InputNet,),
+    "FourierPositionEncoder": (FourierPositionEncoder,),
+    "Dense": (Dense,),
+    "Encoder": (Encoder, EncoderLayer),
+    "MaskFormerDecoder": (MaskFormerDecoder,),
+    **{name: (cls,) for name, cls in TASK_CLASSES.items()},
+}
+# entries given without a class_path (plain dicts, or the decoder after normalisation), by key
+_CLASS_OF_KEY = {
+    "encoder": "Encoder",
+    "decoder": "MaskFormerDecoder",
+    "posenc": "FourierPositionEncoder",
+    "net": "Dense",
+    "object_net": "Dense",
+    "constituent_net": "Dense",
+    "node_net": "Dense",
+}
+# hybrid (Keras-on-torch) class names of the same models
+_ALIASES = {"KerasMaskFormer": "MaskFormer", "KerasEncoder": "Encoder"}
+_NOT_ARGS = {"self", "factory", "name", "layer_name"}
+# not part of the model: host matching options (S4) and the multi-task flag (from_config raises for mtl: true)
+_NOT_MODEL = {"matcher"}
+
+
+def _defaults(class_name: str) -> dict:
+    out: dict = {}
+    for cls in _DEFAULTS_FROM.get(class_name, ()):
+        for param in inspect.signature(cls.__init__).parameters.values():
+            if param.name not in _NOT_ARGS and param.default is not inspect.Parameter.empty:
+                out.setdefault(param.name, param.default)
+    return out
+
+
+def _file_digest(path: str) -> str:
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _canonical(node: Any, key: str | None = None) -> Any:
+    if isinstance(node, list):
+        return [_canonical(item) for item in node]
+    if key in ACTIVATION_KEYS and isinstance(node, str):
+        return _short(node)
+    if key == "scale_dict_path" and isinstance(node, str):
+        return _file_digest(node)
+    if isinstance(node, int | float) and not isinstance(node, bool):
+        return float(node)  # jsonargparse writes 2.0 for a float-typed 2
+    if not isinstance(node, dict):
+        return node
+    if "class_path" in node:
+        class_name = _short(node["class_path"])
+        class_name = _ALIASES.get(class_name, class_name)
+        if class_name == "ModuleList":
+            return _canonical(list((node.get("init_args") or {}).get("modules") or []))
+        args = dict(node.get("init_args") or {})
+    elif key in _CLASS_OF_KEY:
+        class_name, args = _CLASS_OF_KEY[key], dict(node)
+    else:
+        return {k: _canonical(v, k) for k, v in node.items()}
+    defaults = _defaults(class_name)
+    args = {k: _canonical(v, k) for k, v in args.items() if k not in _NOT_MODEL}
+    return {"class": class_name, "args": {k: v for k, v in args.items() if k not in defaults or v != _canonical(defaults[k], k)}}
+
+
+def model_description(model_section: dict) -> dict:
+    """What defines the model in a (normalised, scale-dict-resolved) ``model:`` section, independent of its form.
+
+    The ``model.model`` entry with: class paths reduced to class names; entries equal to the native constructor
+    default removed (a saved config spells the defaults out, a raw one omits them); ``scale_dict_path`` replaced by
+    the sha256 of the file's content (so the path, host and checkout do not matter, the content does); the encoder's
+    repeated ``dim`` and the matcher dropped. ``lrs_config``, ``optimizer`` and ``mtl`` are not part of it.
+    """
+    entry = model_section["model"]
+    entry = {"class_path": "MaskFormer", "init_args": entry} if "class_path" not in entry else entry
+    desc = _canonical(entry)
+    args = desc["args"]
+    encoder = args.get("encoder")
+    if isinstance(encoder, dict) and encoder["args"].get("dim") == args.get("dim"):
+        encoder["args"].pop("dim")
+    return desc
+
+
 @dataclass(frozen=True)
 class OptimizerConfig:
     name: str
@@ -168,7 +264,10 @@ class OptimizerConfig:
 
 @dataclass(frozen=True)
 class QuantConfig:
-    """The HGQ2 spec (``model.model.init_args.quant``) and the beta / EBOPs callbacks of ``trainer.callbacks``."""
+    """The HGQ2 spec (``model.model.init_args.quant``) and the beta / EBOPs callbacks of ``trainer.callbacks``.
+
+    ``beta_pid`` / ``beta_scheduler`` hold every constructor argument of the hybrid callback (defaults filled in).
+    """
 
     spec: dict | None
     beta_pid: dict | None
@@ -218,8 +317,8 @@ class RunConfig:
 
     @property
     def model_hash(self) -> str:
-        """Hash of the model section: a checkpoint written under another model config must not load."""
-        return config_hash(self.model_section)
+        """Hash of ``model_description``: equal for every form of one model config (raw, generated, saved, moved)."""
+        return config_hash(model_description(self.model_section))
 
     def build_model(self) -> MaskFormer:
         """``maskformer.from_config`` of the model section (unbuilt; call it on one batch to build)."""
@@ -257,6 +356,37 @@ def _optimizer(model: dict, trainer: dict) -> OptimizerConfig:
     )
 
 
+# The hybrid callbacks' constructor defaults and types (hepattn/keras/callbacks.py; pinned by test_config.py, which
+# reads them from that file's source). A raw config omits defaults, a saved one spells them out: both give the same dict.
+BETA_PID_ARGS = {
+    "target_ebops": (float, None),
+    "init_beta": (float, None),
+    "p": (float, 1.0),
+    "i": (float, 0.5),
+    "d": (float, 0.0),
+    "warmup_epochs": (int, 2),
+    "max_beta": (float, 1e-7),
+    "min_beta": (float, 0.0),
+    "damp_beta_on_target": (float, 0.0),
+}
+BETA_SCHEDULER_ARGS = {"beta_start": (float, 0.0), "beta_end": (float, 1e-5), "warmup_steps": (int, 1000)}
+
+
+def _with_defaults(name: str, args: dict | None, table: dict) -> dict | None:
+    """``args`` completed with the defaults of ``table`` and coerced to its types (YAML may give "1.0e15" as a string).
+
+    Raises:
+        ConfigError: For an unknown or a missing required argument.
+    """
+    if args is None:
+        return None
+    unknown = set(args) - set(table)
+    missing = {k for k, (_, default) in table.items() if default is None and k not in args}
+    if unknown or missing:
+        raise ConfigError(f"{name}: unknown arguments {sorted(unknown)}, missing {sorted(missing)}")
+    return {k: kind(args.get(k, default)) for k, (kind, default) in table.items()}
+
+
 def _quant(init_args: dict, callbacks: dict[str, dict]) -> QuantConfig:
     present = BETA_CALLBACKS & set(callbacks)
     if len(present) > 1:
@@ -265,7 +395,10 @@ def _quant(init_args: dict, callbacks: dict[str, dict]) -> QuantConfig:
     if every < 1:
         raise ConfigError(f"PeriodicEBOPs every_n_steps must be >= 1, got {every}")
     return QuantConfig(
-        spec=init_args.get("quant"), beta_pid=callbacks.get("BetaPID"), beta_scheduler=callbacks.get("BetaScheduler"), ebops_every_n_steps=every
+        spec=init_args.get("quant"),
+        beta_pid=_with_defaults("BetaPID", callbacks.get("BetaPID"), BETA_PID_ARGS),
+        beta_scheduler=_with_defaults("BetaScheduler", callbacks.get("BetaScheduler"), BETA_SCHEDULER_ARGS),
+        ebops_every_n_steps=every,
     )
 
 

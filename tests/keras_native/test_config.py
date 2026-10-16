@@ -8,9 +8,15 @@ into the other, bit-identical forward outputs on two CLIC dummy events, at the p
 
 Controls: the same check fails for a model without input sorting (forward only) and for k = 32 (shapes); native
 ``from_config`` without the loader's normalisation rejects the saved config (R-critique open issue).
+
+The run sections (optimizer and LR schedule, checkpoint policy, data, seed, BetaPID) are pinned per family and equal
+between the raw and saved forms; ``model_hash`` is equal for every form of one model and for a relocated copy, and
+changes with a model option, a non-default value spelled out, or the scale dict's content.
 """
 
+import ast
 import copy
+import dataclasses
 import os
 import subprocess
 import sys
@@ -24,7 +30,18 @@ import yaml
 
 import hepattn
 from hepattn.keras_native.checkpoint import state_keys
-from hepattn.keras_native.config import ConfigError, config_hash, deep_merge, load_config, normalise_model_section
+from hepattn.keras_native.config import (
+    BETA_PID_ARGS,
+    BETA_SCHEDULER_ARGS,
+    CheckpointConfig,
+    ConfigError,
+    OptimizerConfig,
+    config_hash,
+    deep_merge,
+    load_config,
+    model_description,
+    normalise_model_section,
+)
 from hepattn.keras_native.maskformer import from_config
 from hepattn.keras_native.objective import clic_specs
 
@@ -62,6 +79,25 @@ EXPECTED = {
     "pflow_hgq": ("AdamW", True, 1, 1),
     "polaris": ("AdamW", True, 4, 8),
 }
+# As written in base.yaml (Lion, lrs_config), pflow_hgq.yaml (AdamW, max 5e-5) and polaris/03_make_config.py (LR_MAX
+# 5e-5, HGQ_ACCUM 4, HGQ_BATCH 32, num_workers 8, step ModelCheckpoint every 1000 with save_last).
+OPTIMIZER = {
+    "org": OptimizerConfig("Lion", 1e-6, 8e-5, 1e-6, 0.05, 1e-4, skip_scheduler=False, clip_norm=0.1, accumulate_grad_batches=1),
+    "pflow_hgq": OptimizerConfig("AdamW", 1e-6, 5e-5, 1e-6, 0.05, 1e-4, skip_scheduler=False, clip_norm=0.1, accumulate_grad_batches=1),
+    "polaris": OptimizerConfig("AdamW", 1e-6, 5e-5, 1e-6, 0.05, 1e-4, skip_scheduler=False, clip_norm=0.1, accumulate_grad_batches=4),
+}
+# (batch_size, num_workers, num_train, num_val, num_test, every_n_train_steps)
+DATA_AND_CADENCE = {"org": (512, 16, -1, 5000, -1, None), "pflow_hgq": (128, 16, -1, 5000, -1, None), "polaris": (32, 8, -1, 5000, -1, 1000)}
+# BetaPID of the generated config: INIT_BETA and MAX_BETA times HGQ_EBOPS_EVERY (8)
+BETA_PID = {
+    "pflow_hgq": {"target_ebops": 1e15, "init_beta": 2.6e-10, "max_beta": 1e-7},
+    "polaris": {"target_ebops": 1e15, "init_beta": 2.08e-9, "max_beta": 8e-7},
+}
+
+
+def checkpoint_dirpath(form: str, generated: Path) -> str | None:
+    """The generated config writes CKPT_DIR (set by the fixture); its saved fixture has the Polaris path."""
+    return {"polaris_generated": str(generated.parent / "ckpts"), "polaris_normalised": "/polaris/home/hepattn/hgq_ckpts"}.get(form)
 
 
 def load(form: str, generated: Path):
@@ -120,10 +156,82 @@ def test_loader_reads_every_form(form, polaris_generated):
     assert rc.quant.ebops_every_n_steps == ebops_every
     assert (rc.quant.beta_pid is not None) == quantized
     assert rc.checkpoint.monitor == "val/loss"
+    assert rc.optimizer == OPTIMIZER[family]
+    batch_size, workers, num_train, num_val, num_test, every = DATA_AND_CADENCE[family]
+    assert (rc.data.batch_size, rc.data.num_workers, rc.data.num_train, rc.data.num_val, rc.data.num_test) == (
+        batch_size,
+        workers,
+        num_train,
+        num_val,
+        num_test,
+    )
+    assert rc.checkpoint == CheckpointConfig(
+        every_n_train_steps=every, monitor="val/loss", mode="min", save_last=True, dirpath=checkpoint_dirpath(form, polaris_generated)
+    )
+    assert rc.seed == 42
+    if quantized:
+        assert rc.quant.beta_pid == {
+            "p": 1.0,
+            "i": 0.5,
+            "d": 0.0,
+            "warmup_epochs": 2,
+            "min_beta": 0.0,
+            "damp_beta_on_target": 0.0,
+            **BETA_PID[family],
+        }
     assert Path(rc.data.dataset_kwargs["scale_dict_path"]).is_file()
     for task in rc.model_section["model"]["init_args"]["tasks"]["init_args"]["modules"]:
         if "scale_dict_path" in task["init_args"]:
             assert Path(task["init_args"]["scale_dict_path"]).is_file()
+
+
+@pytest.mark.parametrize(
+    ("first", "second"), [("org_raw", "org_normalised"), ("pflow_hgq_raw", "pflow_hgq_normalised"), ("polaris_generated", "polaris_normalised")]
+)
+def test_raw_and_saved_forms_give_the_same_run_sections(first, second, polaris_generated):
+    """Besides the model: optimizer, checkpoint policy (but the host-specific dirpath), data, quant callbacks, seed."""
+    a, b = load(first, polaris_generated), load(second, polaris_generated)
+    assert a.optimizer == b.optimizer
+    assert dataclasses.replace(a.checkpoint, dirpath=None) == dataclasses.replace(b.checkpoint, dirpath=None)
+    assert (a.quant.beta_pid, a.quant.beta_scheduler, a.quant.ebops_every_n_steps) == (
+        b.quant.beta_pid,
+        b.quant.beta_scheduler,
+        b.quant.ebops_every_n_steps,
+    )
+    assert a.seed == b.seed
+    assert dataclasses.replace(a.data, dataset_kwargs={}) == dataclasses.replace(b.data, dataset_kwargs={})
+    # the saved form adds the CLICDataset defaults (max_nodes, remove_wrong_idxs, ...); the raw keys agree
+    assert {k: b.data.dataset_kwargs[k] for k in a.data.dataset_kwargs} == a.data.dataset_kwargs
+
+
+def hybrid_init_defaults(class_name: str) -> dict:
+    """Constructor defaults of a hybrid callback, read from the source (importing it needs lightning + the torch backend)."""
+    tree = ast.parse((Path(hepattn.__file__).parent / "keras" / "callbacks.py").read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == class_name)
+    init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+    args = init.args.args[1:]
+    defaults = [None] * (len(args) - len(init.args.defaults)) + [ast.literal_eval(d) for d in init.args.defaults]
+    return {a.arg: d for a, d in zip(args, defaults, strict=True)}
+
+
+@pytest.mark.parametrize(("class_name", "table"), [("BetaPID", BETA_PID_ARGS), ("BetaScheduler", BETA_SCHEDULER_ARGS)])
+def test_beta_callback_defaults_are_the_hybrid_ones(class_name, table):
+    reference = hybrid_init_defaults(class_name)
+    assert {k: default for k, (_, default) in table.items()} == reference
+    assert reference  # the source was found and parsed
+
+
+def test_beta_pid_arguments_are_completed_and_checked(polaris_generated, tmp_path):
+    cfg = small_raw(polaris_generated)
+    pid = next(c for c in cfg["trainer"]["callbacks"] if c["class_path"].endswith("BetaPID"))["init_args"]
+    pid["target_ebops"] = "1.0e15"  # YAML 1.1 reads this spelling as a string; the hybrid casts it
+    assert load_config(write(tmp_path / "a.yaml", cfg)).quant.beta_pid["target_ebops"] == 1e15
+    pid["typo_gain"] = 1.0
+    with pytest.raises(ConfigError, match="typo_gain"):
+        load_config(write(tmp_path / "b.yaml", cfg))
+    del pid["typo_gain"], pid["init_beta"]
+    with pytest.raises(ConfigError, match="init_beta"):
+        load_config(write(tmp_path / "c.yaml", cfg))
 
 
 # measured variable counts (S6a log): float org model; quantized models (HGQ2 quantizer state included)
@@ -261,10 +369,48 @@ def test_model_hash_follows_the_model_section_only(polaris_generated, tmp_path):
     cfg = small_raw(polaris_generated)
     base = load_config(write(tmp_path / "a.yaml", cfg)).model_hash
     cfg["data"]["batch_size"] = 7
+    cfg["model"]["lrs_config"]["max"] = 1e-4  # a resume with another LR schedule or optimizer is the same model
+    cfg["model"]["optimizer"] = "Lion"
+    cfg["model"]["model"]["init_args"]["matcher"]["init_args"]["verbose"] = True
     assert load_config(write(tmp_path / "b.yaml", cfg)).model_hash == base
     cfg["model"]["model"]["init_args"]["encoder"]["attn_kwargs"]["linformer_k"] = 32
     assert load_config(write(tmp_path / "c.yaml", cfg)).model_hash != base
     assert config_hash({"a": 1, "b": 2}) == config_hash({"b": 2, "a": 1})
+
+
+@pytest.mark.parametrize(("first", "second"), PAIRS)
+def test_model_hash_is_the_same_for_every_form_of_one_model(first, second, polaris_generated):
+    """The saved form spells out defaults, other class-path spellings and floats; the polaris fixture's scale dict
+    path is another host's (packaged fallback). Controls: a model change in the saved form changes the hash.
+    """
+    a, b = load(first, polaris_generated), load(second, polaris_generated)
+    assert a.model_section != b.model_section  # the forms differ as text
+    assert a.model_hash == b.model_hash
+    init_args = b.model_section["model"]["init_args"]
+    for edit in (
+        lambda c: c.__setitem__("input_sort_field", None if c.get("input_sort_field") else "phi"),
+        lambda c: c["tasks"]["init_args"]["modules"][1]["init_args"].__setitem__("mask_attn", False),  # a default spelled out
+        lambda c: c["tasks"]["init_args"]["modules"][0]["init_args"]["net"]["init_args"].__setitem__("activation", "GELU"),
+    ):
+        changed = copy.deepcopy(b.model_section)
+        edit(changed["model"]["init_args"])
+        assert config_hash(model_description(changed)) != b.model_hash
+    assert init_args["tasks"]["init_args"]["modules"][1]["init_args"]["mask_attn"] is True
+
+
+def test_model_hash_follows_the_scale_dict_content_not_its_path(polaris_generated, tmp_path):
+    cfg = small_raw(polaris_generated)
+    base = load_config(write(tmp_path / "a.yaml", cfg)).model_hash
+    (tmp_path / "copy").mkdir()
+    text = (CONFIGS / "clic_var_transform.yaml").read_text()
+    (tmp_path / "copy" / "clic_var_transform.yaml").write_text(text)
+    tasks = cfg["model"]["model"]["init_args"]["tasks"]["init_args"]["modules"]
+    regression = next(t for t in tasks if "scale_dict_path" in t["init_args"])["init_args"]
+    regression["scale_dict_path"] = str(tmp_path / "copy" / "clic_var_transform.yaml")
+    assert load_config(write(tmp_path / "b.yaml", cfg)).model_hash == base  # a byte-identical copy elsewhere
+    assert "max: 15.136" in text
+    (tmp_path / "copy" / "clic_var_transform.yaml").write_text(text.replace("max: 15.136", "max: 15.137"))
+    assert load_config(write(tmp_path / "c.yaml", cfg)).model_hash != base  # control: other content
 
 
 def test_deep_merge_replaces_lists_and_merges_dicts():
