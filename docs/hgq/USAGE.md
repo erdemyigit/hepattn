@@ -50,12 +50,16 @@ on a uv-managed CPython **3.12.0** (`requires-python = "== 3.12"` means *exactly
 3.12.0 under PEP 440, so a system 3.12.x is rejected), exports `PYTHONNOUSERSITE=1`,
 skips flash-attn, and verifies the result. See `polaris/README.md`.
 
-The branch is chosen with `HEPATTN_BRANCH` (`polaris/repo_dir.sh`; set it in `polaris/env.sh`, default
-`keras-hgq2`). `keras-hgq2` keeps its clone at `$WORK_ROOT/hepattn`; any other branch gets its own clone,
-`$WORK_ROOT/hepattn-<branch>` (or `HEPATTN_DIR`), so jobs running from the `keras-hgq2` clone are never touched.
-The setup refuses to switch the branch of an existing clone, and for branches other than `keras-hgq2` it installs
-with `uv sync --locked` (masked-linformer comes from GitHub, so the login node needs outbound HTTPS). Every `.pbs`
-job runs in `$HEPATTN_DIR`, so submit with the same `HEPATTN_BRANCH`.
+The branch is `HEPATTN_BRANCH` (`polaris/repo_dir.sh`). Unset, it is the branch of the checkout the script runs
+from, and `keras-hgq2` when that is unknown; `HEPATTN_BRANCH=keras-jax bash polaris/01_setup_env.sh` overrides it.
+`keras-hgq2` keeps its clone at `$WORK_ROOT/hepattn`; any other branch gets its own clone, `$WORK_ROOT/hepattn-<branch>`
+(or `HEPATTN_DIR`), so jobs running from the `keras-hgq2` clone are never touched. The setup refuses to switch the
+branch of an existing clone, and for branches other than `keras-hgq2` it installs with `uv sync --locked`
+(masked-linformer comes from GitHub, so the login node needs outbound HTTPS). `qsub` passes no environment to a job:
+every `.pbs` reads only `polaris/env.sh` and `repo_dir.sh` in the clone it is submitted from, so submit from the
+clone the setup made. The setup checks that these files resolve to that clone and stops if they do not (for example a
+`HEPATTN_DIR` given only on the command line; put it in `polaris/env.sh`). If you set `HEPATTN_BRANCH` in `env.sh`,
+use the `${HEPATTN_BRANCH:-...}` form of `env.sh.example`, so that a value on the command line still wins.
 
 Notes:
 - `KERAS_BACKEND` must be `torch` (or unset — `hepattn.keras` pins it on import and
@@ -134,7 +138,8 @@ k = 64 (seq_len 168 in the encoder, 160 in the decoder), and the PR #1/#3/a4263c
 Status (lane R4a, port_log/R4a.md): everything except the attention core matches org torch in float
 (`tests/keras/test_org_model_parity.py`). **The hybrid masked-Linformer core is lane R4b.** Until it lands, the
 default config builds but its forward pass fails (Helen's Linformer refuses k = 64 < 160 keys under the decoder
-mask); `HGQ_ATTN=torch` builds, runs and trains. Do not launch Linformer jobs from this branch before R4b.
+mask); `HGQ_ATTN=torch` builds and runs a forward pass and the matched loss (tests/keras/test_polaris_config.py;
+no optimizer step is tested). Do not launch Linformer jobs from this branch before R4b.
 
 Quantized SwiGLU follows one leaf rule in the hybrid and in keras_native: the packed `Linear(in, 2h)` becomes two
 dense halves, `<name>_hidden<i>_x1` (linear) and `<name>_hidden<i>_x2` (`activation="silu"` inside the layer), and

@@ -16,6 +16,7 @@ cp polaris/env.sh.example polaris/env.sh
 $EDITOR polaris/env.sh                      # paste in the values from 00_discover
 
 bash polaris/01_setup_env.sh                # venv + deps + verification (~10 min)
+                                            # (from a keras-jax checkout: $WORK_ROOT/hepattn-keras-jax)
 bash polaris/02_stage_data.sh               # ~12 GB of CLIC ROOT files
 
 bash polaris/submit.sh 04_smoke.pbs         # GATE: ~10 min on 1 GPU
@@ -130,7 +131,7 @@ uninterrupted production run. Coordinate before you do.
 | `01_setup_env.sh` | uv venv (own Python 3.12) + deps + import/GPU verification |
 | `02_stage_data.sh` | rsync CLIC ROOT files into project space, with size verification |
 | `03_make_config.py` | generates `polaris_hgq.yaml` from `base.yaml` + `linformer.yaml` (the org/main model; `HGQ_ATTN=torch` for `base.yaml` alone) with all the above baked in; see docs/hgq/USAGE.md |
-| `repo_dir.sh` | `HEPATTN_BRANCH` / `HEPATTN_DIR`: which clone setup and every job use (keras-hgq2 stays in `$WORK_ROOT/hepattn`) |
+| `repo_dir.sh` | `HEPATTN_BRANCH` / `HEPATTN_DIR`: which clone setup and every job use. Default: the branch of the clone the script is in (keras-hgq2 stays in `$WORK_ROOT/hepattn`); jobs get no environment from qsub, so submit from the clone the setup made |
 | `04_smoke.pbs` | **gate**: real GPU, real data, bf16 steps, asserts quantizers exist and train |
 | `05_sweep.pbs` | **main**: N GPUs × independent beta points, self-chaining across walltime |
 | `06_ddp_validate.pbs` | optional: tests whether DDP is safe on this stack before trusting it |
