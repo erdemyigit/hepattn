@@ -23,6 +23,14 @@ from hepattn.keras.dense import KerasDense
 from hepattn.keras.encoder import KerasEncoder
 from hepattn.keras.linformer import KerasLinformerAttention
 
+# The production HGQ2 spec (unchanged from 5db27a8; the bitwidths of docs/hgq/USAGE.md). beta0 is 0: BetaScheduler or
+# BetaPID set beta during training.
+QUANT_SPEC = {
+    "weight": {"default_q_type": "kbi", "b0": 8, "i0": 2},
+    "datalane": {"default_q_type": "kif", "i0": 4, "f0": 8},
+    "table": {"default_q_type": "kif", "i0": 2, "f0": 10},
+    "ebops": {"beta0": 0.0},
+}
 R4B = "R4b: Helen's KerasLinformerAttention asserts k >= kv_len under a mask (k=64, decoder kv_len=160)"
 ATTNS = ["linformer", "torch"]
 
@@ -51,7 +59,7 @@ def test_generated_model_is_the_org_model(generated, attn):
     net = copy.deepcopy(generated[attn]["model"]["model"])
     assert net["class_path"] == "hepattn.keras.maskformer.KerasMaskFormer"
     init = net["init_args"]
-    assert set(init.pop("quant")) == {"weight", "datalane", "table", "ebops"}
+    assert init.pop("quant") == QUANT_SPEC
     for task in init["tasks"]["init_args"]["modules"]:  # absolute in the generated file, relative in the repo
         if "scale_dict_path" in task["init_args"]:
             task["init_args"]["scale_dict_path"] = "configs/clic_var_transform.yaml"
@@ -91,6 +99,43 @@ def test_generator_merge_is_a_deep_overlay():
     org_base = yaml.safe_load((U.CONFIGS / "base.yaml").read_text())
     org_overlay = yaml.safe_load((U.CONFIGS / "linformer.yaml").read_text())
     assert merge(org_base, org_overlay) == U.merge(org_base, org_overlay)
+
+
+# linformer.yaml dicts that LightningCLI merges key by key (class specs, their init_args, the decoder's init dict), and
+# the dict-typed parameters it replaces whole ("a dict, so an overlay replaces it whole", linformer.yaml).
+OVERLAY_MERGED = {
+    "model",
+    "model.model",
+    "model.model.init_args",
+    "model.model.init_args.encoder",
+    "model.model.init_args.encoder.init_args",
+    "model.model.init_args.decoder",
+}
+OVERLAY_REPLACED = {"model.model.init_args.encoder.init_args.attn_kwargs", "model.model.init_args.decoder.decoder_layer_config"}
+
+
+def test_overlay_dicts_that_replace_repeat_every_base_key():
+    """The generator (and U.merge) deep-merge the overlay; LightningCLI replaces a dict-typed parameter whole. The two
+    give the same config only while the overlay repeats every base key of those dicts (RETARGET_ORG_MAIN.md 1.1).
+    """
+    base = yaml.safe_load((U.CONFIGS / "base.yaml").read_text())
+    overlay = yaml.safe_load((U.CONFIGS / "linformer.yaml").read_text())
+    replaced = set()
+
+    def walk(b: dict, o: dict, path: str) -> None:
+        for key, value in o.items():
+            here = f"{path}.{key}" if path else key
+            if not isinstance(value, dict):
+                continue
+            if here in OVERLAY_REPLACED:
+                assert set(b.get(key) or {}) <= set(value), f"{here}: base keys the overlay drops: {set(b[key]) - set(value)}"
+                replaced.add(here)
+            else:
+                assert here in OVERLAY_MERGED, f"overlay dict {here} is neither merged nor replaced: classify it"
+                walk(b.get(key) or {}, value, here)
+
+    walk(base, overlay, "")
+    assert replaced == OVERLAY_REPLACED
 
 
 def test_swiglu_products_are_trained_with_the_model(generated):
@@ -153,10 +198,15 @@ def test_generated_config_builds(generated, attn, quantized):
 
 
 @pytest.mark.parametrize("quantized", [False, True])
-@pytest.mark.parametrize("attn", [pytest.param("linformer", marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=R4B)), "torch"])
+@pytest.mark.parametrize(
+    "attn", [pytest.param("linformer", marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=R4B)), "torch", "linformer_dense_attn"]
+)
 def test_generated_config_forward_and_matched_loss(generated, attn, quantized):
+    """linformer_dense_attn: the default config with dense attention, so phi sorting runs quantized before R4b."""
     torch.manual_seed(0)
-    model = U.instantiate(generated[attn], quantized=quantized)
+    cfg = U.to_dense_attention(generated["linformer"]) if attn == "linformer_dense_attn" else generated[attn]
+    model = U.instantiate(cfg, quantized=quantized)
+    assert model.input_sort_field == (None if attn == "torch" else "phi")
     inputs, targets = U.clic_dummy_batch()
     with torch.no_grad():
         outputs = model(inputs)
