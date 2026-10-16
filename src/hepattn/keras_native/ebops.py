@@ -13,9 +13,9 @@ EBOPs-active training steps and needs beta > 0.
 The loss list of ``stateless_call`` is ``Layer.losses``: the ``add_loss`` terms of the model and its sublayers first, then
 one term per trainable weight that has a regularizer (``keras/src/layers/layer.py`` ``losses`` and
 ``_get_regularization_losses``). HGQ2 gives some quantizer variables regularizers; these terms do not depend on beta
-(0.381 vs 804.96 at one test spec, plan section 3.6), so ``split_losses`` drops them before the division. The native
-model calls no other ``add_loss``, so every term in front is an EBOPs term (``tests/keras_native/test_ebops.py`` checks
-both facts).
+(0.335 of 804.91 at one test spec, ``test_ebops.py``; the plan's 0.381 / 804.96 include the hybrid's double count), so
+``split_losses`` drops them before the division. The native model calls no other ``add_loss``, so every term in front is
+an EBOPs term (``tests/keras_native/test_ebops.py`` checks both facts).
 
 ``EbopsLeaves.enabled(on)`` sets ``_enable_ebops`` on every leaf while a step is traced. HGQ2 reads that Python bool at
 trace time, so a step jitted with a static ``ebops_on`` argument has one executable per value (PeriodicEBOPs).
