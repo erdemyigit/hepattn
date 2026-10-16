@@ -19,9 +19,12 @@ API for the S6 driver
     state = steps.set_beta(state, beta)              # host, between steps; same shapes, no retrace
     state, out = steps.train_step(state, (inputs, targets), ebops_on=True)
     #   ``state`` is DONATED: its buffers are reused for the new state, so never touch the old one again.
-    #   ``out`` is a StepOutput of device scalars; ``steps.ebops(out, beta)`` is the EBOPs read-out (active steps only;
-    #   ``beta`` = the value set before the step, or ``steps.read_beta(state)`` read BEFORE the state is donated).
+    #   ``out`` is a StepOutput of device scalars; ``steps.ebops(out, beta)`` is the EBOPs read-out (active steps only).
+    #   ``beta`` is the host value last given to ``set_beta``: keep it on the host. ``steps.read_beta(state)`` copies
+    #   every leaf's beta to the host (a device sync that stalls async dispatch), so use it for checks only.
     out = steps.eval_step(state, (inputs, targets))  # training=False: no EBOPs term, state unchanged; EvalOutput
+    #   ``out.loss`` = ``out.task_loss + out.regularization`` is the hybrid's val/loss: ``MPflowHGQ.aggregate_losses``
+    #   adds ``quant_losses()``, which at training=False holds only the HGQ2 weight-regularizer terms.
     outputs = steps.predict_step(state, inputs)      # training=False output tree
     steps.assign_to_model(state)                     # copy the state into the Keras variables (save_weights, export)
     state = steps.init_state()                       # after loading weights into the model
@@ -32,6 +35,11 @@ types too, so mixing numpy and ``jax.Array`` batches adds cache entries without 
 
 Gradient accumulation is the optimizer's (``optim.build_optimizer``): call ``train_step`` once per micro-batch; every k-th
 call applies the averaged gradient. Each call makes one host matching call.
+
+PeriodicEBOPs with accumulation: compute ``ebops_on`` from the OPTIMIZER-step counter, ``(micro_step // k) % every == 0``.
+The hybrid callback uses ``trainer.global_step % every_n_steps`` (``hepattn/keras/callbacks.py`` ``PeriodicEBOPs``), and
+Lightning's ``global_step`` counts optimizer steps, so all k micro-batches of every ``every``-th update carry the EBOPs
+term. A micro-step counter gives the same mean pull but a different cadence and read-out schedule.
 
 Speed: Keras' compiled trainer donates its state to ``jax.jit`` (``keras/src/backend/jax/trainer.py``
 ``make_train_function``: ``jit(train_step, donate_argnums=0)``); the G1 spike's custom step did not. ``train_step``
@@ -76,9 +84,13 @@ class StepOutput(NamedTuple):
 
 
 class EvalOutput(NamedTuple):
+    """Device values of one ``training=False`` step."""
+
     outputs: Any
+    loss: Any  # task + regularization: the hybrid's val/loss
     task_loss: Any
     losses: Any
+    regularization: Any  # sum of the weight-regularizer terms (no EBOPs term exists at training=False)
 
 
 def maskformer_loss(specs, *, n_jobs: int = 1, host_fn=None, target_object: str = "particle") -> LossFn:
@@ -169,9 +181,10 @@ class TrainStep:
         self._traces["eval"] += 1
         inputs, targets = batch
         with self._precision():
-            outputs, _ = self.model.stateless_call(state.tv, state.ntv, inputs, training=False)
+            outputs, _, qlosses = self.model.stateless_call(state.tv, state.ntv, inputs, training=False, return_losses=True)
             task, losses = self.loss_fn(outputs, targets)
-        return EvalOutput(outputs, task, losses)
+        regularization = sum(qlosses, jnp.zeros((), jnp.float32))
+        return EvalOutput(outputs, task + regularization, task, losses, regularization)
 
     def _predict_impl(self, state: TrainState, inputs):
         self._traces["predict"] += 1

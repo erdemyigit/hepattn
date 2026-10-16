@@ -13,7 +13,12 @@
 - Gradient accumulation through the matched loss: one host call per micro-batch, one update per k micro-batches.
 - State handling (small Dense model): the donated state is consumed (control: ``donate=False``); the Keras variables stay
   valid, also after ``assign_to_model``, which round-trips exactly. Eval and predict compile once over 3 batches.
-- Matmul precision: every dot of the traced step requests HIGHEST precision (control: ``matmul_precision=None``).
+- Matmul precision: every dot of the traced train, eval and predict programs requests HIGHEST precision (control:
+  ``matmul_precision=None``).
+- ``assign_to_model`` / ``init_state`` round-trip the quantized model's state exactly after a training step, the
+  non-trainable state included (control: the step changed that state, so a write that skips it fails).
+- ``eval_step``'s loss is the hybrid's val/loss, task + the HGQ2 weight regularizers (no EBOPs term at training=False):
+  its regularization equals the training step's on the same weights; control: it is nonzero.
 - The non-trainable state the training forward updates (WRAP integer bits ``/i``, ``_ebops``) is kept: the returned
   ``ntv`` equals a reference ``stateless_call(training=True)`` over 2 steps; control: predicting with the stale ``ntv``
   differs.
@@ -303,15 +308,24 @@ def test_steps_request_highest_matmul_precision(float_model, batches):
     def dot_precisions(matmul_precision):
         opt = build_optimizer(float_model, optimizer="AdamW", lrs_config=LRS, total_steps=100)
         steps = TrainStep(float_model, opt, maskformer_loss(clic_specs()), matmul_precision=matmul_precision)
-        text = steps._train.lower(steps.init_state(), batches[0], ebops_on=True).as_text()  # noqa: SLF001
-        dots = [line for line in text.splitlines() if "dot_general" in line]
-        return dots, text.count("HIGHEST")
+        state = steps.init_state()
+        lowered = {
+            "train": steps._train.lower(state, batches[0], ebops_on=True),  # noqa: SLF001
+            "eval": steps._eval.lower(state, batches[0]),  # noqa: SLF001
+            "predict": steps._predict.lower(state, batches[0][0]),  # noqa: SLF001
+        }
+        texts = {name: low.as_text() for name, low in lowered.items()}
+        return {name: [line for line in t.splitlines() if "dot_general" in line] for name, t in texts.items()}, {
+            name: t.count("HIGHEST") for name, t in texts.items()
+        }
 
     dots, _ = dot_precisions("highest")
-    loose = [line.strip()[:160] for line in dots if "precision = [HIGHEST, HIGHEST]" not in line]
-    assert len(dots) > 100 and not loose, (len(dots), loose[:3])
+    for name, lines in dots.items():
+        loose = [line.strip()[:160] for line in lines if "precision = [HIGHEST, HIGHEST]" not in line]
+        assert len(lines) > 20 and not loose, (name, len(lines), loose[:3])
+    assert len(dots["train"]) > 100
     _, default = dot_precisions(None)
-    assert default == 0, "the control already requests HIGHEST: the check is vacuous"
+    assert default == {"train": 0, "eval": 0, "predict": 0}, "the control already requests HIGHEST: the check is vacuous"
 
 
 def test_grad_norm_is_optional():
@@ -430,3 +444,39 @@ def test_maskformer_loss_from_config_reads_the_tasks_and_the_matcher(setup, batc
     # control: without a matcher block the host matching runs in one thread
     float(maskformer_loss_from_config({k: v for k, v in init_args.items() if k != "matcher"})(outputs, targets)[0])
     assert seen == [1, 16, 1], seen
+
+
+def test_assign_to_model_round_trips_the_quantized_state(setup, batches, model):
+    """S6 calls ``assign_to_model`` before ``save_weights`` / export: the quantizer state (``/i``, ``_beta``, ``_ebops``) must go too."""
+    steps, state0, _ = setup
+    original = steps.init_state()  # restored at the end: the model is shared by the module's tests
+    state, _ = steps.train_step(copy_state(state0), batches[0], ebops_on=True)
+    assert len(state.ntv) > 1000
+    changed_ntv = sum(not np.array_equal(np.asarray(a), np.asarray(b)) for a, b in zip(original.ntv, state.ntv, strict=True))
+    assert changed_ntv > 100, f"the step changed only {changed_ntv} ntv arrays: the ntv check would be vacuous"
+    try:
+        steps.assign_to_model(state)
+        again = steps.init_state()
+        for part in ("tv", "ntv", "ov"):
+            mismatched = [
+                i
+                for i, (a, b) in enumerate(zip(getattr(state, part), getattr(again, part), strict=True))
+                if not np.array_equal(np.asarray(a), np.asarray(b))
+            ]
+            assert not mismatched, f"{part}: {len(mismatched)} arrays differ after assign_to_model, e.g. {mismatched[:3]}"
+        assert [np.asarray(v.value).dtype for v in model.non_trainable_variables] == [np.asarray(x).dtype for x in state.ntv]
+    finally:
+        steps.assign_to_model(original)
+
+
+def test_eval_loss_is_task_plus_regularization(setup, batches):
+    """The hybrid's val/loss: ``MPflowHGQ.aggregate_losses`` adds ``quant_losses()`` (the regularizers at training=False)."""
+    steps, state0, _ = setup
+    ev = steps.eval_step(state0, batches[0])
+    _, out = steps.train_step(copy_state(state0), batches[0], ebops_on=True)
+    reg, task = float(ev.regularization), float(ev.task_loss)
+    print(f"MEASURED eval: task {task:.6f}, regularization {reg:.6f}; train-step regularization {float(out.regularization):.6f}")
+    assert reg > 0.0, "no regularizer terms: the check is vacuous"
+    # the regularizers read only the weights, so the training step on the same state gives the same sum
+    assert reg == pytest.approx(float(out.regularization), rel=1e-6)
+    assert float(ev.loss) == pytest.approx(task + reg, rel=1e-7)
