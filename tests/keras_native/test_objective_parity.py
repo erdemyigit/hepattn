@@ -362,22 +362,25 @@ def _torch_matcher(**init_args) -> Matcher:
         return Matcher(**init_args)
 
 
-def test_matcher_n_jobs_from_org_base_yaml_equals_torch_matcher(caplog):
-    """org/main base.yaml: lap1015_late, 16 threads. Native solves it with scipy and logs that once."""
-    entry = yaml.safe_load(ORG_BASE_YAML.read_text())["model"]["model"]["init_args"]["matcher"]
-    assert entry["init_args"]["default_solver"] == "lap1015_late"
+@pytest.mark.parametrize(("config", "solver"), [(CLIC_YAML, "scipy"), (ORG_BASE_YAML, "lap1015_late")], ids=["pflow_hgq", "org_base"])
+def test_matcher_n_jobs_from_yaml_equals_torch_matcher(caplog, config, solver):
+    """pflow_hgq.yaml (scipy) and org/main base.yaml (lap1015_late), both 16 threads. Native solves
+    lap1015_late with scipy and logs that once; scipy logs nothing.
+    """
+    entry = yaml.safe_load(config.read_text())["model"]["model"]["init_args"]["matcher"]
+    assert entry["init_args"]["default_solver"] == solver
     torch_matcher = _torch_matcher(**entry["init_args"])
     assert torch_matcher.parallel_solver
     O._log_lap1015_fallback.cache_clear()  # noqa: SLF001
     with caplog.at_level(logging.WARNING, logger=O.__name__):
         assert O.matcher_n_jobs_from_config(entry) == torch_matcher.n_jobs == 16
         assert O.matcher_n_jobs_from_config(entry) == 16
-    assert [r.getMessage().split(":")[0] for r in caplog.records] == ["keras_native solves default_solver=lap1015_late with scipy"]
-    scipy_entry = {**entry, "init_args": {**entry["init_args"], "default_solver": "scipy"}}
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger=O.__name__):
-        assert O.matcher_n_jobs_from_config(scipy_entry) == 16
-    assert not caplog.records
+    expected = ["keras_native solves default_solver=lap1015_late with scipy"] if solver == "lap1015_late" else []
+    assert [r.getMessage().split(":")[0] for r in caplog.records] == expected
+
+
+def test_matcher_n_jobs_defaults_follow_torch_matcher():
+    entry = yaml.safe_load(ORG_BASE_YAML.read_text())["model"]["model"]["init_args"]["matcher"]
     base = {"class_path": entry["class_path"], "init_args": {"adaptive_solver": False}}
     assert O.matcher_n_jobs_from_config(base) == 1  # torch default parallel_solver=False
     parallel = {**base, "init_args": {"adaptive_solver": False, "parallel_solver": True}}

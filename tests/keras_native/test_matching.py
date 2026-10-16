@@ -83,6 +83,7 @@ def test_matched_total_cost_equals_torch_matcher_over_100_batches(nonfinite):
 def test_non_finite_costs_need_the_sanitising_step():
     """Control for the nan-and-inf row: scipy rejects NaN and -inf (the torch Matcher replaces them first);
     -inf entries become -f32max/10 and are matched, NaN and +inf become +f32max/10 and are avoided.
+    Event 1 holds the +inf case: mapping +inf to -f32max/10 would pick its diagonal.
     """
     cost = np.array([[0.0, 1.0], [1.0, 0.0]], np.float32)
     for bad in (np.nan, -np.inf):
@@ -94,12 +95,13 @@ def test_non_finite_costs_need_the_sanitising_step():
     plus_inf[0, 0] = np.inf
     linear_sum_assignment(plus_inf)  # accepted by scipy; sanitised anyway, as in torch
 
-    costs = np.zeros((1, 2, 2), np.float32)
+    costs = np.zeros((2, 2, 2), np.float32)
     costs[0, 0, 1] = -np.inf  # prediction 0 -> target 1 is attractive
     costs[0, 1, 1] = np.nan  # prediction 1 -> target 1 is forbidden
-    valid = np.ones((1, 2), bool)
+    costs[1] = [[np.inf, 0.0], [0.0, 1.0]]  # prediction 0 -> target 0 is forbidden
+    valid = np.ones((2, 2), bool)
     ref = Matcher(default_solver="scipy", adaptive_solver=False)(torch.from_numpy(costs), torch.from_numpy(valid)).numpy()
-    np.testing.assert_array_equal(ref, [[1, 0]])  # target 0 <- prediction 1, target 1 <- prediction 0
+    np.testing.assert_array_equal(ref, [[1, 0], [1, 0]])  # target 0 <- prediction 1, target 1 <- prediction 0
     np.testing.assert_array_equal(matching.host_match(costs, valid), ref)
 
 

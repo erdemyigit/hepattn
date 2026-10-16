@@ -75,6 +75,15 @@ MUTANTS = {
     "m13_device_solver_accepted": [(OBJECTIVE, '    if args.get("device_solver") is not None:\n', "    if False:\n")],
     "m14_any_solver_accepted": [(OBJECTIVE, "if solver not in _HOST_SOLVERS or args.get(", "if args.get(")],
     "m15_log_every_call": [(OBJECTIVE, "@cache\ndef _log_lap1015_fallback", "def _log_lap1015_fallback")],
+    # fix round 1 (reviewer mutants that survived a37b04a)
+    "m16_bce_count_unclamped": [
+        (LOSSES, "counts = ops.maximum(ops.sum(pad, axis=-1, keepdims=True), 1.0)  # [B, 1]", "counts = ops.sum(pad, axis=-1, keepdims=True)  # [B, 1]")
+    ],
+    "m17_dice_numerator_unmasked": [
+        (LOSSES, "numerator = 2.0 * ops.sum(probs * targets, axis=-1)", "numerator = 2.0 * ops.sum(ops.sigmoid(f32(logits)) * targets, axis=-1)")
+    ],
+    "m18_posinf_to_minus_big": [(MATCHING, "posinf=_BIG", "posinf=-_BIG")],
+    "m19_scipy_rejected": [(OBJECTIVE, '_HOST_SOLVERS = {"scipy", "lap1015_late"}', '_HOST_SOLVERS = {"lap1015_late"}')],
 }
 
 

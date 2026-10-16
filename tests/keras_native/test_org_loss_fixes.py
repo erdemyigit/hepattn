@@ -169,7 +169,9 @@ def test_b1d_target_one_at_padded_nodes_is_finite_and_equals_torch(data):
     got = float(L.mask_bce_loss(logits, tgt, ov, pad, sample_weight=sample_weight))
     assert np.isfinite(ref)
     assert abs(got - ref) <= BCE_ATOL
-    assert np.isfinite(_native("mask_dice", logits, tgt, ov, pad))
+    dice_ref, dice = _torch("mask_dice", logits, tgt, ov, pad), _native("mask_dice", logits, tgt, ov, pad)
+    assert np.isfinite(dice)
+    assert abs(dice - dice_ref) <= DICE_ATOL  # measured 0 (0.9179240 both); DICE_ATOL from B1-a
     # control: the old formula in float32 (the native dtype) overflows
     assert np.isinf(_old_bce(logits, tgt, ov, pad, dtype=np.float32))
     # padded nodes get an exactly zero gradient
@@ -207,6 +209,62 @@ def test_b1f_finite_logits_at_padded_nodes_change_nothing(data, name):
         probs = _sigmoid64(logits)
         per = 1 - (2 * (probs * tgt).sum(-1) + 1) / (probs.sum(-1) + tgt.sum(-1) + 1)
         unmasked = float((per * ov).sum() / ov.sum())
+    assert abs(unmasked - got) > 0.01
+
+
+@pytest.mark.parametrize("objects", ["with_objects", "no_objects"])
+def test_b1g_event_without_valid_nodes_is_finite_and_equals_torch(data, objects):
+    """One event of the batch has no valid node (fixed-shape batch padded with an empty event).
+
+    torch divides that event's node sum by ``valid_counts.clamp_min(1)``, so its objects contribute 0 to
+    mask_bce. Measured: mask_bce 1.2725188 / 1.3870456 and mask_dice 0.8231073 / 0.8971870 (with / without
+    valid objects in that event), equal to torch within the B1-a tolerances. Control: without the clamp the
+    per-event bce is 0/0 = NaN, and NaN * 0 poisons the batch even when the event has no valid object.
+    """
+    pad = data["pad"].copy()
+    pad[1] = False
+    ov = data["ov"].copy()
+    if objects == "no_objects":
+        ov[1] = False
+    logits = np.where(pad[:, None], data["logits"], FMIN).astype(np.float32)
+    tgt = (data["tgt"] * pad[:, None]).astype(np.float32)
+    for name, atol in (("mask_bce", BCE_ATOL), ("mask_dice", DICE_ATOL)):
+        got, ref = _native(name, logits, tgt, ov, pad), _torch(name, logits, tgt, ov, pad)
+        print(f"{objects} {name}: torch {ref:.7f} native {got:.7f}")
+        assert np.isfinite(got)
+        assert abs(got - ref) <= atol
+    with np.errstate(invalid="ignore"):
+        per = (_bce64(logits, tgt) * pad[:, None]).sum(-1) / pad.sum(-1)[:, None]  # no clamp
+    assert np.isnan((per * ov).sum() / max(ov.sum(), 1))
+
+
+@pytest.mark.parametrize("name", ["mask_bce", "mask_dice"])
+def test_b1h_target_one_and_finite_logits_at_padded_nodes_equal_torch(data, name):
+    """Dummy targets (1 at the padded nodes of valid objects) together with finite padded logits.
+
+    This is the only case where torch's pad multiply on the dice numerator matters (B1-f has target 0 at
+    padded nodes, B1-d has ``finfo.min`` logits there). Measured: mask_bce 1.4038032 (torch 1.4038030),
+    mask_dice 0.9179240 (= torch). The value is exactly the one with ``finfo.min`` padded logits. Control: a
+    dice numerator with unmasked probabilities gives 0.7080; bce without the pad mask moves by more than 0.01.
+    """
+    rng = np.random.default_rng(1)
+    pad, ov = data["pad"], data["ov"]
+    padded = np.broadcast_to(~pad[:, None, :], data["logits"].shape)
+    logits = data["logits"].copy()
+    logits[padded] = (3 * rng.normal(size=int(padded.sum()))).astype(np.float32)
+    tgt = data["tgt"].copy()
+    tgt[padded & ov[..., None]] = 1.0
+    got = _native(name, logits, tgt, ov, pad)
+    assert abs(got - _torch(name, logits, tgt, ov, pad)) <= {"mask_bce": BCE_ATOL, "mask_dice": DICE_ATOL}[name]
+    assert got == _native(name, data["logits"], tgt, ov, pad)
+    if name == "mask_bce":
+        unmasked = float(((_bce64(logits, tgt).sum(-1) / pad.sum(-1)[:, None]) * ov).sum() / ov.sum())
+    else:
+        probs = _sigmoid64(logits)
+        den = (probs * pad[:, None]).sum(-1) + tgt.sum(-1)
+        per = 1 - (2 * (probs * tgt).sum(-1) + 1) / (den + 1)  # numerator not masked
+        unmasked = float((per * ov).sum() / ov.sum())
+    print(f"{name}: native {got:.7f}; control {unmasked:.4f}")
     assert abs(unmasked - got) > 0.01
 
 

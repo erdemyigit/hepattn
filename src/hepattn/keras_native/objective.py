@@ -8,8 +8,8 @@ methods of the four CLIC tasks (``src/hepattn/models/task.py``) inside a jitted 
     losses = model_losses(permute_outputs(outputs, idx, specs), targets, specs)
     total = total_loss(losses)
 
-``matched_loss`` runs these four lines. Only the task configurations of ``pflow_hgq.yaml`` are
-supported; anything else raises (``specs_from_config``).
+``matched_loss`` runs these four lines. Only the task configurations of ``pflow_hgq.yaml`` and org/main
+``base.yaml`` (the same task block) are supported; anything else raises (``specs_from_config``).
 
 Interface (B batch, P = 150 queries, T = 150 target particles, N = 160 nodes, registers already removed)
 -----------------------------------------------------------------------------------------------------------
