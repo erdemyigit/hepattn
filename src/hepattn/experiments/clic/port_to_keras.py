@@ -72,6 +72,7 @@ def build_keras_maskformer_from_config(model_cfg: dict, quant: dict | None = Non
         target_object=init_args.get("target_object", "particle"),
         matcher=donor.matcher,
         encoder_tasks=donor.encoder_tasks if len(donor.encoder_tasks) else None,
+        input_sort_field=init_args.get("input_sort_field"),
         quant=quant,
     )
 

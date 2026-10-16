@@ -199,7 +199,9 @@ The resulting state loads into a `KerasMaskFormer` built from the same config
 Not yet for the org Linformer model (R4b open issue): `port_to_keras` fails at `change_attn_backends(model, "torch")`,
 which org refuses for linformer, and once that is fixed it must call `keras_model.materialize(batch)` after
 `port_maskformer` and before `state_dict()` (the save raises otherwise). `evaluate_hgq --float-state` must materialize
-the float model before `load_state_dict` in the same way.
+the float model before `load_state_dict` in the same way. `build_keras_maskformer_from_config` (used by `port_to_keras`,
+`eval_keras` and `evaluate_hgq`) keeps `input_sort_field` of a torch config since the retarget critique
+(`tests/keras/test_port_to_keras_config.py`); before, it built an unsorted hybrid for the org model.
 
 ## Evaluating a trained model
 
