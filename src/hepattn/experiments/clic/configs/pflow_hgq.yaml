@@ -5,11 +5,10 @@
 #
 # Matched to Helen's config: linformer attention (encoder + decoder), batch_size 128,
 # bf16-mixed precision, AdamW, LR max 5e-5, 50 epochs, grad-clip norm.
-# Linformer here is our quantized KerasLinformerAttention (a QAT port of Helen's custom
-# backend). NOTE: at CLIC's N~168 the low-rank projection (k=256) gives NO sequence
-# compression (k > N); the batch-128 throughput win comes from bf16-mixed, validated
-# finite+grad-flowing against the HGQ2 quantizers (job 26777). k=256 is Helen's value and
-# is required by the projected-space masking (k >= kv_len).
+# Since the retarget to org/main ac0da8f (docs/hgq/RETARGET_ORG_MAIN.md, R5) `linformer` is org PR #9's
+# masked Linformer (Helen's layer is gone); k = linformer_seq_len = 256 keeps this config's old projection
+# sizes, which give NO sequence compression at CLIC's N~168. The org/main model itself (base.yaml +
+# linformer.yaml: k=64, phi sorting, PR #8 layers) is the config polaris/03_make_config.py generates.
 name: CLIC_pflow_HGQ
 seed_everything: 42
 data:
@@ -121,14 +120,14 @@ model:
                   scale: 0.1
       encoder:
         num_layers: 6
-        attn_type: linformer  # matched to Helen (KerasLinformerAttention; k=256 >= N=168)
+        attn_type: linformer  # org masked Linformer (PR #9); k=256 >= N=168, as Helen's config
         hybrid_norm: true
         value_residual: true
         num_register_tokens: 8
         attn_kwargs:
           num_heads: 16
           linformer_seq_len: 256
-          linformer_proj_dim: 256
+          linformer_k: 256
       decoder:
         num_decoder_layers: 4
         num_queries: 150
@@ -139,9 +138,9 @@ model:
           hybrid_norm: true
           attn_kwargs:
             num_heads: 16
-            attn_type: linformer  # matched to Helen (encoder + decoder linformer)
+            attn_type: linformer  # org masked Linformer (PR #9), encoder + decoder
             linformer_seq_len: 256
-            linformer_proj_dim: 256
+            linformer_k: 256
       matcher:
         class_path: hepattn.models.matcher.Matcher
         init_args:

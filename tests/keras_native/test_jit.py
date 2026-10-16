@@ -16,14 +16,6 @@ import pytest
 from .golden.cases import CASES
 from .golden_utils import build_from_golden, inputs_of, native_leaves
 
-# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict. Blocked on a file this lane does not own:
-# the torch reference takes its kwargs from golden/cases.py (R5, plan section 6). See docs/hgq/port_log/R0.md, open issues.
-CASES_LIN_XFAIL = pytest.mark.xfail(
-    strict=True,
-    raises=TypeError,
-    reason="blocked on the enc_lin attn_kwargs in golden/cases.py (R5-owned): they pass linformer_proj_dim, which org Attention rejects since PR #9",
-)
-
 MODE = "high"
 
 
@@ -36,11 +28,10 @@ def jitted_step(case: str, module, training: bool = True):
         elif kind == "innet":
             args, kwargs = (inputs,), {}
         elif kind == "enc":
-            args, kwargs = (inputs["x"],), {"kv_mask": inputs["kv_mask"]}
-        elif kind == "attn":
-            args, kwargs = (inputs["q"],), {"k": inputs.get("k"), "kv_mask": inputs.get("kv_mask"), "attn_mask": inputs.get("attn_mask")}
+            args, kwargs = (inputs["x"],), {"kv_mask": inputs["kv_mask"], "x_sort_value": inputs.get("x_sort_value")}
         else:
-            args, kwargs = (inputs["q"],), {"k": inputs.get("k"), "v": inputs.get("k"), "attn_mask": inputs.get("attn_mask")}
+            args = (inputs["q"],)
+            kwargs = {key: inputs.get(key) for key in ("k", "kv_mask", "attn_mask", "kv_sort_idx")}
         return module.stateless_call(tv, ntv, *args, return_losses=True, training=training, **kwargs)
 
     def loss_fn(tv, ntv, inputs):
@@ -68,7 +59,7 @@ def ebops_indices(module) -> dict[str, list[int]]:
     return out
 
 
-@pytest.mark.parametrize("case", [pytest.param(c, marks=CASES_LIN_XFAIL) if c == "enc_lin" else c for c in CASES])
+@pytest.mark.parametrize("case", CASES)
 def test_layer_trains_under_jit(case):
     module, _, golden = build_from_golden(case, MODE)
     inputs = inputs_of(golden)
@@ -99,7 +90,7 @@ def test_layer_trains_under_jit(case):
 UINT32_MAX = 2**32 - 1
 
 
-@pytest.mark.parametrize("case", ["dense_ffn", "innet", "attn_cross", pytest.param("enc_lin", marks=CASES_LIN_XFAIL)])
+@pytest.mark.parametrize("case", ["dense_ffn", "innet", "attn_cross", "enc_lin"])
 def test_ebops_loss_term(case):
     """The train-mode losses carry beta x EBOPs on top of the eval-mode (non-EBOPs) terms.
 
@@ -128,7 +119,7 @@ def test_ebops_loss_term(case):
     assert beta > 0, f"{case}: EBOPs beta is {beta}; the penalty checks below would be vacuous"
     assert penalty > 0, f"{case}: train-mode losses carry no EBOPs penalty ({penalty})"
     if UINT32_MAX in stored:
-        assert CASES[case]["kind"] in {"attn", "enc", "lin"}, "only softmax exp tables should saturate"
+        assert CASES[case]["kind"] in {"attn", "enc"}, "only softmax exp tables should saturate"
         assert penalty > beta * sum(stored)
     else:
         assert penalty == pytest.approx(beta * sum(stored), rel=1e-5)

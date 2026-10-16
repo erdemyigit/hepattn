@@ -1,6 +1,7 @@
-"""Merge check: lane A's native MaskFormer outputs feed lane B's matched loss inside one jitted step.
+"""Merge check: the native MaskFormer outputs feed the matched loss inside one jitted step.
 
-S5 builds the train step on this path; here it is checked only that the two lanes agree on the
+The model is org/main ``base.yaml`` + ``linformer.yaml`` at the test width (``mf_cases`` variant ``org``; plan 5.8).
+S5 builds the train step on this path; here it is checked only that model and objective agree on the
 output/target interface (``objective.py`` docstring): the jitted ``value_and_grad`` compiles once,
 makes one host matching call per step, and the matched task loss is finite and reaches every model
 weight. Quantizer variables are excluded from the gradient check: some of them get gradients only
@@ -18,23 +19,9 @@ from .golden.cases import QUANT_SPECS
 from .golden.mf_cases import clic_dummy_batch
 from .mf_golden_utils import build_mf
 
-# Merge xfail (rt/integration, docs/hgq/port_log/R-merge.md); strict, so it fails once R5 changes mf_cases.py LIN_KWARGS.
-MERGE_R5_XFAIL = pytest.mark.xfail(
-    strict=True,
-    raises=TypeError,
-    reason=(
-        "R5: golden/mf_cases.py LIN_KWARGS passes linformer_proj_dim, which native build_attention rejects since R2"
-        " (RETARGET_ORG_MAIN.md section 5.1)"
-        "; added at the rt/integration merge, see docs/hgq/port_log/R-merge.md"
-        "; test_dummy_targets_give_the_documented_inf must then be rewritten: bug 1 makes the dummy total finite"
-        " (replacement in docs/hgq/port_log/R1.md, deviation 1)"
-    ),
-)
-pytestmark = MERGE_R5_XFAIL
-
 
 def real_like(targets: dict) -> dict:
-    """Dummy data gives padded nodes target 1, so mask_bce is inf (S4.md); real CLIC data has 0 there."""
+    """Real CLIC data has no target at padded nodes; dummy data gives them target 1 (S4.md)."""
     targets = dict(targets)
     node_valid = targets["node_valid"][:, None, :]
     targets["particle_node_valid"] = targets["particle_node_valid"] & node_valid
@@ -48,7 +35,7 @@ def batches():
 
 
 def test_native_model_outputs_train_through_the_matched_loss(batches):
-    model = build_mf("lin", QUANT_SPECS["high"], batches[0][0])
+    model = build_mf("org", QUANT_SPECS["high"], batches[0][0])
     specs = clic_specs()
     host_calls = []
 
@@ -85,11 +72,15 @@ def test_native_model_outputs_train_through_the_matched_loss(batches):
     assert not missed, f"{len(missed)} model weights get no gradient from the matched loss: {missed[:5]}"
 
 
-def test_dummy_targets_give_the_documented_inf(batches):
-    """Control for ``real_like``: without it the dummy targets make mask_bce inf, as in torch (S4.md)."""
+def test_dummy_targets_give_a_finite_loss(batches):
+    """Since org a4263c1 (bug 1, R1), target 1 at padded nodes no longer makes mask_bce inf (it was inf before, S4.md);
+    ``real_like`` still changes the loss (the dice target sum and the incidence targets are not masked).
+    Replacement from docs/hgq/port_log/R1.md, deviation 1.
+    """
     inputs, targets = batches[0]
-    model = build_mf("lin", None, inputs)
-    total, _, _ = matched_loss(model(inputs, training=False), targets, clic_specs())
-    assert np.isinf(float(total))
-    total, _, _ = matched_loss(model(inputs, training=False), real_like(targets), clic_specs())
-    assert np.isfinite(float(total))
+    model = build_mf("org", None, inputs)
+    dummy, _, _ = matched_loss(model(inputs, training=False), targets, clic_specs())
+    real, _, _ = matched_loss(model(inputs, training=False), real_like(targets), clic_specs())
+    assert np.isfinite(float(dummy))
+    assert np.isfinite(float(real))
+    assert float(dummy) != float(real)

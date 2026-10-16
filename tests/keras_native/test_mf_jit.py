@@ -1,4 +1,4 @@
-"""S3 JIT gates for the whole native MaskFormer (quantized, Linformer, CLIC test shapes).
+"""JIT gates for the whole native MaskFormer: org/main ``base.yaml`` + ``linformer.yaml`` at the test width (quantized).
 
 - The jitted forward (``stateless_call``) compiles once over 3 different batches of the same static shape; in float it
   equals the eager forward.
@@ -19,18 +19,6 @@ from .mf_golden_utils import build_mf, flatten
 
 SENTINEL = 1e30
 
-# Merge xfail (rt/integration, docs/hgq/port_log/R-merge.md); strict, so it fails once R5 changes mf_cases.py LIN_KWARGS.
-MERGE_R5_XFAIL = pytest.mark.xfail(
-    strict=True,
-    raises=TypeError,
-    reason=(
-        "R5: golden/mf_cases.py LIN_KWARGS passes linformer_proj_dim, which native build_attention rejects since R2"
-        " (RETARGET_ORG_MAIN.md section 5.1)"
-        "; added at the rt/integration merge, see docs/hgq/port_log/R-merge.md"
-    ),
-)
-pytestmark = MERGE_R5_XFAIL
-
 
 @pytest.fixture(scope="module")
 def batches():
@@ -39,7 +27,7 @@ def batches():
 
 @pytest.fixture(scope="module")
 def model(batches):
-    return build_mf("lin", QUANT_SPECS["high"], batches[0])
+    return build_mf("org", QUANT_SPECS["high"], batches[0])
 
 
 def surrogate(outputs) -> jax.Array:
@@ -76,7 +64,7 @@ def test_jitted_float_forward_equals_eager(batches):
 
     Quantized jitted forwards are checked against the hybrid golden files (test_mf_golden.py ``-jit`` rows).
     """
-    model = build_mf("lin", None, batches[0])
+    model = build_mf("org", None, batches[0])
     tv, ntv = state(model)
     jitted = flatten(jax.jit(lambda tv, ntv, x: model.stateless_call(tv, ntv, x, training=False)[0])(tv, ntv, batches[0]))
     eager = flatten(model(batches[0], training=False))
@@ -120,7 +108,7 @@ def test_quant_losses_come_back_from_stateless_call(model, batches):
     nested, but a top-level call clears its earlier ones. ``MaskFormer.call`` calls the tasks a last time at top level
     ("final"), so stateless_call counts each layer's EBOPs once, as the hybrid does (test_mf_golden.py). An eager
     ``model(x, training=True)`` is one outer call and keeps them all: eager ``model.losses`` has
-    sum((calls - 1) x EBOPs leaves) more terms (measured 421 vs 411). The training step must use stateless_call.
+    sum((calls - 1) x EBOPs leaves) more terms (S3 model: 421 vs 411). The training step must use stateless_call.
     """
     tv, ntv = state(model)
     _, ntv_train, losses_train = model.stateless_call(tv, ntv, batches[0], training=True, return_losses=True)
@@ -139,5 +127,8 @@ def test_quant_losses_come_back_from_stateless_call(model, batches):
     model(batches[0], training=False)
     calls = {t.name: 1 + sum(t.should_run_at_layer(i) for i in range(len(model.decoder.layers))) for t in model.tasks}
     repeated = sum((calls[t.name] - 1) * ebops_leaves(t) for t in model.tasks)
-    assert repeated == 10, calls  # classification: 4 leaves x 1 extra call; mask: 3 leaves x 2 extra calls
+    # org model: classification and mask run at the 4 layers and at final (4 extra calls each); classification has 4
+    # EBOPs leaves, mask 9 (two SwiGLU nets of x1, x2, product, final, and the mask einsum): 4 x 4 + 4 x 9
+    assert calls == {"task0": 5, "task1": 5, "task2": 1, "task3": 1}, calls
+    assert repeated == 52, (calls, {t.name: ebops_leaves(t) for t in model.tasks})
     assert eager - train.size == repeated, (eager, train.size)

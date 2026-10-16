@@ -1,11 +1,15 @@
-"""Write the S3 MaskFormer golden files from the HYBRID ``KerasMaskFormer``; run it in the hybrid torch env.
+"""Write the MaskFormer golden files from the HYBRID ``KerasMaskFormer``; run it in the hybrid torch env.
 
-    KERAS_BACKEND=torch PYTHONPATH=<worktree>/src <hepattn>/.venv/bin/python tests/keras_native/golden/make_golden_maskformer.py
+    KERAS_BACKEND=torch PYTHONPATH=<worktree>/src <hepattn>/.venv/bin/python \
+        tests/keras_native/golden/make_golden_maskformer.py [case ...]
 
-For each case of ``mf_cases.VARIANTS`` (``mf_torch``, ``mf_lin``) it builds the seeded pure-torch MaskFormer, and for
-each mode in ``MODES`` the hybrid twin with the same weights (``port`` below). One ``<case>.npz`` holds the CLIC dummy
+For each case of ``CASES`` (``mf_torch``: the S3 test model with dense attention; ``mf_org``: org/main
+``base.yaml`` + ``linformer.yaml`` at the test width, R5) it builds the seeded pure-torch MaskFormer, and for each mode
+in ``MODES`` the hybrid twin with the same weights (``hepattn.keras.porting.port_maskformer``). ``GOLDEN_OUT=<dir>``
+writes the files there instead of next to this script. One ``<case>.npz`` holds the CLIC dummy
 batch (``in::<key>``), per mode every output leaf (``<mode>::out::<path>``, incl. the boolean ``attn_mask`` per layer)
-and every non-kernel/bias variable of every named keras leaf (``<mode>::kv::<leaf>::<idx>::<var name>``), plus ``meta``
+and every non-kernel/bias variable of every named keras leaf (``make_golden.select_leaves``;
+``<mode>::kv::<leaf>::<idx>::<var name>``), plus ``meta``
 (json: per mode the leaf names, trainable flags and the sha256 of every kernel/bias; the sha256 of the torch state).
 Quantized modes also store ``<mode>::qlosses``: the training-mode HGQ2 loss terms, each keras layer once, and in meta the
 count and sum of the hybrid's ``quant_losses()``, which counts the task-head layers twice.
@@ -28,24 +32,25 @@ import hgq
 import keras
 import numpy as np
 import torch
-from hgq.layers import QDense, QEinsum, QSoftmax
 
 import hepattn
 from hepattn.keras import set_keras_default_device
-from hepattn.keras.factory import EinsumOp, SoftmaxOp
 from hepattn.keras.maskformer import KerasMaskFormer
-from hepattn.keras.porting import port_attention, port_dense, port_linformer, port_residual, port_swapped_module
+from hepattn.keras.porting import port_maskformer
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from cases import QUANT_SPECS  # noqa: E402
+from make_golden import select_leaves  # noqa: E402
 from mf_cases import (  # noqa: E402
     DIM,
+    ORG_VARIANTS,
     VARIANTS,
     array_digest,
     clic_dummy_batch,
     decoder_config,
     flatten,
+    hybrid_org_kwargs,
     task_specs,
     torch_input_nets,
     torch_model,
@@ -53,7 +58,6 @@ from mf_cases import (  # noqa: E402
     torch_task,
 )
 
-LEAF_TYPES = (QDense, QEinsum, QSoftmax, keras.layers.Dense, EinsumOp, SoftmaxOp)
 DIGESTED = {"kernel", "bias"}  # stored as sha256 only (they equal the ported torch weights)
 SEED = 30
 # pflow_hgq.yaml / polaris 03_make_config.py quantizer config (production)
@@ -70,12 +74,13 @@ PROD_SAT = {**PROD, "datalane": {**PROD["datalane"], "overflow_mode": "SAT_SYM"}
 MODES = {"float": None, "high": QUANT_SPECS["high"], "low": QUANT_SPECS["low"], "prod": PROD, "prodsat": PROD_SAT}
 
 
-def case_name(variant: str) -> str:
-    return f"mf_{variant}"
+CASES = {"mf_torch": "torch", "mf_org": "org"}
 
 
 def hybrid_model(variant: str, quant) -> KerasMaskFormer:
     torch.manual_seed(SEED)
+    if variant in ORG_VARIANTS:
+        return KerasMaskFormer(**hybrid_org_kwargs(), quant=quant).eval()
     enc = dict(VARIANTS[variant]["encoder"])
     return KerasMaskFormer(
         input_nets=torch_input_nets(),
@@ -87,35 +92,8 @@ def hybrid_model(variant: str, quant) -> KerasMaskFormer:
     ).eval()
 
 
-def port_any_attention(tattn, kattn) -> None:
-    if tattn.attn_type == "linformer":
-        port_linformer(tattn.attn, kattn)
-    else:
-        port_attention(tattn, kattn)
-
-
-@torch.no_grad()
-def port(tmodel, kmodel) -> None:
-    """hepattn.keras.porting.port_maskformer, extended to Linformer attention in the encoder and decoder."""
-    for tnet, knet in zip(tmodel.input_nets, kmodel.input_nets, strict=True):
-        port_swapped_module(tnet, knet)
-    kmodel.encoder.register_tokens.copy_(tmodel.encoder.register_tokens)
-    for tl, kl in zip(tmodel.encoder.layers, kmodel.encoder.layers, strict=True):
-        port_residual(tl.attn, kl.attn, port_any_attention)
-        port_residual(tl.dense, kl.dense, port_dense)
-    kmodel.decoder.initial_queries.copy_(tmodel.decoder.initial_queries)
-    for tl, kl in zip(tmodel.decoder.decoder_layers, kmodel.decoder.decoder_layers, strict=True):
-        port_residual(tl.q_ca, kl.q_ca, port_any_attention)
-        port_residual(tl.q_sa, kl.q_sa, port_any_attention)
-        port_residual(tl.q_dense, kl.q_dense, port_dense)
-        port_residual(tl.kv_ca, kl.kv_ca, port_any_attention)
-        port_residual(tl.kv_dense, kl.kv_dense, port_dense)
-    for ttask, ktask in zip(tmodel.tasks, kmodel.tasks, strict=True):
-        port_swapped_module(ttask, ktask)
-
-
 def leaves(module) -> list:
-    found = [m for m in module.modules() if isinstance(m, LEAF_TYPES)]
+    found = select_leaves(module.modules())
     names = [m.name for m in found]
     assert len(set(names)) == len(names), f"leaf names are not unique: {names}"
     return found
@@ -126,12 +104,16 @@ def main() -> None:
     assert Path(hepattn.__file__).resolve().is_relative_to(HERE.parents[2] / "src"), hepattn.__file__
     inputs, _ = clic_dummy_batch()
     tin = {k: torch.from_numpy(v) for k, v in inputs.items()}
+    out_dir = Path(os.environ.get("GOLDEN_OUT", HERE))
+    selected = sys.argv[1:] or list(CASES)
+    assert set(selected) <= set(CASES), f"unknown cases {sorted(set(selected) - set(CASES))}"
     sizes = {}
-    for variant in VARIANTS:
+    for case in selected:
+        variant = CASES[case]
         tmodel = torch_model(variant, seed=SEED)
         arrays = {f"in::{k}": v for k, v in inputs.items()}
         meta = {
-            "case": case_name(variant),
+            "case": case,
             "seed": SEED,
             "torch_state_sha256": torch_state_digest(tmodel),
             "versions": {"torch": torch.__version__, "keras": keras.__version__, "hgq2": getattr(hgq, "__version__", "?")},
@@ -140,7 +122,7 @@ def main() -> None:
             kmodel = hybrid_model(variant, quant)
             with torch.no_grad():
                 kmodel(tin)  # builds the lazy (quantized) leaves
-            port(tmodel, kmodel)
+            port_maskformer(tmodel, kmodel)
             with torch.no_grad():
                 out = flatten(kmodel.eval()(tin))
             for path, value in out.items():
@@ -182,7 +164,7 @@ def main() -> None:
                 meta[mode]["quant_losses"] = meta_q
             print(variant, mode, len(leaf_list), "leaves", flush=True)
         arrays["meta"] = np.array(json.dumps(meta))
-        path = HERE / f"{case_name(variant)}.npz"
+        path = out_dir / f"{case}.npz"
         np.savez_compressed(path, **arrays)
         sizes[path.name] = path.stat().st_size
         print(path.name, sizes[path.name], flush=True)

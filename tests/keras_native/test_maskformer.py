@@ -33,21 +33,6 @@ from .mf_golden_utils import build_mf, flatten
 from .parity_utils import assert_parity
 from .porting import perturb_affine_params, port_any_attention, port_dense, port_maskformer, port_residual
 
-# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict. Blocked on a file this lane does not own:
-# the torch reference takes its kwargs from golden/mf_cases.py (R5, plan section 6). See docs/hgq/port_log/R0.md, open issues.
-MF_CASES_LIN_XFAIL = pytest.mark.xfail(
-    strict=True,
-    raises=TypeError,
-    reason="blocked on golden/mf_cases.py LIN_KWARGS (R5-owned): it passes linformer_proj_dim, which org Attention rejects since PR #9",
-)
-
-PFLOW_HGQ_XFAIL = pytest.mark.xfail(
-    strict=True,
-    raises=TypeError,
-    reason="R5 / plan owner: pflow_hgq.yaml (no lane owns it) passes linformer_proj_dim, which native build_attention rejects "
-    "since R2 (RETARGET_ORG_MAIN.md section 5.1); added at the rt/integration merge, see docs/hgq/port_log/R-merge.md",
-)
-
 REPO = Path(__file__).resolve().parents[2]
 E2E = {"atol": 5e-5, "rtol": 1e-4}
 
@@ -104,7 +89,7 @@ def assert_tree_parity(tag: str, out_t: dict, out_n: dict) -> dict:
 
 
 # ------------------------------------------------------------------------------------------- end to end
-@pytest.mark.parametrize("variant", [pytest.param(v, marks=MF_CASES_LIN_XFAIL) if v == "lin" else v for v in VARIANTS])
+@pytest.mark.parametrize("variant", list(VARIANTS))
 def test_maskformer_e2e_float_parity(variant, batch):
     """maskformer.e2e rows at 5e-5 / 1e-4 and per-layer attention masks exactly equal (incl. key sets)."""
     out_t, out_n = run_pair(*ported_pair(variant, batch), batch)
@@ -116,7 +101,6 @@ def test_maskformer_e2e_float_parity(variant, batch):
         assert 0.05 < mask.mean() < 0.95, f"{key}: attention mask fraction {mask.mean():.3f}"
 
 
-@MF_CASES_LIN_XFAIL
 def test_mask_logit_sentinel_and_incidence_axis(batch):
     """Padded nodes carry the finfo.min sentinel (as torch); incidence sums to 1 over the QUERY axis on valid nodes."""
     _, nmodel = ported_pair("lin", batch)
@@ -158,7 +142,7 @@ def test_mask_attention_threshold_is_inclusive_as_torch(threshold):
     np.testing.assert_array_equal(got, ref)
 
 
-@pytest.mark.parametrize("variant", [pytest.param(v, marks=MF_CASES_LIN_XFAIL) if v == "lin" else v for v in VARIANTS])
+@pytest.mark.parametrize("variant", list(VARIANTS))
 def test_decoder_layer_parity(variant):
     """Bidirectional decoder layer: updated queries AND keys (valid keys) at 1e-6 / 1e-5, with a padded key mask."""
     cfg = {"dim": DIM, "hybrid_norm": True, "depth": 1, "attn_kwargs": copy.deepcopy(VARIANTS[variant]["decoder_attn"])}
@@ -191,7 +175,7 @@ def raw_layer_masks(out: dict, threshold: float) -> dict:
     return {layer: 1 / (1 + np.exp(-out[f"{layer}.mask.pflow_node_logit"].astype(np.float64))) >= threshold for layer in ("layer_0", "layer_1")}
 
 
-@pytest.mark.parametrize("variant", [pytest.param(v, marks=MF_CASES_LIN_XFAIL) if v == "lin" else v for v in VARIANTS])
+@pytest.mark.parametrize("variant", list(VARIANTS))
 def test_all_false_rows_attend_everywhere(variant, batch):
     """A query whose mask row is all False attends everywhere; turning the restore off changes the output.
 
@@ -263,7 +247,6 @@ def mixed_regression_inputs(batch: dict, seed: int = 11) -> tuple[dict, np.ndarr
     return x, inc, probs
 
 
-@MF_CASES_LIN_XFAIL
 def test_regression_task_parity_on_mixed_charged_and_neutral_objects(batch):
     """IncidenceBasedRegressionTask vs torch at the e2e tolerance, with charged and neutral objects in the same event
     and both charged proxy branches (max track, top-2 tracks) present; the branch counts are asserted, not assumed.
@@ -308,7 +291,6 @@ def test_regression_task_parity_on_mixed_charged_and_neutral_objects(batch):
         assert_parity("regression.mixed", key, out_t[key], out_n[key], **E2E)
 
 
-@MF_CASES_LIN_XFAIL
 def test_regression_proxy_uses_detached_incidence_and_class_probs(batch):
     """Gradients reach the regression net only through its input embedding, never through the incidence.
 
@@ -354,13 +336,13 @@ def kwargs_with(**changes):
 @pytest.mark.parametrize(
     ("changes", "error"),
     [
-        pytest.param({"decoder__dynamic_queries": True}, NotImplementedError, marks=MF_CASES_LIN_XFAIL),
-        pytest.param({"decoder__decoder_layer_config__cross_attn_mode": "kmeans"}, NotImplementedError, marks=MF_CASES_LIN_XFAIL),
-        pytest.param({"decoder__local_strided_attn": True}, NotImplementedError, marks=MF_CASES_LIN_XFAIL),
-        pytest.param({"decoder__fast_local_ca": True}, NotImplementedError, marks=MF_CASES_LIN_XFAIL),
-        pytest.param({"decoder__posenc": {"alpha": 1.0, "base": 2.0}}, NotImplementedError, marks=MF_CASES_LIN_XFAIL),
-        pytest.param({"decoder__use_query_masks": True}, NotImplementedError, marks=MF_CASES_LIN_XFAIL),
-        pytest.param({"decoder__decoder_layer_config__attn_kwargs": {"num_heads": 16, "attn_type": "flex"}}, ValueError, marks=MF_CASES_LIN_XFAIL),
+        ({"decoder__dynamic_queries": True}, NotImplementedError),
+        ({"decoder__decoder_layer_config__cross_attn_mode": "kmeans"}, NotImplementedError),
+        ({"decoder__local_strided_attn": True}, NotImplementedError),
+        ({"decoder__fast_local_ca": True}, NotImplementedError),
+        ({"decoder__posenc": {"alpha": 1.0, "base": 2.0}}, NotImplementedError),
+        ({"decoder__use_query_masks": True}, NotImplementedError),
+        ({"decoder__decoder_layer_config__attn_kwargs": {"num_heads": 16, "attn_type": "flex"}}, ValueError),
         ({"encoder__attn_type": "flex"}, ValueError),
         ({"unified_decoding": True}, NotImplementedError),
         ({"encoder_tasks": [{"class_path": "x"}]}, NotImplementedError),
@@ -373,7 +355,6 @@ def test_unsupported_configs_raise(changes, error):
         NMaskFormer(**kwargs_with(**changes))
 
 
-@MF_CASES_LIN_XFAIL
 def test_unsupported_task_options_raise():
     with pytest.raises(NotImplementedError, match="mask_queries"):
         ObjectClassificationTask("c", "query", "pflow", "particle", {}, {}, dim=DIM, num_classes=5, mask_queries=True)
@@ -409,7 +390,6 @@ def check_clic_structure(model: NMaskFormer, quant_beta0: float) -> None:
     assert model.tasks[3].net.input_size == 518 and model.tasks[3].mode == "scale" and model.tasks[3].use_nodes
 
 
-@PFLOW_HGQ_XFAIL
 def test_from_config_reads_pflow_hgq_yaml(monkeypatch):
     """The committed CLIC HGQ2 config constructs unchanged (scale_dict_path is relative to the experiment dir)."""
     monkeypatch.chdir(REPO / "src/hepattn/experiments/clic")
@@ -426,7 +406,6 @@ def test_from_config_reads_generated_polaris_yaml(tmp_path):
     check_clic_structure(model, 0.0)
 
 
-@MF_CASES_LIN_XFAIL
 def test_decoder_does_not_track_tasks(batch):
     """The model owns the task variables once; the decoder holds the tasks untracked (no duplicate variables)."""
     nmodel = build_mf("lin", None, batch)
@@ -445,7 +424,6 @@ def leaf_stats(layer) -> tuple[np.ndarray, np.ndarray]:
     return kernel, bias
 
 
-@MF_CASES_LIN_XFAIL
 def test_task_heads_decoder_and_queries_start_from_the_hybrid_init(batch):
     """Carried gate (S2 -> S3): task heads start from torch nn.Linear init (the hybrid ports them from torch Dense),
     decoder FFNs from Keras glorot / zero bias (the hybrid builds them from the config), initial queries ~ N(0, 1).

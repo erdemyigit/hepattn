@@ -1,9 +1,14 @@
 """Build keras_native twins of the S2 golden cases and load the hybrid golden weights into them.
 
 Weights: the torch reference state (``src::*``) is loaded into a fresh torch module and ported with
-``porting.py`` (norms, LayerScale, register tokens, Linformer projections, posenc B); then every variable of every
-named HGQ2/keras leaf is overwritten from ``<mode>::kv::<leaf>::<idx>::<name>`` in tracking order, with name,
-shape and dtype asserted. So the native layer holds exactly the hybrid's weights and quantizer state.
+``porting.py`` (norms, LayerScale, register tokens, Linformer projections incl. tail rows, posenc B); then every
+variable of every named HGQ2/keras leaf is overwritten from ``<mode>::kv::<leaf>::<idx>::<name>`` in tracking order,
+with name, shape and dtype asserted. So the native layer holds exactly the hybrid's weights and quantizer state.
+
+Leaves (``select_leaves``, the same rule as ``golden/make_golden.py``): every layer of ``LEAF_TYPES``, plus the
+tail-row quantizer of each masked-Linformer ``SeqProjection``, minus a leaf whose variables all belong to another
+leaf (a QSoftmax's exp/inv tables are QUnaryFunctionLUT leaves inside the QSoftmax leaf). The tail rows themselves
+(``SeqProjection.tail``) are a torch parameter and come from the port, like the norms.
 """
 
 import copy
@@ -13,20 +18,29 @@ from pathlib import Path
 import keras
 import numpy as np
 import torch
-from hgq.layers import QDense, QEinsum, QSoftmax
+from hgq.layers import QDense, QEinsum, QEinsumDense, QSoftmax, QUnaryFunctionLUT
 
 from hepattn.keras_native.attention import Attention
 from hepattn.keras_native.dense import Dense
 from hepattn.keras_native.encoder import Encoder
 from hepattn.keras_native.factory import EinsumOp, LayerFactory, SoftmaxOp
 from hepattn.keras_native.input import InputNet
-from hepattn.keras_native.linformer import LinformerAttention
+from hepattn.keras_native.masked_linformer import SeqProjection
 
 from .golden.cases import CASES, QUANT_SPECS, golden_file, torch_module
-from .porting import port_attention, port_dense, port_encoder, port_input_net, port_linformer
+from .porting import port_attention, port_dense, port_encoder, port_input_net
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
-LEAF_TYPES = (QDense, QEinsum, QSoftmax, keras.layers.Dense, EinsumOp, SoftmaxOp)
+LEAF_TYPES = (QDense, QEinsum, QSoftmax, QEinsumDense, QUnaryFunctionLUT, keras.layers.Dense, keras.layers.EinsumDense, EinsumOp, SoftmaxOp)
+
+
+def select_leaves(layers) -> list:
+    """The golden leaves among ``layers`` (all layers of a module, any order); see the module docstring."""
+    layers = list(layers)
+    found = [layer for layer in layers if isinstance(layer, LEAF_TYPES)]
+    found += [layer.tail_q for layer in layers if isinstance(layer, SeqProjection) and layer.tail_q is not None]
+    ids = [{id(var) for var in layer.variables} for layer in found]
+    return [layer for i, layer in enumerate(found) if not (ids[i] and any(ids[i] < other for other in ids))]
 
 
 def load_golden(case: str) -> dict[str, np.ndarray]:
@@ -55,8 +69,6 @@ def native_module(case: str, factory: LayerFactory):
         return Dense(**cfg, factory=factory, name=spec["name"])
     if kind == "attn":
         return Attention(**cfg, factory=factory, name=spec["name"])
-    if kind == "lin":
-        return LinformerAttention(cfg["dim"], num_heads=cfg["num_heads"], seq_len=cfg["seq_len"], k=cfg["k"], factory=factory, name=spec["name"])
     if kind == "enc":
         return Encoder(factory=factory, **cfg)
     if kind == "innet":
@@ -72,15 +84,21 @@ def run(case: str, module, inputs: dict, training=False):
     if kind == "innet":
         return module(inputs, training=training)
     if kind == "enc":
-        return module(inputs["x"], kv_mask=inputs["kv_mask"], training=training)
+        return module(inputs["x"], kv_mask=inputs["kv_mask"], x_sort_value=inputs.get("x_sort_value"), training=training)
     if kind == "attn":
-        return module(inputs["q"], k=inputs.get("k"), kv_mask=inputs.get("kv_mask"), attn_mask=inputs.get("attn_mask"), training=training)
-    k = inputs.get("k")
-    return module(inputs["q"], k=k, v=k, attn_mask=inputs.get("attn_mask"), training=training)
+        return module(
+            inputs["q"],
+            k=inputs.get("k"),
+            kv_mask=inputs.get("kv_mask"),
+            attn_mask=inputs.get("attn_mask"),
+            kv_sort_idx=inputs.get("kv_sort_idx"),
+            training=training,
+        )
+    raise ValueError(kind)
 
 
 def native_leaves(module) -> dict:
-    found = [layer for layer in module._flatten_layers(include_self=True, recursive=True) if isinstance(layer, LEAF_TYPES)]  # noqa: SLF001
+    found = select_leaves(module._flatten_layers(include_self=True, recursive=True))  # noqa: SLF001
     names = [layer.name for layer in found]
     assert len(set(names)) == len(names), f"native leaf names are not unique: {names}"
     return dict(zip(names, found, strict=True))
@@ -92,7 +110,7 @@ def port_reference(case: str, module, golden: dict) -> None:
     state = {key.removeprefix("src::"): torch.from_numpy(value) for key, value in golden.items() if key.startswith("src::")}
     tmod.load_state_dict(state, strict=True)
     kind = CASES[case]["kind"]
-    porter = {"dense": port_dense, "attn": port_attention, "lin": port_linformer, "enc": port_encoder, "innet": port_input_net}[kind]
+    porter = {"dense": port_dense, "attn": port_attention, "enc": port_encoder, "innet": port_input_net}[kind]
     porter(tmod, module)
 
 

@@ -1,14 +1,16 @@
-"""Write the S2 golden files from the HYBRID (keras on torch) layers; run it in the hybrid torch env.
+"""Write the layer golden files from the HYBRID (keras on torch) layers; run it in the hybrid torch env.
 
-    KERAS_BACKEND=torch PYTHONPATH=<worktree>/src <hepattn>/.venv/bin/python tests/keras_native/golden/make_golden.py
+    KERAS_BACKEND=torch PYTHONPATH=<worktree>/src <hepattn>/.venv/bin/python \
+        tests/keras_native/golden/make_golden.py [case ...]
 
-For every case in ``cases.CASES`` it builds the pure-torch reference module (seeded) and, for each mode in
-``cases.modes(case)`` (float/high/low, plus mid for the single Linformer layers), ports it into the hybrid twin
-with ``hepattn.keras.porting`` and runs it in eval mode. One compressed ``<case>.npz`` per case holds: the inputs
-(``in::<name>``), the torch reference state (``src::<state_dict key>``, shared by the modes), and per mode the
-output (``<mode>::out``) and every variable of every named keras leaf in tracking order
-(``<mode>::kv::<leaf>::<idx>::<var name>``), plus ``meta`` (json; per mode the leaf names, the output abs max and
-each leaf variable's ``trainable`` flag).
+For every case in ``cases.CASES`` (or the named ones) it builds the pure-torch reference module (seeded) and, for
+each mode in ``cases.modes(case)``, ports it into the hybrid twin with ``hepattn.keras.porting`` and runs it in eval
+mode. ``GOLDEN_OUT=<dir>`` writes the files there instead of next to this script (for the regeneration check of the
+kept cases: their arrays must be bit-identical, docs/hgq/port_log/R5.md). One compressed ``<case>.npz`` per case
+holds: the inputs (``in::<name>``), the torch reference state (``src::<state_dict key>``, shared by the modes), and
+per mode the output (``<mode>::out``) and every variable of every named keras leaf in tracking order
+(``<mode>::kv::<leaf>::<idx>::<var name>``, leaves as ``golden_utils.select_leaves``), plus ``meta`` (json; per mode
+the leaf names, the output abs max and each leaf variable's ``trainable`` flag).
 """
 
 import copy
@@ -25,7 +27,7 @@ import hgq
 import keras
 import numpy as np
 import torch
-from hgq.layers import QDense, QEinsum, QSoftmax
+from hgq.layers import QDense, QEinsum, QEinsumDense, QSoftmax, QUnaryFunctionLUT
 
 import hepattn
 from hepattn.keras import set_keras_default_device
@@ -33,15 +35,15 @@ from hepattn.keras.attention import KerasAttention
 from hepattn.keras.dense import KerasDense
 from hepattn.keras.encoder import KerasEncoder
 from hepattn.keras.factory import EinsumOp, LayerFactory, SoftmaxOp
-from hepattn.keras.linformer import KerasLinformerAttention
-from hepattn.keras.porting import port_attention, port_dense, port_encoder, port_linformer, port_residual
+from hepattn.keras.porting import port_attention, port_dense, port_encoder
 from hepattn.keras.tasks import kerasify_module
+from hepattn.keras_native.masked_linformer import SeqProjection
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from cases import CASES, QUANT_SPECS, golden_file, make_inputs, modes, torch_module, torch_state  # noqa: E402
 
-LEAF_TYPES = (QDense, QEinsum, QSoftmax, keras.layers.Dense, EinsumOp, SoftmaxOp)
+LEAF_TYPES = (QDense, QEinsum, QSoftmax, QEinsumDense, QUnaryFunctionLUT, keras.layers.Dense, keras.layers.EinsumDense, EinsumOp, SoftmaxOp)
 
 
 def hybrid_module(case: str, tmod, factory: LayerFactory):
@@ -52,8 +54,6 @@ def hybrid_module(case: str, tmod, factory: LayerFactory):
         return KerasDense(**cfg, factory=factory, name=spec["name"])
     if kind == "attn":
         return KerasAttention(**cfg, factory=factory, name=spec["name"])
-    if kind == "lin":
-        return KerasLinformerAttention(cfg["dim"], num_heads=cfg["num_heads"], seq_len=cfg["seq_len"], k=cfg["k"], factory=factory, name=spec["name"])
     if kind == "enc":
         return KerasEncoder(factory=factory, **cfg)
     if kind == "innet":
@@ -68,14 +68,6 @@ def port(case: str, tmod, kmod) -> None:
         port_dense(tmod, kmod)
     elif kind == "attn":
         port_attention(tmod, kmod)
-    elif kind == "lin":
-        port_linformer(tmod, kmod)
-    elif kind == "enc" and CASES[case]["cfg"]["attn_type"] == "linformer":
-        # hepattn.keras.porting.port_encoder assumes torch-backend attention; port the linformer leaves directly
-        kmod.register_tokens.copy_(tmod.register_tokens)
-        for tl, kl in zip(tmod.layers, kmod.layers, strict=True):
-            port_residual(tl.attn, kl.attn, lambda t_attn, k_attn: port_linformer(t_attn.attn, k_attn))
-            port_residual(tl.dense, kl.dense, port_dense)
     elif kind == "enc":
         port_encoder(tmod, kmod)
     elif kind != "innet":  # innet: kerasify_module ported (float) or ports at the first forward (quantized)
@@ -91,17 +83,25 @@ def run(case: str, module, inputs: dict[str, np.ndarray]) -> np.ndarray:
         elif kind == "innet":
             out = module(tin)
         elif kind == "enc":
-            out = module(tin["x"], kv_mask=tin["kv_mask"])
+            out = module(tin["x"], x_sort_value=tin.get("x_sort_value"), kv_mask=tin["kv_mask"])
         elif kind == "attn":
-            out = module(tin["q"], k=tin.get("k"), kv_mask=tin.get("kv_mask"), attn_mask=tin.get("attn_mask"))
+            out = module(tin["q"], k=tin.get("k"), kv_mask=tin.get("kv_mask"), attn_mask=tin.get("attn_mask"), kv_sort_idx=tin.get("kv_sort_idx"))
         else:
-            k = tin.get("k")
-            out = module(tin["q"], k=k, v=k, attn_mask=tin.get("attn_mask"))
+            raise ValueError(kind)
     return out.detach().cpu().numpy()
 
 
+def select_leaves(layers) -> list:
+    """The rule of ``tests/keras_native/golden_utils.select_leaves`` (kept in step by the native golden tests)."""
+    layers = list(layers)
+    found = [layer for layer in layers if isinstance(layer, LEAF_TYPES)]
+    found += [layer.tail_q for layer in layers if isinstance(layer, SeqProjection) and layer.tail_q is not None]
+    ids = [{id(var) for var in layer.variables} for layer in found]
+    return [layer for i, layer in enumerate(found) if not (ids[i] and any(ids[i] < other for other in ids))]
+
+
 def leaves(module) -> list:
-    found = [m for m in module.modules() if isinstance(m, LEAF_TYPES)]
+    found = select_leaves(module.modules())
     names = [m.name for m in found]
     assert len(set(names)) == len(names), f"leaf names are not unique: {names}"
     return found
@@ -110,8 +110,12 @@ def leaves(module) -> list:
 def main() -> None:
     set_keras_default_device("cpu")
     assert Path(hepattn.__file__).resolve().is_relative_to(HERE.parents[2] / "src"), hepattn.__file__
+    out_dir = Path(os.environ.get("GOLDEN_OUT", HERE))
+    selected = sys.argv[1:] or list(CASES)
+    unknown = sorted(set(selected) - set(CASES))
+    assert not unknown, f"unknown cases {unknown}"
     sizes = {}
-    for case in CASES:
+    for case in selected:
         inputs = make_inputs(case)
         tmod = torch_module(case)
         arrays = {f"in::{k}": v for k, v in inputs.items()}
@@ -139,7 +143,7 @@ def main() -> None:
                 "trainable": {leaf.name: [bool(var.trainable) for var in leaf.variables] for leaf in leaf_list},
             }
         arrays["meta"] = np.array(json.dumps(meta))
-        path = HERE / golden_file(case)
+        path = out_dir / golden_file(case)
         np.savez_compressed(path, **arrays)
         sizes[case] = path.stat().st_size
         print(case, sizes[case], {m: meta[m] for m in modes(case)}, flush=True)

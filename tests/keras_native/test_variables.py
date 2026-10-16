@@ -3,9 +3,8 @@
 The JIT gate checks that every TRAINABLE variable gets a gradient, so a weight wrongly built as non-trainable
 escapes it. These tests pin trainability against two oracles, per golden case and mode:
 - the torch reference: native trainable parameters (non-leaf variables + leaf kernels/biases) have exactly the
-  size of the torch parameters that receive a gradient. The torch ``Attention`` wrapper of a Linformer layer
-  also creates q/k/v norms and a value-residual mix that its forward never uses (Helen's semantics); those get no
-  gradient in torch and have no native twin.
+  size of the torch parameters that receive a gradient. The masked-Linformer rows (R5) add the
+  sequence projections: E/F rows ``[:n]`` are leaf kernels, the tail rows past n a native-owned weight.
 - the hybrid: every HGQ2 leaf variable has the hybrid's ``trainable`` flag (recorded in the golden meta).
 """
 
@@ -20,24 +19,20 @@ from hepattn.keras_native.factory import LayerFactory
 from .golden.cases import CASES, modes, torch_module
 from .golden_utils import build_native, golden_meta, inputs_of, load_golden, native_leaves, native_module
 
-# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict. Blocked on a file this lane does not own:
-# the torch reference takes its kwargs from golden/cases.py (R5, plan section 6). See docs/hgq/port_log/R0.md, open issues.
-CASES_LIN_XFAIL = pytest.mark.xfail(
-    strict=True,
-    raises=TypeError,
-    reason="blocked on the enc_lin attn_kwargs in golden/cases.py (R5-owned): they pass linformer_proj_dim, which org Attention rejects since PR #9",
-)
-
 PARAMETER_NAMES = {"kernel", "bias"}  # leaf variables that are torch parameters; the rest is quantizer state
-# torch parameters without a gradient: the unused qkv norms / value-residual mix of a Linformer Attention wrapper
-DEAD_IN_TORCH = {"enc_lin": re.compile(r"layers\.\d+\.attn\.fn\.(q_norm|k_norm|v_norm|value_residual_mix\.0)\.(weight|bias)")}
+# torch parameters without a gradient, per case (none: org's masked Linformer uses its qkv norms, value residual and
+# every projection row, the tail through the renorm numerator)
+DEAD_IN_TORCH: dict[str, re.Pattern] = {}
 # path suffixes of native-owned weights that must train (torch nn.Parameter) in each case
 MUST_TRAIN = {
     "attn": ["attn_q_norm/gamma", "attn_k_norm/beta", "attn_v_norm/gamma"],
-    "lin": ["lin/proj_k", "lin/proj_v"],
-    "enc": ["encoder/register_tokens", "_attn_norm/gamma", "_ffn_norm/beta"],
+    "enc": ["encoder/register_tokens"],
 }
-MUST_TRAIN_CASE = {"enc_lin": ["_attn/proj_k", "_attn/proj_v"], "enc_torch": ["_attn_ls/gamma", "_ffn_ls/gamma", "_attn_q_norm/gamma"]}
+MUST_TRAIN_CASE = {
+    "enc_lin": ["_attn_project_E_proj/kernel", "_attn_project_F_proj/kernel"],  # FastLayerNorm: no norm weights
+    "lin_kv_ca": ["attn_attend_E/tail", "attn_attend_F/tail"],
+    "enc_torch": ["_attn_norm/gamma", "_ffn_norm/beta", "_attn_ls/gamma", "_ffn_ls/gamma", "_attn_q_norm/gamma"],
+}
 
 
 def torch_used_parameters(case: str) -> dict[str, int]:
@@ -50,12 +45,9 @@ def torch_used_parameters(case: str) -> dict[str, int]:
     elif kind == "innet":
         out = module(inputs)
     elif kind == "enc":
-        out = module(inputs["x"], kv_mask=inputs["kv_mask"])
-    elif kind == "attn":
-        out = module(inputs["q"], k=inputs.get("k"), kv_mask=inputs.get("kv_mask"), attn_mask=inputs.get("attn_mask"))
+        out = module(inputs["x"], x_sort_value=inputs.get("x_sort_value"), kv_mask=inputs["kv_mask"])
     else:
-        k = inputs.get("k", inputs["q"])
-        out = module(inputs["q"], k=k, v=k, attn_mask=inputs.get("attn_mask"))
+        out = module(inputs["q"], **{key: inputs[key] for key in ("k", "kv_mask", "attn_mask", "kv_sort_idx") if key in inputs})
     out.square().mean().backward()
     used = {name: p.numel() for name, p in module.named_parameters() if p.grad is not None and bool(p.grad.any())}
     dead = sorted(set(dict(module.named_parameters())) - set(used))
@@ -72,7 +64,7 @@ def split_variables(module):
 
 @pytest.mark.parametrize(
     ("case", "mode"),
-    [pytest.param(case, mode, marks=CASES_LIN_XFAIL) if case == "enc_lin" else (case, mode) for case in CASES for mode in modes(case)],
+    [(case, mode) for case in CASES for mode in modes(case)],
 )
 def test_trainable_variables_match_torch_and_hybrid(case, mode):
     golden = load_golden(case)

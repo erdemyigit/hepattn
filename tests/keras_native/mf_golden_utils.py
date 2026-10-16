@@ -1,4 +1,7 @@
-"""Native MaskFormer twins of the S3 golden cases (``golden/make_golden_maskformer.py``), and shared S3 helpers.
+"""Native MaskFormer twins of the MaskFormer golden cases (``golden/make_golden_maskformer.py``), and shared helpers.
+
+Cases: ``mf_torch`` (S3 test model, dense attention) and ``mf_org`` (org/main ``base.yaml`` + ``linformer.yaml`` at
+the test width, R5; built with ``from_config``). Leaves follow ``golden_utils.select_leaves``.
 
 Weights: the seeded torch reference model is rebuilt (its state digest must equal the stored one) and ported with
 ``porting.port_maskformer``; every stored leaf variable (quantizer state) is then assigned by leaf name + position with
@@ -11,20 +14,18 @@ from pathlib import Path
 
 import keras
 import numpy as np
-from hgq.layers import QDense, QEinsum, QSoftmax
 
-from hepattn.keras_native.factory import EinsumOp, SoftmaxOp
-from hepattn.keras_native.maskformer import MaskFormer
+from hepattn.keras_native.maskformer import MaskFormer, from_config
 
-from .golden.mf_cases import array_digest, native_kwargs, torch_model, torch_state_digest
+from .golden.mf_cases import ORG_VARIANTS, array_digest, native_kwargs, native_org_config, torch_model, torch_state_digest
+from .golden_utils import select_leaves
 from .porting import port_maskformer
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
-LEAF_TYPES = (QDense, QEinsum, QSoftmax, keras.layers.Dense, EinsumOp, SoftmaxOp)
-MF_CASES = {"mf_torch": "torch", "mf_lin": "lin"}
+MF_CASES = {"mf_torch": "torch", "mf_org": "org"}
 MF_MODES = ("float", "high", "low", "prod", "prodsat")
 # golden rows also checked with the jitted forward (the production attention; float, high and production bitwidths)
-JIT_ROWS = {("mf_lin", "float"), ("mf_lin", "high"), ("mf_lin", "prodsat")}
+JIT_ROWS = {("mf_org", "float"), ("mf_org", "high"), ("mf_org", "prodsat")}
 _CACHE: dict[str, dict] = {}
 
 
@@ -54,15 +55,23 @@ def mf_outputs(golden: dict, mode: str) -> dict[str, np.ndarray]:
 
 
 def native_leaves(model) -> dict:
-    found = [layer for layer in model._flatten_layers(include_self=True, recursive=True) if isinstance(layer, LEAF_TYPES)]  # noqa: SLF001
+    found = select_leaves(model._flatten_layers(include_self=True, recursive=True))  # noqa: SLF001
     names = [layer.name for layer in found]
     assert len(set(names)) == len(names), f"native leaf names are not unique: {sorted(n for n in names if names.count(n) > 1)}"
     return dict(zip(names, found, strict=True))
 
 
 def build_mf(variant: str, quant, inputs: dict, **kwargs) -> MaskFormer:
-    """A native MaskFormer, built by one eager eval call (inside the HGQ2 scopes, via ``MaskFormer.build``)."""
-    model = MaskFormer(**native_kwargs(variant, **kwargs), quant=quant)
+    """A native MaskFormer, built by one eager eval call (inside the HGQ2 scopes, via ``MaskFormer.build``).
+
+    ``org`` variants are built by ``from_config`` from the org YAML; ``kwargs`` are then ``org_init_args`` kwargs.
+    """
+    if variant in ORG_VARIANTS:
+        config = native_org_config(**kwargs)
+        config["init_args"]["quant"] = quant
+        model = from_config(config)
+    else:
+        model = MaskFormer(**native_kwargs(variant, **kwargs), quant=quant)
     model(inputs, training=False)
     return model
 

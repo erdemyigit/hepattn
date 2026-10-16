@@ -1,6 +1,7 @@
-"""S3 MaskFormer parity against the hybrid golden files, and the full-model paired delta (carried from S2).
+"""MaskFormer parity against the hybrid golden files, and the full-model paired deltas (carried from S2; plan 5.8).
 
-Golden files: ``golden/make_golden_maskformer.py`` (hybrid ``KerasMaskFormer``, torch env). Modes: float, high, low
+Golden files: ``golden/make_golden_maskformer.py`` (hybrid ``KerasMaskFormer``, torch env): ``mf_torch`` (S3 test
+model, dense attention) and ``mf_org`` (org/main ``base.yaml`` + ``linformer.yaml`` at the test width, R5). Modes: float, high, low
 (the paired-delta configs), prod (``pflow_hgq.yaml`` quantizers) and prodsat (prod with SAT_SYM datalane overflow).
 Tolerances: 2x the maxima measured by ``golden/measure_mf_golden.py`` (``golden/mf_measured.json``), per output, for
 the free-running model (mask feedback included) and for the teacher-forced one (hybrid masks injected), plus the
@@ -48,26 +49,8 @@ def gated(mode: str, key: str) -> bool:
 
 ROWS = [(case, mode, False) for case in MF_CASES for mode in MF_MODES] + [(case, mode, True) for case, mode in sorted(JIT_ROWS)]
 
-# R0 xfail (docs/hgq/RETARGET_ORG_MAIN.md section 2, item 4); strict, so the marker fails once the named lane fixes the test.
-R5_XFAIL = pytest.mark.xfail(
-    strict=True,
-    raises=TypeError,
-    reason="R5: the torch reference passes linformer_proj_dim, which org Attention rejects since PR #9; goldens regenerate in R5",
-)
-XROWS = [pytest.param(*row, marks=R5_XFAIL) if row[0] == "mf_lin" else row for row in ROWS]
-# Merge xfail (rt/integration, docs/hgq/port_log/R-merge.md); strict, so it fails once R5 changes mf_cases.py LIN_KWARGS.
-MERGE_R5_XFAIL = pytest.mark.xfail(
-    strict=True,
-    raises=TypeError,
-    reason=(
-        "R5: golden/mf_cases.py LIN_KWARGS passes linformer_proj_dim, which native build_attention rejects since R2"
-        " (RETARGET_ORG_MAIN.md section 5.1)"
-        "; added at the rt/integration merge, see docs/hgq/port_log/R-merge.md"
-    ),
-)
 
-
-@pytest.mark.parametrize(("case", "mode", "jit"), XROWS, ids=[f"{c}-{m}{'-jit' if j else ''}" for c, m, j in ROWS])
+@pytest.mark.parametrize(("case", "mode", "jit"), ROWS, ids=[f"{c}-{m}{'-jit' if j else ''}" for c, m, j in ROWS])
 def test_mf_golden_parity(case, mode, jit):
     """Eager rows, and the jitted forward (as training runs it) for JIT_ROWS: XLA may fuse ops, so its rounding at
     quantizer boundaries can differ from eager (measured: high layer-0 mask logits up to 1.2e-3 apart, jit vs eager).
@@ -90,7 +73,7 @@ def test_mf_golden_parity(case, mode, jit):
 
 
 @pytest.mark.parametrize("mode", [m for m in MF_MODES if m != "float"])
-@pytest.mark.parametrize("case", [pytest.param(c, marks=R5_XFAIL) if c == "mf_lin" else c for c in MF_CASES])
+@pytest.mark.parametrize("case", MF_CASES)
 def test_quant_losses_match_hybrid_per_layer(case, mode):
     """The training-mode HGQ2 loss terms of ``stateless_call(return_losses=True)`` are the hybrid's, each layer once.
 
@@ -121,7 +104,7 @@ def test_quant_losses_match_hybrid_per_layer(case, mode):
 
 
 @pytest.mark.parametrize("mode", [m for m in MF_MODES if m != "float"])
-@pytest.mark.parametrize("case", [pytest.param(c, marks=MERGE_R5_XFAIL) if c == "mf_lin" else c for c in MF_CASES])
+@pytest.mark.parametrize("case", MF_CASES)
 def test_init_quantizer_state_matches_hybrid(case, mode):
     """A freshly built native model has the hybrid's initial quantizer state (all scopes applied), bit for bit."""
     golden = load_mf_golden(case)
@@ -132,7 +115,7 @@ def test_init_quantizer_state_matches_hybrid(case, mode):
 
 def test_chaotic_mode_is_really_wrap():
     """Prod and prodsat differ only in the datalane overflow mode (so the prod gating is about WRAP, nothing else)."""
-    meta = json.loads(str(np.load(GOLDEN_DIR / "mf_lin.npz")["meta"]))
+    meta = json.loads(str(np.load(GOLDEN_DIR / "mf_org.npz")["meta"]))
     prod, sat = meta["prod"]["quant"], meta["prodsat"]["quant"]
     assert {**prod["datalane"], "overflow_mode": "SAT_SYM"} == sat["datalane"]
     assert {k: v for k, v in prod.items() if k != "datalane"} == {k: v for k, v in sat.items() if k != "datalane"}
@@ -175,4 +158,29 @@ def test_full_model_paired_delta_reproduces_hybrid():
         })
     for mode, value in deltas.items():
         assert abs(value - HYBRID_DELTA[mode]) <= DELTA_TOL[mode], f"{mode}: native delta {value!r} vs hybrid {HYBRID_DELTA[mode]!r}"
+    assert deltas["low"] > max(10 * deltas["high"], 1.0), deltas
+
+
+# org model (mf_org), native - hybrid paired delta on the layer-0 mask logits, measured (R5): high 0.13103069 vs
+# 0.13102435 (6.35e-6), low 16.1543676 vs 16.1543679 (2.61e-7); tolerance 2x measured
+ORG_DELTA_TOL = {"high": 1.27e-5, "low": 5.22e-7}
+
+
+def test_org_model_paired_delta_reproduces_hybrid():
+    """Plan 5.8: on the org model, high stays near float and low does not (>= 10x apart), with the hybrid's deltas.
+
+    Same golden weights in all three modes (mf_org); the hybrid deltas come from the golden outputs.
+    """
+    native, hybrid = {}, {}
+    for mode in ("float", "high", "low"):
+        model, golden = build_mf_from_golden("mf_org", mode)
+        native[mode] = keras.ops.convert_to_numpy(model(mf_inputs(golden), training=False)["layer_0"]["mask"]["pflow_node_logit"]).astype(np.float64)
+        hybrid[mode] = golden[f"{mode}::out::{LAYER0_LOGIT}"].astype(np.float64)
+    keep = np.abs(native["float"]) < 1e30
+    deltas = {}
+    for mode in ("high", "low"):
+        deltas[mode] = float(np.abs(native[mode][keep] - native["float"][keep]).max())
+        ref = float(np.abs(hybrid[mode][keep] - hybrid["float"][keep]).max())
+        record_measurement({"tag": "maskformer.paired_delta.org_mask_l0", "config": mode, "max_abs_err": deltas[mode], "hybrid": ref})
+        assert abs(deltas[mode] - ref) <= ORG_DELTA_TOL[mode], f"{mode}: native delta {deltas[mode]!r} vs hybrid {ref!r}"
     assert deltas["low"] > max(10 * deltas["high"], 1.0), deltas
