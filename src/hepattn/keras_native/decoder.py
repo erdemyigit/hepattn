@@ -23,6 +23,7 @@ from hepattn.keras_native.factory import LayerFactory
 from hepattn.keras_native.norm import get_hybrid_norm_config
 
 DECODER_ATTN_TYPES = {"torch", "flash", "flash-varlen", "linformer"}
+QUERY_UPDATE_ORDERS = ("ca_dense_sa", "ca_sa_dense")
 
 
 class MaskFormerDecoderLayer(keras.layers.Layer):
@@ -36,26 +37,35 @@ class MaskFormerDecoderLayer(keras.layers.Layer):
         bidirectional_ca: bool = True,
         qkv_norm: bool = False,
         hybrid_norm: bool = False,
+        dense_norm_placement: str = "hybridnorm",
+        query_update_order: str = "ca_dense_sa",
+        self_attn_norm_kv: bool = False,
         cross_attn_mode: str = "softmax",
         kmeans_kwargs: dict | None = None,
         factory: LayerFactory | None = None,
         name: str = "decoder_layer",
         **kwargs,
     ) -> None:
-        """Query cross-attention, FFN, query self-attention, then (bidirectional) key cross-attention and FFN.
+        """Query cross-attention, then FFN and query self-attention in ``query_update_order``, then (bidirectional)
+        key cross-attention and FFN. Options as org ``MaskFormerDecoderLayer``: ``dense_norm_placement`` (see
+        ``norm.get_hybrid_norm_config``), ``query_update_order`` ("ca_dense_sa" or "ca_sa_dense"), and
+        ``self_attn_norm_kv`` (the query self-attention takes its keys and values from its normalised input too).
 
         Raises:
             NotImplementedError: For ``cross_attn_mode`` other than "softmax".
-            ValueError: For an attention type without a keras_native counterpart (e.g. flex) or a window size.
+            ValueError: For an attention type without a keras_native counterpart (e.g. flex), a window size, or an
+                unknown ``query_update_order`` / ``dense_norm_placement``.
         """
         super().__init__(name=name, **kwargs)
+        if query_update_order not in QUERY_UPDATE_ORDERS:
+            raise ValueError(f"Unsupported query_update_order: {query_update_order}. Must be 'ca_dense_sa' or 'ca_sa_dense'.")
         if cross_attn_mode != "softmax":
             raise NotImplementedError(f"cross_attn_mode='{cross_attn_mode}' is not ported to keras_native (softmax only)")
         if kmeans_kwargs:
             raise NotImplementedError("kmeans_kwargs need cross_attn_mode='kmeans', which is not ported")
         factory = factory or LayerFactory()
 
-        attn_norm, dense_post_norm, qkv_norm = get_hybrid_norm_config(norm, depth, hybrid_norm, qkv_norm)
+        attn_norm, dense_post_norm, qkv_norm = get_hybrid_norm_config(norm, depth, hybrid_norm, qkv_norm, dense_norm_placement)
         attn_kwargs = dict(attn_kwargs or {})
         attn_type = attn_kwargs.pop("attn_type", "torch")
         if attn_type not in DECODER_ATTN_TYPES:
@@ -70,6 +80,8 @@ class MaskFormerDecoderLayer(keras.layers.Layer):
         self.dim = dim
         self.bidirectional_ca = bidirectional_ca
         self.attn_type = attn_type
+        self.query_update_order = query_update_order
+        self.self_attn_norm_kv = self_attn_norm_kv
 
         def attn(part: str):
             return build_attention(dim, attn_type=attn_type, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_{part}", **attn_kwargs)
@@ -103,16 +115,30 @@ class MaskFormerDecoderLayer(keras.layers.Layer):
                 res.build(x_shape)
                 res.fn.build(*fn_shapes)
 
-    def call(self, q, kv, attn_mask=None, q_mask=None, kv_mask=None, training=None):
-        """Returns the updated ``(q, kv)``; ``attn_mask`` is (B, Q, N), True = attend."""
-        q = self.q_ca(q, k=kv, v=kv, attn_mask=attn_mask, q_mask=q_mask, kv_mask=kv_mask, training=training)
-        q = self.q_dense(q, training=training)
-        q = self.q_sa(q, k=q, v=q, q_mask=q_mask, training=training)
+    def call(self, q, kv, attn_mask=None, q_mask=None, kv_mask=None, kv_sort_idx=None, training=None):
+        """Returns the updated ``(q, kv)``; ``attn_mask`` is (B, Q, N), True = attend.
+
+        ``kv_sort_idx`` (B, N), the key order of the encoder sort, goes to the query cross-attention only (org
+        ``decoder.py``: the Linformer branch of ``q_ca`` reorders its keys with it).
+        """
+        q = self.q_ca(q, k=kv, v=kv, attn_mask=attn_mask, q_mask=q_mask, kv_mask=kv_mask, kv_sort_idx=kv_sort_idx, training=training)
+        if self.query_update_order == "ca_sa_dense":
+            q = self._query_self_attn(q, q_mask, training)
+            q = self.q_dense(q, training=training)
+        else:
+            q = self.q_dense(q, training=training)
+            q = self._query_self_attn(q, q_mask, training)
         if self.bidirectional_ca:
             mask_t = keras.ops.transpose(attn_mask, (0, 2, 1)) if attn_mask is not None else None
             kv = self.kv_ca(kv, k=q, v=q, attn_mask=mask_t, q_mask=kv_mask, kv_mask=q_mask, training=training)
             kv = self.kv_dense(kv, training=training)
         return q, kv
+
+    def _query_self_attn(self, q, q_mask, training):
+        # without k and v the attention takes all three from its (normalised) input
+        if self.self_attn_norm_kv:
+            return self.q_sa(q, q_mask=q_mask, training=training)
+        return self.q_sa(q, k=q, v=q, q_mask=q_mask, training=training)
 
 
 def restore_all_false_rows(attn_mask):
@@ -199,7 +225,8 @@ class MaskFormerDecoder(keras.layers.Layer):
     def call(self, x: dict, input_name: str, attn_masks: dict | None = None, training=None):
         """Run the decoder layers with the tasks in between. Returns ``(x, outputs)``.
 
-        ``x`` needs ``key_embed``, ``key_valid`` and ``{input_name}_valid``; ``outputs`` is
+        ``x`` needs ``key_embed``, ``key_valid`` and ``{input_name}_valid`` (and ``key_sort_idx`` when the inputs are
+        sorted); ``outputs`` is
         ``{"layer_{i}": {task_name: {...}, "attn_mask": (B, Q, N) bool}}``. ``attn_masks`` (``{"layer_{i}": mask}``)
         replaces the computed mask of those layers (teacher forcing: a parity check that is not amplified by
         threshold flips in the mask feedback); None in normal use.
@@ -239,7 +266,13 @@ class MaskFormerDecoder(keras.layers.Layer):
             outputs[f"layer_{index}"] = layer_out
 
             x["query_embed"], x["key_embed"] = layer(
-                x["query_embed"], x["key_embed"], attn_mask=attn_mask, q_mask=None, kv_mask=x["key_valid"], training=training
+                x["query_embed"],
+                x["key_embed"],
+                attn_mask=attn_mask,
+                q_mask=None,
+                kv_mask=x["key_valid"],
+                kv_sort_idx=x.get("key_sort_idx"),
+                training=training,
             )
             x[f"{input_name}_embed"] = x["key_embed"]  # unmerge_inputs, identity for one input
         return x, outputs
