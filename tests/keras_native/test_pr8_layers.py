@@ -11,6 +11,7 @@ measured maximum (docs/hgq/port_log/R3.md); each has a control that exceeds it b
 
 import copy
 import importlib
+import math
 from pathlib import Path
 
 import jax
@@ -59,6 +60,7 @@ TOL_ENC = {"atol": 2 * 9.54e-7, "rtol": 0.0}
 TOL_DEC = {"atol": 2 * 9.54e-7, "rtol": 0.0}
 TOL_B1_EQUAL = 2 * 1.37e-6
 E2E = {"atol": 5e-5, "rtol": 1e-4}
+LOGIT_ATTN_THRESHOLD = math.log(0.1 / 0.9)
 
 
 # --------------------------------------------------------------------------------------------- config
@@ -193,6 +195,10 @@ def test_encoder_spec_is_unwrapped_and_dim_checked():
     bad = copy.deepcopy(section)
     bad["model"]["init_args"]["encoder"]["init_args"]["dim"] = 64
     with pytest.raises(ValueError, match="encoder dim 64 != MaskFormer dim 32"):
+        native_from_section(bad)
+    bad = copy.deepcopy(section)
+    bad["model"]["init_args"]["encoder"]["foo"] = 1
+    with pytest.raises(ValueError, match=r"unexpected keys next to the encoder class_path: \['foo'\]"):
         native_from_section(bad)
     bad = copy.deepcopy(section)
     bad["model"]["init_args"]["encoder"]["class_path"] = "hepattn.models.Other"
@@ -503,12 +509,19 @@ def test_swiglu_leaves_and_names():
         _, ndense = swiglu_pair("two_hidden", quant)
         names = [layer.name for layer in (*ndense.hidden, *ndense.gates, *ndense.products, ndense.final)]
         assert names == ["d_hidden0", "d_hidden1", "d_hidden0_gate", "d_hidden1_gate", "d_hidden0_glu", "d_hidden1_glu", "d_final"]
+        # explicit letters, not "...": HGQ2 expands "..." from a Python set, so the string would depend on the hash seed
+        assert [p.get_config()["equation"] for p in ndense.products] == ["abd,abd->abd"] * 2
         assert [g.activation.__name__ for g in ndense.gates] == ["silu", "silu"]
         assert all(h.activation.__name__ == "linear" for h in ndense.hidden)
         assert [h.kernel.shape for h in ndense.hidden] == [(32, 48), (48, 40)] == [g.kernel.shape for g in ndense.gates]
         if quant is not None:
             assert all(isinstance(layer, QDense) for layer in (*ndense.hidden, *ndense.gates))
             assert all(isinstance(layer, QEinsum) for layer in ndense.products)
+    factory = LayerFactory(QUANT_SPECS["high"])
+    with factory.scopes():
+        rank2 = NDense(input_size=8, activation="SwiGLU", factory=factory, name="r2")
+        rank2.build((None, 8))
+    assert rank2.products[0].get_config()["equation"] == "ad,ad->ad"
 
 
 @pytest.mark.parametrize("name", SWIGLU_CONFIGS)
@@ -584,8 +597,10 @@ def test_swiglu_quantized_leaves_are_live():
     assert len(checked) == 8, checked
 
 
-def jit_step(module, call_kwargs: dict):
-    def loss_fn(tv, ntv, x):
+def jit_step(module):
+    """The call kwargs are jit arguments, so masks, sort values and indices are traced (a host-side sort fails)."""
+
+    def loss_fn(tv, ntv, x, call_kwargs):
         out, new_ntv, losses = module.stateless_call(tv, ntv, x, return_losses=True, training=True, **call_kwargs)
         outs = out if isinstance(out, tuple) else (out,)
         qloss = sum(losses) if losses else 0.0
@@ -598,12 +613,12 @@ def assert_trains_under_jit(module, x, call_kwargs: dict, tag: str) -> None:
     """Shared JIT gate (plan 5): one compile over 3 calls, finite gradients, every trainable variable a nonzero gradient."""
     tv = [v.value for v in module.trainable_variables]
     ntv = [v.value for v in module.non_trainable_variables]
-    step = jit_step(module, call_kwargs)
+    step = jit_step(module)
     nonzero = np.zeros(len(tv), dtype=bool)
     rng = np.random.default_rng(0)
     for _ in range(3):
         xi = (x + rng.normal(0, 0.1, x.shape)).astype(np.float32)
-        (loss, (ntv, qloss)), grads = step(tv, ntv, xi)
+        (loss, (ntv, qloss)), grads = step(tv, ntv, xi, call_kwargs)
         bad = [v.path for v, g in zip(module.trainable_variables, grads, strict=True) if not np.isfinite(np.asarray(g)).all()]
         assert not bad, f"{tag}: non-finite gradients {bad}"
         nonzero |= np.array([bool(np.any(np.asarray(g) != 0)) for g in grads])
@@ -798,6 +813,18 @@ def test_org_model_with_dense_attention_equals_torch(batch):
     bools = assert_tree_parity("maskformer.org_dense", out_t, out_n)
     for key, mask in bools.items():
         assert 0.05 < mask.mean() < 0.95, f"{key}: attention mask fraction {mask.mean():.3f}"
+    attn_masks = [key for key in bools if key.endswith(".attn_mask")]
+    assert len(attn_masks) == 4, attn_masks
+    for key in attn_masks:
+        # layer_k.attn_mask = sigmoid(layer_k mask logit) >= 0.1 (pred_threshold, base.yaml). The plan 5.8 margin (10x
+        # the e2e tolerance) does not hold on this fixture (layer 3: 1.05x, R3.md); R5 owns that fixture. Here: every
+        # valid logit is >= 10x the measured torch-native error of its layer away from the threshold.
+        logit_key = key.replace("attn_mask", "mask.pflow_node_logit")
+        logit_t, logit_n = out_t[logit_key].astype(np.float64), np.asarray(out_n[logit_key])
+        keep = logit_t > -1e30
+        margin = np.abs(logit_t[keep] - LOGIT_ATTN_THRESHOLD).min()
+        err = np.abs(logit_t[keep] - logit_n[keep]).max()
+        assert margin >= 10 * err, f"{logit_key}: margin {margin:.2e} < 10x error {err:.2e}"
     _, out_c = run_pair(*org_dense_pair(batch, query_update_order="ca_dense_sa"), batch)
     key = "final.mask.pflow_node_logit"
     keep = out_t[key] > -1e30
