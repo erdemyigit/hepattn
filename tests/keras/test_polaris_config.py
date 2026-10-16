@@ -61,6 +61,14 @@ def test_generated_model_is_the_org_model(generated, attn):
         assert "input_sort_field" not in init
 
 
+def test_default_is_the_linformer_model(generated, tmp_path, monkeypatch):
+    """What Polaris runs: 03_make_config.py with no HGQ_ATTN."""
+    monkeypatch.delenv("HGQ_ATTN", raising=False)
+    default = U.generate_polaris_config(tmp_path / "default.yaml")
+    assert default["model"] == generated["linformer"]["model"]
+    assert default["model"] != generated["torch"]["model"]
+
+
 @pytest.mark.parametrize("quantized", [False, True])
 @pytest.mark.parametrize("attn", ATTNS)
 def test_generated_config_builds(generated, attn, quantized):
