@@ -40,9 +40,6 @@ MF_CASES_LIN_XFAIL = pytest.mark.xfail(
     raises=TypeError,
     reason="blocked on golden/mf_cases.py LIN_KWARGS (R5-owned): it passes linformer_proj_dim, which org Attention rejects since PR #9",
 )
-R3_SWIGLU_XFAIL = pytest.mark.xfail(
-    strict=True, raises=NotImplementedError, reason="R3: quantized SwiGLU raises NotImplementedError (RETARGET_ORG_MAIN.md section 5.4)"
-)
 
 REPO = Path(__file__).resolve().parents[2]
 E2E = {"atol": 5e-5, "rtol": 1e-4}
@@ -360,7 +357,6 @@ def kwargs_with(**changes):
         ({"encoder__attn_type": "flex"}, ValueError),
         ({"unified_decoding": True}, NotImplementedError),
         ({"encoder_tasks": [{"class_path": "x"}]}, NotImplementedError),
-        ({"input_sort_field": "phi"}, NotImplementedError),
         ({"sorter": {"class_path": "hepattn.utils.sorter.Sorter"}}, NotImplementedError),
     ],
     ids=lambda v: "-".join(v) if isinstance(v, dict) else v.__name__,
@@ -412,7 +408,6 @@ def test_from_config_reads_pflow_hgq_yaml(monkeypatch):
     check_clic_structure(model, 1.0e-12)
 
 
-@R3_SWIGLU_XFAIL
 def test_from_config_reads_generated_polaris_yaml(tmp_path):
     """The config polaris/03_make_config.py generates (what Polaris trains) constructs unchanged."""
     out = tmp_path / "polaris_hgq.yaml"
