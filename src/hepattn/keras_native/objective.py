@@ -368,9 +368,13 @@ _HOST_SOLVERS = {"scipy", "lap1015_late"}
 
 @cache
 def _log_lap1015_fallback() -> None:
+    # torch keeps lap1015's own full permutation, scipy's path appends the unmatched predictions in ascending order
+    # (matcher.match_individual). Unmatched slots get the null class only, so the loss is unchanged.
     logger.warning(
         "keras_native solves default_solver=lap1015_late with scipy: the optimal total cost is the same, "
-        "but ties between equal-cost assignments may break differently"
+        "but ties between equal-cost assignments may break differently and the unmatched predictions follow "
+        "in ascending order, not in lap1015's order; compare permuted outputs with a lap1015_late run only "
+        "on the matched (valid-target) slots"
     )
 
 
@@ -378,7 +382,8 @@ def matcher_n_jobs_from_config(matcher_entry: dict[str, Any]) -> int:
     """Host-matching threads from the YAML ``matcher`` block (``class_path`` + ``init_args``).
 
     Supported: ``Matcher`` with ``default_solver`` scipy or lap1015_late, ``adaptive_solver: false`` and no
-    ``device_solver``. lap1015_late is solved with scipy (same optimum; logged once). Anything else raises
+    ``device_solver``. lap1015_late is solved with scipy (same optimum, but tie breaks and the order of the
+    unmatched predictions can differ; logged once). Anything else raises
     ``NotImplementedError``. Returns ``n_jobs`` (torch default 8) when ``parallel_solver`` is set, else 1.
     """
     kind = matcher_entry.get("class_path", "").rsplit(".", 1)[-1]
