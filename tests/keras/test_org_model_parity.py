@@ -232,6 +232,6 @@ def check_state_map(mapping: dict, covered: dict, unmatched: list, quantized: bo
 def test_state_dict_keys_and_shapes_match_torch(configs, attn, quantized):
     mapping, covered, unmatched = state_map(*configs[attn], quantized=quantized)
     assert len(covered) > 150, len(covered)  # the full model (184 torch entries, 292 hybrid ones): not a vacuous map
-    # the packed tensors are checked chunk by chunk: SwiGLU halves (2) and attention q/k/v (3)
-    assert {rel for _, rel in mapping.values()} >= {"chunk0/2.T", "chunk1/2.T", "chunk0/3.T", "chunk1/3.T", "chunk2/3.T"}
     check_state_map(mapping, covered, unmatched, quantized)
+    # the packed tensors were checked chunk by chunk: SwiGLU halves (2) and attention q/k/v (3)
+    assert {rel for _, rel in mapping.values()} >= {"chunk0/2.T", "chunk1/2.T", "chunk0/3.T", "chunk1/3.T", "chunk2/3.T"}
