@@ -140,8 +140,10 @@ Status (lanes R4a and R4b, port_log/R4a.md and R4b.md): the full org Linformer m
 and quantized mode (`tests/keras/test_polaris_config.py`). The attention core is the keras_native masked-Linformer
 code (`hepattn.keras_native.masked_linformer`) run under the torch backend, gate H0 in
 `tests/keras/test_linformer_parity.py`. Its cores build at the first forward pass in float mode too, as the quantized
-layers already did; `MPflowHGQ.setup` runs that forward before the optimizer exists. Before a QAT sweep, re-derive
-the EBOPs setpoints of `03_make_config.py` on this model (RETARGET_ORG_MAIN.md section 7, risk 1).
+layers already did; `MPflowHGQ.setup` runs that forward before the optimizer exists. Outside Lightning, call
+`model.materialize(inputs)` (one eval-mode forward) before `state_dict()` or `load_state_dict()`: on a linformer model
+that has not run a forward both raise, because the state would lack (or leave random) every proj_k/proj_v. Before a
+QAT sweep, re-derive the EBOPs setpoints of `03_make_config.py` on this model (RETARGET_ORG_MAIN.md section 7, risk 1).
 
 Quantized SwiGLU follows one leaf rule in the hybrid and in keras_native: the packed `Linear(in, 2h)` becomes two
 dense halves, `<name>_hidden<i>_x1` (linear) and `<name>_hidden<i>_x2` (`activation="silu"` inside the layer), and
@@ -194,6 +196,11 @@ The resulting state loads into a `KerasMaskFormer` built from the same config
 (float, or quantized for a QAT warm start — kernels/biases share one layout; use
 `hepattn.keras.porting.port_keras_to_keras` for float→quant keras-side ports).
 
+Not yet for the org Linformer model (R4b open issue): `port_to_keras` fails at `change_attn_backends(model, "torch")`,
+which org refuses for linformer, and once that is fixed it must call `keras_model.materialize(batch)` after
+`port_maskformer` and before `state_dict()` (the save raises otherwise). `evaluate_hgq --float-state` must materialize
+the float model before `load_state_dict` in the same way.
+
 ## Evaluating a trained model
 
 `evaluate_hgq.py` produces a consolidated report on a checkpoint: physics metrics on
@@ -228,12 +235,13 @@ Notes:
 
   Most of the reported total comes from `QSoftmax` layers, so anything that changes the
   attention implementation moves the split by orders of magnitude.
-- `total_ebops` is a resource *estimate* and is **not** what the training objective
-  minimizes. `quant_losses()` is affine in beta — `floor + beta * E_eff` — and on the
-  Polaris config `E_eff = 2.88e11` against a reported total of 1.68e15, a ratio of ~5800.
-  Calibrate beta with `evaluate.effective_ebops` (or `polaris/09_measure_beta.py`);
-  calibrating from `total_ebops` produced a sweep in which four decades of beta moved the
-  mean learned bitwidth by 0.01%.
+- `quant_losses()` is affine in beta — `floor + beta * E_eff`. Calibrate beta with
+  `evaluate.effective_ebops` (or `polaris/09_measure_beta.py`). Since R4b, beta reaches
+  every HGQ2 leaf, also those nested in QSoftmax and in the Linformer cores, and
+  `E_eff = total_ebops + the task heads' EBOPs` (`quant_losses()` counts the heads twice;
+  10.8% of the generated Linformer model at initial bitwidths). Before R4b beta reached
+  only the top-level layers: on the old Polaris config `E_eff = 2.88e11` against a total of
+  1.68e15, and four decades of beta moved the mean learned bitwidth by 0.01%.
 
 ## Standalone inference (no Lightning)
 

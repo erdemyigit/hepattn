@@ -76,6 +76,9 @@ Runner `$S/r4b/mut/run_mutant.sh`, list `$S/r4b/mut/mutants.py`: each mutant is 
 
 `tests/matching` was not re-run: this lane changes no file it imports.
 
+After fix round 1 (`$S/r4b_fix/logs/final.*`): hybrid `tests/keras` + `tests/polaris` 283 passed, 8 skipped, 0 failed,
+EXIT 0 (the 20 new rows run); native 457 passed, 50 xfailed, 0 failed; torch 522 passed, 173 skipped, 0 failed.
+
 ## Deviations from the plan
 
 1. **Lazy core build in float mode too.** The core has static (q_len, kv_len) shapes that only the first call knows
@@ -83,6 +86,8 @@ Runner `$S/r4b/mut/run_mutant.sh`, list `$S/r4b/mut/mutants.py`: each mutant is 
    float layers used to be built at construction. `MPflowHGQ.setup` already runs a forward before the optimizer and
    the state_dict key set exist, so training is unaffected; tests that port right after construction rely on
    `load_projections` holding the tensors until the build (`state_map` now runs a forward first in float mode too).
+   Fix round 1: offline save/load before the first forward silently lost the projections; it now raises, and
+   `KerasMaskFormer.materialize(inputs)` runs the forward (see "Fix round 1").
 2. **The core kind is chosen per call site, from the first call.** Org chooses attend or project per call; a static
    keras graph cannot. `"auto"` resolves at the first call from the presence of `attn_mask` (org's rule), and the
    decoder fixes q_sa to `"project_unmasked"`, the path org always takes there. A later call of the other kind raises.
@@ -98,7 +103,8 @@ Runner `$S/r4b/mut/run_mutant.sh`, list `$S/r4b/mut/mutants.py`: each mutant is 
 4. **Golden with 2 heads.** The backend-consistency golden uses 2 heads instead of 16 at the production sequence
    shapes (536 kB instead of about 4 MB). A 16-head probe (`$S/r4b/probes/h0_backend.py`) was exact except one query
    row of 16 elements in 3 of 20 outputs (up to 1.28e-4 at the high spec): rounding ties that the two backends' float32
-   sums break differently. The committed rows measure 0.0, so their tolerance is 0.
+   sums break differently. The committed rows measure 0.0, so their tolerance is 0. Fix round 1 adds 16-head rows for
+   the two attend sites (see "Fix round 1").
 5. **`*.npz` is in `.gitignore`.** The golden was added with `git add -f` (the R0 file `.gitignore` is not this lane's;
    keras_native's goldens use a negation line there). A tracked file stays tracked; a negation line for
    `tests/keras/golden/*.npz` is an R5/R0 item.
@@ -106,6 +112,37 @@ Runner `$S/r4b/mut/run_mutant.sh`, list `$S/r4b/mut/mutants.py`: each mutant is 
    norms and keras Dense under torch, so it was measured on its own.
 7. **q/k/v init unchanged** (keras glorot on (256, 256)): the hybrid ports weights from torch or warm-starts from the
    float twin; the native port uses org's packed xavier (R2). Only from-scratch hybrid QAT init statistics differ.
+
+## Fix round 1 (review of `0e8b026`)
+
+Evidence in `$S/r4b_fix/` (`LOG.md`, `probes/`, `logs/`, `mut/`). Every review item was checked before it was fixed.
+
+| Review item | Verified | Fix |
+|---|---|---|
+| major: state of an unbuilt linformer model (deviation 1). `state_dict()` before the first forward has no core keys, and a strict load of such a state into a fresh model reports all keys matched and then builds random cores | yes: 337 keys before the forward, 469 after; reloaded model 2.63 from torch (review probe) | `KerasAttention._save_to_state_dict` / `_load_from_state_dict` raise `RuntimeError` while a linformer core is unbuilt (strict and non-strict load). New `KerasMaskFormer.materialize(inputs)`: one eval-mode forward that keeps the training mode. New `tests/keras/test_linformer_state_dict.py`: save before the forward raises; load into an unbuilt model raises (strict and non-strict); port, materialize, save, then a strict load into a fresh materialized model gives 4.489e-6 from torch (tolerance 1.02e-5), and the control (the same model without the load) gives 57.8; 132 core keys (`logs/roundtrip.out`). `port_to_keras.py` and `evaluate_hgq.py` are not this lane's files, so their fixes are open issues (below) |
+| major: `keras/evaluate.py` walks only the top-level layers | yes | `total_ebops`, `effective_ebops`, `ebops_by_region` use `callbacks.quantized_leaves` / `leaf_ebops`. Regions use each leaf's shortest module path, so the task heads count under `tasks` (with the first path they counted under `decoder`). The floor of `effective_ebops` is now measured at beta 0: at the probes, `beta * E_eff` (8e8 on the dim-32 model) hides the floor in float32. With the old floor, the calibration round trip gave 7.593 for a target of 7.5. Measured (`logs/evaluate_ebops2.out`): evaluate total = callbacks total; regions sum to it; `E_eff` = total + task heads to 4.2e-8 (dim-32), 9.6e-8 (Linformer), 2.2e-9 (dense) relative, tolerance 2e-7. `test_effective_ebops.py::test_slope_is_far_below_total_ebops` asserted the old bug (slope < total/1e3), so it is replaced by `test_slope_is_the_leaf_total_plus_the_task_heads`. New `test_beta_reaches_every_leaf.py::test_evaluate_reads_and_calibrates_the_leaves_the_callbacks_steer` (Linformer and dense). `polaris/09_measure_beta.py` labels, `polaris/README.md` and `USAGE.md` are updated |
+| minor: H0.3 gated at 2 heads only | yes, and larger than reported: at the regenerated inputs the 16-head high rows differ in up to 112 elements (7 query rows), max 1.656e-4; prod is 0; the same with `OMP_NUM_THREADS=1` (`logs/h16_measure*.out`) | The golden adds `h16.*` rows (q_ca and kv_ca, both specs and modes; 2.49 MB). The 2-head rows regenerate bit-identically. `test_quantized_core_at_production_heads_equals_jax_up_to_rounding_ties`: max \|diff\| <= 3.31e-4 and at most 224 differing elements (2x measured; prod 0 / 0), and every differing element is in a whole query row. Control `test_production_heads_control_one_datalane_bit`: one datalane bit less differs in >= 57686 elements (`logs/h16_control.out`) |
+| minor: the training flag into the core is checked only by the EBOPs monitor test | yes | `test_train_mode_attention_runs_the_core_in_train_mode` (q_ca and enc, high and prod): inside a train-mode forward, the core output and the core state after the call are bit-identical to a direct `training=True` call from the same state, and the integer bits change (HGQ2 WRAP quantizers fit them in training). Control: eval mode from the same state is 4.3e-4 / 3.9e-4 (high) and 37.3 / 45.4 (prod) away (`logs/train_mode.out`) |
+| minor: the optimizer test writes beta only to the top-level layers | yes | Uses `callbacks.write_beta` and checks that all 212 core leaves have beta 1e-6 |
+| minor: `*.npz` ignored | yes | Open issue, R0/R5 (unchanged) |
+| minor: uint32 `_ebops` | yes (`hgq/layers/core/base.py:228`) | Noted in `callbacks.leaf_ebops` and in the open issues |
+
+Mutants (`$S/r4b_fix/mut/`, rsync copies; targets `test_linformer_parity`, `test_linformer_state_dict`,
+`test_beta_reaches_every_leaf`, `test_effective_ebops`, `test_beta_pid`; unmutated 112 passed):
+
+| Mutant | Failing targets |
+|---|---|
+| f01 no save guard | 1 (save before the forward) |
+| f02 no load guard | 2 (strict, non-strict load) |
+| f03 `materialize` without the forward | 3 |
+| f04 `evaluate.total_ebops` top-level | 3 |
+| f05 `effective_ebops` beta top-level | 5 |
+| f06 regions by first path | 2 |
+| f07 floor from the probes | 1 (calibration round trip) |
+| f08 attend core in eval mode (review r1) | 3 (train-mode rows q_ca x2, EBOPs monitor) |
+| f09 project core in eval mode | 2 (train-mode rows enc x2) |
+| f10 `write_beta` top-level | 7 (optimizer step, beta tests, affine, calibration) |
+| m15 (redefined on the moved line) monitor reads the `ebops` property | 7 |
 
 ## Open issues
 
@@ -115,11 +152,28 @@ Runner `$S/r4b/mut/run_mutant.sh`, list `$S/r4b/mut/mutants.py`: each mutant is 
   `HGQ_PID_I` (`polaris/03_make_config.py`) on this model, now that beta reaches every leaf (deviation 3).
 - `quant_losses()` counts the task heads' EBOPs terms twice (keras_layers yields them under `tasks.` and
   `decoder.tasks.`, S3 deviation 9); the new callbacks count every leaf once, so `val/ebops` drops by the task heads'
-  share (2.7e10 on the dense model, 1.4e-5 relative). Not changed here.
+  share (2.7e10 on the dense model, 1.4e-5 relative). Not changed here. On the Linformer model the heads are 10.8% of
+  the EBOPs (2.717e10 of 2.509e11), so the training objective weights them double by a visible amount: fix
+  `quant_losses()` (collect `losses` once per top-level layer object) before the beta re-derivation above.
 - R5: regenerate the hybrid goldens for the new attention (plan section 6 table); delete `keras/linformer.py` and
   `port_linformer` once `tests/keras_native/golden/make_golden*.py` stop importing them (they are the only users).
 - R5/R0: `.gitignore` negation for `tests/keras/golden/*.npz` (deviation 5).
-- Carried gate: re-measure the H0 backend rows (tolerance 0) and the new tolerances on the first Linux/GPU run.
+- Carried gate: re-measure the H0 backend rows (tolerance 0), the 16-head rows (3.31e-4 / 224 elements) and the new
+  tolerances on the first Linux/GPU run.
+- `experiments/clic` (no lane owns it; R5 or its owner):
+  - `port_to_keras.load_torch_model` calls `change_attn_backends(model, "torch")`, which org refuses for linformer
+    ("linformer owns trained projection parameters"), so `port_to_keras` fails for the org model. After that,
+    `main` must call `keras_model.materialize(batch)` between `port_maskformer` and `state_dict()` (now the save
+    raises instead of dropping the 36 projections).
+  - `evaluate_hgq --float-state` loads into an unbuilt float model: add `materialize(first_inputs)` before
+    `load_state` (now it raises with that hint).
+  - `build_keras_maskformer_from_config` (`port_to_keras.py:66-75`, used by `eval_keras.py` and `evaluate_hgq.py`)
+    does not pass `init_args.input_sort_field`, which `configs/linformer.yaml` sets to `phi`. These CLIs therefore
+    build an unsorted hybrid for the org Linformer model: the sorting control measures 3.47 output error.
+  - Add a test that runs `port_to_keras.main` on the generated config and checks that the saved state holds every
+    proj_k/proj_v.
+- HGQ2 stores `_ebops` as uint32 (`hgq/layers/core/base.py:228`); `leaf_ebops` reads it. A leaf above 4.29e9 EBOPs
+  wraps (plan section 7, risk 3). Not a regression; read `sum(losses)/beta` per leaf if a leaf comes near.
 - `polaris/07_profile.py`, `15_g2_forward.py` still build the pre-retarget model (R4a open issue, unchanged).
-- Evidence (`$S/r4b/`) is in `/private/tmp`, which is not durable.
+- Evidence (`$S/r4b/`, `$S/r4b_fix/`) is in `/private/tmp`, which is not durable.
 - Nothing was pushed; no Polaris job was launched; the `hepattn` main working tree was not touched.
