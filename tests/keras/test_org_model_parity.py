@@ -1,13 +1,14 @@
 """The hybrid against the org/main torch model (base.yaml + linformer.yaml, ac0da8f) at full size, float.
 
-Lane R4a gates (docs/hgq/RETARGET_ORG_MAIN.md sections 4 and 6):
+Lane R4a and R4b gates (docs/hgq/RETARGET_ORG_MAIN.md sections 4 and 6):
 - full-model float parity, measured then 2x, with the PR #8 controls at model level;
 - the torch/hybrid state_dict key and shape check.
 
 The torch side is built from the org configs, the hybrid side from the config polaris/03_make_config.py writes, both
-by jsonargparse (org_model_utils.py). The masked-Linformer attention core of the hybrid is lane R4b, so the passing
-rows run both models with dense attention (``to_dense_attention``) and the Linformer rows are strict xfails that R4b
-turns on. Every event of the fixture has a padded node (RETARGET_ORG_MAIN.md section 1.2, batch of one).
+by jsonargparse (org_model_utils.py). ``linformer`` is the org model as it is (masked-Linformer attention everywhere,
+the keras_native core inside the hybrid since R4b); ``dense`` swaps every attention for dense attention on both sides
+(``to_dense_attention``), which keeps the R4a rows. Every event of the fixture has a padded node
+(RETARGET_ORG_MAIN.md section 1.2, batch of one).
 """
 
 import copy
@@ -23,15 +24,15 @@ from test_maskformer_parity import flatten_outputs  # ty: ignore [unresolved-imp
 
 from hepattn.keras.porting import port_maskformer
 
-# Error metric: max over elements of |hybrid - torch| / (1 + |torch|), finite slots. Measured (macOS arm64, torch
-# 2.10.0, CPU, dense attention, R4a fix round 2, $S/r4a_fix2/logs/loss_seeds*.out): max over seeds 0-15, each run 3
-# times in one process and once in another, outputs 1.855e-5 (seed 12, final regression), losses 2.75e-7 (seed 12,
-# layer_3 mask_bce); every repeat gave the same values to 4 digits. Tolerances are 2x. The rows run seeds 0 and 1.
-# Re-measure on the first Linux/GPU run (carried gate).
-OUT_TOL = 3.7e-5
-LOSS_TOL = 5.5e-7
+# Error metric: max over elements of |hybrid - torch| / (1 + |torch|), finite slots. Tolerances are 2x the measured
+# maximum (macOS arm64, torch 2.10.0, CPU). The rows run seeds 0 and 1. Re-measure on the first Linux/GPU run (carried).
+# dense (R4a fix round 2, $S/r4a_fix2/logs/loss_seeds*.out): seeds 0-15, each run 3 times in one process and once in
+# another: outputs 1.855e-5 (seed 12, final regression), losses 2.75e-7 (seed 12, layer_3 mask_bce).
+# linformer (R4b, $S/r4b/logs/model_parity_seeds.out): seeds 0-15: outputs 5.088e-6 (seed 3, final mask logits),
+# losses 1.875e-7 (seed 8, layer_1 mask_bce); the 4 attention-mask booleans equal for every seed.
+TOLS = {"dense": (3.7e-5, 5.5e-7), "linformer": (1.02e-5, 3.75e-7)}
+OUT_TOL, LOSS_TOL = TOLS["dense"]
 SEEDS = [0, 1]
-R4B = "R4b: the hybrid masked-Linformer branch (RETARGET_ORG_MAIN.md section 4); Helen's KerasLinformerAttention has no q_proj"
 
 
 @pytest.fixture(scope="module")
@@ -69,13 +70,14 @@ def run_pair(org: dict, hyb: dict, seed: int) -> dict:
 
 
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("attn", ["dense", pytest.param("linformer", marks=pytest.mark.xfail(strict=True, raises=AttributeError, reason=R4B))])
+@pytest.mark.parametrize("attn", ["dense", "linformer"])
 def test_full_model_float_parity(configs, attn, seed):
     res = run_pair(*configs[attn], seed)
     assert res["bools"] and all(res["bools"].values()), [k for k, ok in res["bools"].items() if not ok]
     assert any(key.endswith("attn_mask") for key in res["bools"]), "the per-layer attention masks were not compared"
     out_err, loss_err = max(res["outs"].values()), max(res["losses"].values())
-    for tag, err, tol in (("outputs", out_err, OUT_TOL), ("losses", loss_err, LOSS_TOL)):
+    out_tol, loss_tol = TOLS[attn]
+    for tag, err, tol in (("outputs", out_err, out_tol), ("losses", loss_err, loss_tol)):
         record_measurement({
             "tag": f"org_model.{attn}.{tag}",
             "config": f"seed{seed}",
@@ -84,20 +86,23 @@ def test_full_model_float_parity(configs, attn, seed):
             "atol": tol,
             "rtol": tol,
         })
-    assert out_err <= OUT_TOL, max(res["outs"], key=res["outs"].get)
-    assert loss_err <= LOSS_TOL, max(res["losses"], key=res["losses"].get)
+    assert out_err <= out_tol, max(res["outs"], key=res["outs"].get)
+    assert loss_err <= loss_tol, max(res["losses"], key=res["losses"].get)
 
 
+@pytest.mark.parametrize("attn", ["dense", "linformer"])
 @pytest.mark.parametrize(("key", "value"), [("query_update_order", "ca_dense_sa"), ("self_attn_norm_kv", False)])
-def test_control_pr8_decoder_options(configs, key, value):
+def test_control_pr8_decoder_options(configs, attn, key, value):
     """The other PR #8 decoder setting in the hybrid only: outputs and losses move far beyond the tolerances."""
-    org, hyb = configs["dense"]
+    org, hyb = configs[attn]
     hyb = copy.deepcopy(hyb)
     hyb["model"]["model"]["init_args"]["decoder"]["decoder_layer_config"][key] = value
     res = run_pair(org, hyb, seed=0)
-    # measured (R4a): query_update_order outputs 1.56e1, losses 3.49e-2; self_attn_norm_kv 5.35, 3.27e-3
-    assert max(res["outs"].values()) >= 10 * OUT_TOL
-    assert max(res["losses"].values()) >= 10 * LOSS_TOL
+    # measured: dense (R4a) query_update_order outputs 1.56e1, losses 3.49e-2; self_attn_norm_kv 5.35, 3.27e-3.
+    # linformer (R4b, $S/r4b/logs/model_controls.out): query_update_order 3.25, 4.97e-4; self_attn_norm_kv 2.41, 5.57e-4
+    out_tol, loss_tol = TOLS[attn]
+    assert max(res["outs"].values()) >= 10 * out_tol
+    assert max(res["losses"].values()) >= 10 * loss_tol
 
 
 def test_control_pr8_dense_norm_placement_is_refused(configs):
@@ -117,23 +122,46 @@ def test_control_sorting_is_invisible_to_dense_attention(configs):
     assert max(res["outs"].values()) <= OUT_TOL  # measured 9.29e-6, the matched floor
 
 
+def test_control_sorting_sets_the_linformer_projection_rows(configs):
+    """Plan 5.8 control: with the masked Linformer the sort order selects the E/F row of each token, so without it
+    the hybrid leaves the org model (measured: outputs 3.47, losses 2.39e-2, 0 of 4 attention masks equal).
+    """
+    org, hyb = configs["linformer"]
+    hyb = copy.deepcopy(hyb)
+    hyb["model"]["model"]["init_args"].pop("input_sort_field")
+    res = run_pair(org, hyb, seed=0)
+    out_tol, loss_tol = TOLS["linformer"]
+    assert max(res["outs"].values()) >= 10 * out_tol
+    assert max(res["losses"].values()) >= 10 * loss_tol
+
+
 # ------------------------------------------------------------------------------- state_dict keys and shapes
 def owner(key: str) -> str | None:
     """Module path of the torch leaf a hybrid twin replaces (Attention projections, Dense linears); None if reused."""
     for marker in (".in_proj_weight", ".in_proj_bias", ".out_proj.", ".value_residual_mix.0."):
         if marker in key:
             return key.split(marker, maxsplit=1)[0]
+    if key.endswith((".proj_k", ".proj_v")):  # linformer sequence projections (seq_len, k)
+        return key.rsplit(".", 1)[0]
     if ".net." in key:
         return key.rsplit(".net.", 1)[0]
     return None
 
 
 def relations(hyb: torch.Tensor, ref: torch.Tensor) -> str | None:
-    """How a hybrid tensor holds a torch tensor: the same, transposed (Linear -> kernel), or one chunk of a packed one."""
+    """How a hybrid tensor holds a torch tensor: the same, transposed (Linear -> kernel), one chunk of a packed one, or
+    a block of rows (a linformer projection split into the core's head kernel and its tail rows).
+    """
     if hyb.shape == ref.shape and torch.equal(hyb, ref):
         return "same"
     if ref.dim() == 2 and hyb.shape == ref.T.shape and torch.equal(hyb, ref.T):
         return "T"
+    if ref.dim() == 2 and hyb.dim() == 2 and hyb.shape[1] == ref.shape[1] and hyb.shape[0] < ref.shape[0]:
+        h, r = hyb.shape[0], ref.shape[0]
+        if torch.equal(hyb, ref[:h]):
+            return f"rows0:{h}"
+        if torch.equal(hyb, ref[r - h :]):
+            return f"rows{r - h}:{r}"
     for n in (2, 3):  # SwiGLU [x1 | x2], attention [q | k | v]
         if ref.shape[0] % n:
             continue
@@ -146,16 +174,33 @@ def relations(hyb: torch.Tensor, ref: torch.Tensor) -> str | None:
 
 
 def region(rel: str):
-    """Index of the torch tensor part that a relation covers: all of it, or the rows of chunk j of n."""
+    """Index of the torch tensor part that a relation covers: all of it, a block of rows, or the rows of chunk j of n."""
     if rel in {"same", "T"}:
         return ...
+    if rel.startswith("rows"):
+        a, b = map(int, rel.removeprefix("rows").split(":"))
+        return slice(a, b)
     j, n = map(int, rel.removeprefix("chunk").removesuffix(".T").split("/"))
     return (j, n)
 
 
 def unique_state(model) -> dict[str, torch.Tensor]:
-    """state_dict without the decoder's alias of the tasks (MaskFormer registers them under tasks. and decoder.tasks.)."""
-    return {k: v for k, v in model.state_dict().items() if not k.startswith("decoder.tasks.")}
+    """state_dict without aliases: the decoder's copy of the tasks (MaskFormer registers them under tasks. and
+    decoder.tasks.), and the keras variables that every enclosing keras layer lists again (``Layer.variables`` is
+    recursive: the kernel of a linformer core's E projection is in the ParameterDict of the core, of E and of E's
+    einsum). An alias is the same storage under the same keras variable path; the deepest key is kept.
+    """
+    sd = model.state_dict()
+    groups: dict = {}
+    for key, value in sd.items():
+        if key.startswith("decoder.tasks."):
+            continue
+        ident = (value.data_ptr(), tuple(value.shape), value.stride()) if value.numel() else key
+        groups.setdefault(ident, []).append(key)
+    for keys in groups.values():
+        paths = {key.rsplit("_torch_params.", 1)[-1] for key in keys}
+        assert len(paths) == 1, f"one storage under different keras variables or torch keys: {keys}"
+    return {(keep := max(keys, key=len)): sd[keep] for keys in groups.values()}
 
 
 def state_map(org: dict, hyb: dict, quantized: bool) -> tuple[dict, dict, list]:
@@ -169,10 +214,9 @@ def state_map(org: dict, hyb: dict, quantized: bool) -> tuple[dict, dict, list]:
     torch.manual_seed(0)
     tmodel = U.instantiate(org)
     kmodel = U.instantiate(hyb, quantized=quantized)
-    if quantized:
-        inputs, _ = U.clic_dummy_batch()
-        with torch.no_grad():
-            kmodel(inputs)  # quantized layers build lazily
+    inputs, _ = U.clic_dummy_batch()
+    with torch.no_grad():
+        kmodel(inputs)  # quantized layers, and the linformer cores in both modes, build at the first forward
     kmodel.register_keras_parameters()
     gen = torch.Generator().manual_seed(123)
     with torch.no_grad():
@@ -197,8 +241,8 @@ def state_map(org: dict, hyb: dict, quantized: bool) -> tuple[dict, dict, list]:
         mapping[hkey] = hits[0]
         tkey, rel = hits[0]
         part = region(rel)
-        if part is ...:
-            covered[tkey][...] += 1
+        if part is ... or isinstance(part, slice):
+            covered[tkey][part] += 1
         else:
             covered[tkey].chunk(part[1], dim=0)[part[0]].add_(1)  # chunk is a view: counts land in covered[tkey]
     return mapping, covered, unmatched
@@ -206,6 +250,10 @@ def state_map(org: dict, hyb: dict, quantized: bool) -> tuple[dict, dict, list]:
 
 # Packed torch tensors, by the name of the hybrid leaf that holds one part: SwiGLU [x1 | x2], attention [q | k | v].
 PACKED_PARTS = {"_x1": "chunk0/2", "_x2": "chunk1/2", "_q_proj": "chunk0/3", "_k_proj": "chunk1/3", "_v_proj": "chunk2/3"}
+# Linformer projections by the name of the hybrid entry: (torch leaf, rows). E holds proj_k, F proj_v; the core's
+# kernel is the head (rows :n, all rows when n = seq_len), its tail and the q_sa buffers the rows n:.
+SEQ_PROJ = {"_E_proj/kernel": ("proj_k", "head"), "_F_proj/kernel": ("proj_v", "head"), "_E/tail": ("proj_k", "tail")}
+SEQ_PROJ |= {"_F/tail": ("proj_v", "tail"), ".proj_k_dead": ("proj_k", "tail"), ".proj_v_dead": ("proj_v", "tail")}
 
 
 def expected_relation(hkey: str) -> str:
@@ -220,9 +268,21 @@ def expected_relation(hkey: str) -> str:
     return "same"
 
 
+def relation_ok(hkey: str, tkey: str, rel: str) -> bool:
+    """Whether ``hkey`` may hold ``tkey`` as ``rel``, from the hybrid key's name alone."""
+    seq = next((want for suffix, want in SEQ_PROJ.items() if hkey.endswith(suffix)), None)
+    if seq is None:
+        return rel == expected_relation(hkey)
+    leaf, rows = seq
+    if not tkey.endswith("." + leaf):
+        return False
+    head = rel == "same" or rel.startswith("rows0:")
+    return head if rows == "head" else rel.startswith("rows") and not head
+
+
 def check_state_map(mapping: dict, covered: dict, unmatched: list, quantized: bool) -> None:
     for hkey, (tkey, rel) in mapping.items():
-        assert rel == expected_relation(hkey), f"{hkey} holds {tkey} as {rel}, its name implies {expected_relation(hkey)}"
+        assert relation_ok(hkey, tkey, rel), f"{hkey} holds {tkey} as {rel}, which its name does not imply"
         own = owner(tkey)
         if own is None:
             assert hkey == tkey and rel == "same", f"reused torch module state moved: {tkey} -> {hkey} ({rel})"
@@ -237,19 +297,19 @@ def check_state_map(mapping: dict, covered: dict, unmatched: list, quantized: bo
     assert not unmatched, f"hybrid entries with no unique torch source: {unmatched[:5]}"
 
 
-@pytest.mark.parametrize(
-    ("attn", "quantized"),
-    [
-        ("dense", False),
-        ("dense", True),
-        pytest.param("linformer", False, marks=pytest.mark.xfail(strict=True, raises=AttributeError, reason=R4B)),
-        # the quantized build materializes with a forward pass, which Helen's layer refuses (k=64 < 160 keys)
-        pytest.param("linformer", True, marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=R4B)),
-    ],
-)
+@pytest.mark.parametrize("quantized", [False, True])
+@pytest.mark.parametrize("attn", ["dense", "linformer"])
 def test_state_dict_keys_and_shapes_match_torch(configs, attn, quantized):
     mapping, covered, unmatched = state_map(*configs[attn], quantized=quantized)
     assert len(covered) > 150, len(covered)  # the full model (184 torch entries, 292 hybrid ones): not a vacuous map
     check_state_map(mapping, covered, unmatched, quantized)
+    rels = {rel for _, rel in mapping.values()}
     # the packed tensors were checked chunk by chunk: SwiGLU halves (2) and attention q/k/v (3)
-    assert {rel for _, rel in mapping.values()} >= {"chunk0/2.T", "chunk1/2.T", "chunk0/3.T", "chunk1/3.T", "chunk2/3.T"}
+    assert rels >= {"chunk0/2.T", "chunk1/2.T", "chunk0/3.T", "chunk1/3.T", "chunk2/3.T"}
+    if attn == "linformer":
+        # every org proj_k / proj_v (24 each: 6 encoder, 3 x 4 decoder), split as the cores hold them: whole (encoder
+        # 168, q_ca 160), head 150 + tail 10 (kv_ca), head 150 + q_sa buffer 10
+        projections = [key for key in covered if key.endswith((".proj_k", ".proj_v"))]
+        assert len(projections) == 2 * (6 + 3 * 4), projections
+        assert rels >= {"rows0:150", "rows150:160"}
+        assert sum(key.endswith("_dead") for key in mapping) == 2 * 4  # q_sa: the torch rows org never reads

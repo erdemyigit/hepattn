@@ -2,9 +2,8 @@
 
 Lane R4a gates (docs/hgq/RETARGET_ORG_MAIN.md section 6): the generated config equals the org model section up to the
 listed HGQ edits; it builds in float and quantized through jsonargparse, as main_hgq.py builds it; and it runs a
-forward pass and the matched loss. With ``HGQ_ATTN=linformer`` (the default) the forward needs the hybrid
-masked-Linformer branch of lane R4b: Helen's layer refuses k=64 < 160 keys under a mask, so those rows are strict
-xfails until R4b lands. ``HGQ_ATTN=torch`` (base.yaml alone, dense attention) runs now.
+forward pass and the matched loss. ``HGQ_ATTN=linformer`` (the default) runs the hybrid masked-Linformer attention
+(lane R4b); ``HGQ_ATTN=torch`` writes base.yaml alone (dense attention).
 """
 
 import ast
@@ -19,9 +18,9 @@ import org_model_utils as U  # ty: ignore [unresolved-import]
 import yaml
 from test_swiglu_quantized import ebops_term  # ty: ignore [unresolved-import]
 
+from hepattn.keras.attention import KerasAttention
 from hepattn.keras.dense import KerasDense
 from hepattn.keras.encoder import KerasEncoder
-from hepattn.keras.linformer import KerasLinformerAttention
 
 # The production HGQ2 spec (unchanged from 5db27a8; the bitwidths of docs/hgq/USAGE.md). beta0 is 0: BetaScheduler or
 # BetaPID set beta during training.
@@ -31,7 +30,6 @@ QUANT_SPEC = {
     "table": {"default_q_type": "kif", "i0": 2, "f0": 10},
     "ebops": {"beta0": 0.0},
 }
-R4B = "R4b: Helen's KerasLinformerAttention asserts k >= kv_len under a mask (k=64, decoder kv_len=160)"
 ATTNS = ["linformer", "torch"]
 
 
@@ -190,19 +188,20 @@ def test_generated_config_builds(generated, attn, quantized):
     assert ffn.gate and len(ffn.products) == 1
     leaves = [type(layer).__name__ for layer in (ffn.hidden[0], ffn.gates[0], ffn.products[0])]
     assert leaves == (["QDense", "QDense", "QEinsum"] if quantized else ["Dense", "Dense", "EinsumOp"])
-    if attn == "linformer":  # R0 carried gate: linformer_k must reach the layer (256 is the hybrid default)
-        shapes = {tuple(layer.attn.fn.proj_k.shape) for layer in model.encoder.layers}
-        shapes |= {tuple(getattr(layer, part).fn.proj_k.shape) for layer in model.decoder.decoder_layers for part in ("q_ca", "q_sa", "kv_ca")}
-        assert shapes == {(168, 64), (160, 64)}
-        assert isinstance(dec0.q_ca.fn, KerasLinformerAttention)
+    if attn == "linformer":  # R0 carried gate: linformer_k must reach the layer (256 was Helen's hybrid default)
+        attns = linformer_attentions(model)
+        assert all(type(fn) is KerasAttention and fn.attn_type == "linformer" for fn in attns)
+        assert {(fn.linformer_seq_len, fn.linformer_k) for fn in attns} == {(168, 64), (160, 64)}
+        # the cores build at the first forward (their shapes come from the inputs); q_sa is fixed to org's unmasked path
+        assert all(fn.core is None for fn in attns)
+        assert all(layer.q_sa.fn.linformer_core == "project_unmasked" for layer in model.decoder.decoder_layers)
+        assert {fn.linformer_core for fn in attns} == {"auto", "project_unmasked"}
 
 
 @pytest.mark.parametrize("quantized", [False, True])
-@pytest.mark.parametrize(
-    "attn", [pytest.param("linformer", marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=R4B)), "torch", "linformer_dense_attn"]
-)
+@pytest.mark.parametrize("attn", ["linformer", "torch", "linformer_dense_attn"])
 def test_generated_config_forward_and_matched_loss(generated, attn, quantized):
-    """linformer_dense_attn: the default config with dense attention, so phi sorting runs quantized before R4b."""
+    """linformer_dense_attn: the default config with dense attention (the R4a row that ran phi sorting before R4b)."""
     torch.manual_seed(0)
     cfg = U.to_dense_attention(generated["linformer"]) if attn == "linformer_dense_attn" else generated[attn]
     model = U.instantiate(cfg, quantized=quantized)
@@ -217,3 +216,20 @@ def test_generated_config_forward_and_matched_loss(generated, attn, quantized):
     assert len(terms) == 4 * 3 + 5, len(terms)  # object_ce, mask_bce, mask_dice per layer; + kl_div, regression
     assert all(bool(torch.isfinite(t)) for t in terms), losses
     assert outputs["final"]["mask"]["pflow_node_logit"].shape == (2, U.NUM_QUERIES, U.MAX_NODES)
+    if attn == "linformer":
+        # the first forward built org's path at every call site (encoder project over 160 nodes + 8 registers;
+        # decoder q_ca attend 150 over 160, q_sa unmasked project, kv_ca attend 160 over 150) with torch's shapes
+        attns = linformer_attentions(model)
+        cores = {(type(fn.core).__name__, fn.core_kind, fn.core.nq, fn.core.n) for fn in attns}
+        assert cores == {
+            ("ProjectCore", "project", 168, 168),
+            ("AttendCore", "attend", 150, 160),
+            ("ProjectCore", "project_unmasked", 150, 150),
+            ("AttendCore", "attend", 160, 150),
+        }
+        assert {tuple(t.shape) for fn in attns for t in fn.full_projections()} == {(168, 64), (160, 64)}
+
+
+def linformer_attentions(model) -> list[KerasAttention]:
+    attns = [layer.attn.fn for layer in model.encoder.layers]
+    return attns + [getattr(layer, part).fn for layer in model.decoder.decoder_layers for part in ("q_ca", "q_sa", "kv_ca")]
