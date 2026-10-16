@@ -10,7 +10,8 @@ every other quantized activation), and the product is the elementwise factory ei
 (``QEinsum`` when quantized). Porting splits the torch weight rows: x1 = rows [:h], x2 = rows [h:].
 
 Initialisation (``init``): ``"keras"`` (glorot-uniform kernel, zero bias) is what the hybrid's encoder/decoder
-Dense layers get, because the hybrid builds those from the config. ``"torch"`` is ``nn.Linear``'s default,
+Dense layers get, because the hybrid builds those from the config. The hybrid packs a SwiGLU layer as one (in, 2h)
+kernel, so both native halves take the glorot bound of that packed shape, sqrt(6 / (in + 2h)), not of (in, h). ``"torch"`` is ``nn.Linear``'s default,
 kernel and bias U(+-1/sqrt(fan_in)); the hybrid's input nets and task heads start from it, because
 ``kerasify_module`` ports them from torch ``Dense`` modules.
 """
@@ -103,25 +104,34 @@ class Dense(keras.layers.Layer):
         def sub(part: str) -> str | None:
             return f"{name}_{part}" if name else None
 
-        def initializers(fan_in: int) -> dict:
+        def initializers(fan_in: int, packed_out: int | None = None) -> dict:
             if init == "keras":
-                return {}
+                if packed_out is None:
+                    return {}
+                limit = math.sqrt(6.0 / (fan_in + packed_out))  # glorot_uniform of the packed (in, 2h) kernel
+                return {"kernel_initializer": keras.initializers.RandomUniform(-limit, limit)}
             # nn.Linear: kaiming_uniform(a=sqrt(5)) kernel and bias, both U(+-1/sqrt(fan_in))
             bound = 1.0 / math.sqrt(fan_in)
             uniform = keras.initializers.VarianceScaling(scale=1.0 / 3.0, mode="fan_in", distribution="uniform")
             return {"kernel_initializer": uniform, "bias_initializer": keras.initializers.RandomUniform(-bound, bound)}
 
         fan_ins = [input_size, *self.hidden_sizes]  # both SwiGLU halves have the fan-in of the packed torch Linear
+
+        def half_init(i: int, size: int) -> dict:
+            return initializers(fan_ins[i], 2 * size if self.gate else None)
+
         self.hidden = [
-            factory.dense(size, activation=None if self.gate else activation, use_bias=bias, name=sub(f"hidden{i}"), **initializers(fan_ins[i]))
+            factory.dense(size, activation=None if self.gate else activation, use_bias=bias, name=sub(f"hidden{i}"), **half_init(i, size))
             for i, size in enumerate(self.hidden_sizes)
         ]
         self.gates, self.products = [], []
         if self.gate:
             self.gates = [
-                factory.dense(size, activation="silu", use_bias=bias, name=sub(f"hidden{i}_gate"), **initializers(fan_ins[i]))
+                factory.dense(size, activation="silu", use_bias=bias, name=sub(f"hidden{i}_gate"), **half_init(i, size))
                 for i, size in enumerate(self.hidden_sizes)
             ]
+            # "..." is replaced by explicit letters in build: HGQ2 0.1.9 QEinsum.build expands it from a Python set, so
+            # the serialised equation would depend on the hash seed.
             self.products = [factory.einsum("...d,...d->...d", name=sub(f"hidden{i}_glu")) for i in range(len(self.hidden_sizes))]
         self.final = factory.dense(output_size, activation=final_activation, use_bias=bias, name=sub("final"), **initializers(fan_ins[-1]))
         self.dropout = keras.layers.Dropout(dropout, name=sub("dropout")) if dropout else None
@@ -130,11 +140,13 @@ class Dense(keras.layers.Layer):
         if input_shape[-1] != self.input_size:
             raise ValueError(f"{self.name}: input feature size {input_shape[-1]} != input_size {self.input_size}")
         lead = (None, *input_shape[1:-1])
+        product_equation = "{0},{0}->{0}".format("abcefghijklmnopqrstuvwxyz"[: len(lead)] + "d")
         in_size = self.input_size
         for i, (layer, size) in enumerate(zip(self.hidden, self.hidden_sizes, strict=True)):
             layer.build((*lead, in_size))
             if self.gate:
                 self.gates[i].build((*lead, in_size))
+                self.products[i].equation = product_equation
                 self.products[i].build([(*lead, size), (*lead, size)])
             in_size = size
         self.final.build((*lead, in_size))

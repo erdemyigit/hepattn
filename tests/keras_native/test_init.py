@@ -125,13 +125,18 @@ def test_dense_torch_init_matches_nn_linear(mode, activation):
                 assert sample.std() == pytest.approx(bound / math.sqrt(3), rel=STD_RTOL)
 
 
-def test_dense_keras_init_is_glorot_with_zero_bias():
-    """init='keras' (the default; the hybrid's encoder/decoder Dense layers): glorot-uniform kernel, zero bias."""
-    dense = Dense(input_size=512, output_size=64, hidden_layers=[2048])
+@pytest.mark.parametrize("activation", ["SiLU", "SwiGLU"])
+def test_dense_keras_init_is_glorot_with_zero_bias(activation):
+    """init='keras' (the default; the hybrid's encoder/decoder Dense layers): glorot-uniform kernel, zero bias.
+
+    SwiGLU: the hybrid packs both halves in one (in, 2h) kernel, so each native half takes that glorot bound.
+    """
+    dense = Dense(input_size=512, output_size=64, hidden_layers=[2048], activation=activation)
     dense.build((None, 10, 512))
+    halves = {id(layer) for layer in (*dense.hidden, *dense.gates)} if activation == "SwiGLU" else set()
     for layer in dense_layers(dense):
         fan_in, fan_out = layer.kernel.shape
-        limit = math.sqrt(6.0 / (fan_in + fan_out))
+        limit = math.sqrt(6.0 / (fan_in + fan_out * (2 if id(layer) in halves else 1)))
         kernel = n(layer.kernel)
         assert np.abs(kernel).max() <= limit * FP32_SLACK
         assert kernel.std() == pytest.approx(limit / math.sqrt(3), rel=STD_RTOL)
