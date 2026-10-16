@@ -63,23 +63,23 @@ def drive_native(seq, target=TARGET, init_beta=INIT_BETA, warmup=WARMUP, p=1.0, 
 @pytest.mark.parametrize("damp", [0.0, 0.5])
 def test_controller_equals_hgq2_beta_pid(name, damp):
     ref, ours = drive_reference(SEQUENCES[name], damp=damp), drive_native(SEQUENCES[name], damp=damp)
-    assert ours == pytest.approx(ref, rel=1e-12)
+    assert ours == pytest.approx(ref, rel=1e-12, abs=0)
 
 
 @pytest.mark.parametrize("kwargs", [{"p": 1.05}, {"i": 0.55}, {"d": 0.05}, {"init_beta": INIT_BETA * 1.05}, {"target": TARGET * 1.05}, {"warmup": 3}])
 def test_comparison_is_discriminating(kwargs):
     seq = SEQUENCES["decaying"]
     ref = drive_reference(seq)
-    assert drive_native(seq) == pytest.approx(ref, rel=1e-12)
-    assert drive_native(seq, **kwargs) != pytest.approx(ref, rel=1e-9), f"{kwargs} did not change the trajectory"
+    assert drive_native(seq) == pytest.approx(ref, rel=1e-12, abs=0)
+    assert drive_native(seq, **kwargs) != pytest.approx(ref, rel=1e-9, abs=0), f"{kwargs} did not change the trajectory"
 
 
 def test_integral_seeding_is_load_bearing():
     ctl = BetaPIDController(target_ebops=TARGET, init_beta=INIT_BETA, warmup_epochs=0)
-    assert ctl.step(1.6755e15) == pytest.approx(INIT_BETA, rel=1e-9)
+    assert ctl.step(1.6755e15) == pytest.approx(INIT_BETA, rel=1e-9, abs=0)
     unseeded = BetaPIDController(target_ebops=TARGET, init_beta=INIT_BETA, warmup_epochs=0)
     unseeded.seeded = True
-    assert unseeded.step(1.6755e15) != pytest.approx(INIT_BETA, rel=1e-6)
+    assert unseeded.step(1.6755e15) != pytest.approx(INIT_BETA, rel=1e-6, abs=0)
 
 
 def test_epoch_hook_warmup_and_missing_reading():
@@ -88,7 +88,7 @@ def test_epoch_hook_warmup_and_missing_reading():
     assert not ctl.seeded, "warm-up must not touch the controller"
     assert ctl.on_epoch_start(2, 0.0) == INIT_BETA
     assert not ctl.seeded, "a missing reading must not seed the integral"
-    assert ctl.on_epoch_start(3, 1.7e15) == pytest.approx(INIT_BETA, rel=1e-9)
+    assert ctl.on_epoch_start(3, 1.7e15) == pytest.approx(INIT_BETA, rel=1e-9, abs=0)
     assert ctl.on_epoch_start(4, 1.7e15) > INIT_BETA
 
 
@@ -105,12 +105,12 @@ def test_state_dict_resumes_the_trajectory():
     tail = [resumed.on_epoch_start(e, seq[e]) for e in range(5, len(seq))]
     control = [fresh.on_epoch_start(e, seq[e]) for e in range(5, len(seq))]
     assert tail == full[5:]
-    assert control != pytest.approx(full[5:], rel=1e-6), "a fresh controller reproduced the resumed run: the state is not load-bearing"
+    assert control != pytest.approx(full[5:], rel=1e-6, abs=0), "a fresh controller reproduced the resumed run: the state is not load-bearing"
 
 
 def test_ramp():
     assert [ramp_beta(s, 1e-12, 5e-10, 100) for s in (0, 50, 100, 1000)] == pytest.approx(
-        [1e-12, 1e-12 + 0.5 * (5e-10 - 1e-12), 5e-10, 5e-10], rel=1e-12
+        [1e-12, 1e-12 + 0.5 * (5e-10 - 1e-12), 5e-10, 5e-10], rel=1e-12, abs=0
     )
     assert ramp_beta(3, 0.0, 1.0, 0) == 1.0  # warmup_steps 0: full strength at once (max(1, warmup) as the hybrid)
 

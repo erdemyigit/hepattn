@@ -111,7 +111,7 @@ def test_matches_hgq2_reference(name, impl):
     ref, ours = drive_reference(seq), drive_port(seq, impl=impl)
     assert len(ref) == len(ours) == len(seq)
     for epoch, (r, o) in enumerate(zip(ref, ours, strict=True)):
-        assert r == pytest.approx(o, rel=1e-12), f"{name} epoch {epoch}: hgq2={r!r} port={o!r}"
+        assert r == pytest.approx(o, rel=1e-12, abs=0), f"{name} epoch {epoch}: hgq2={r!r} port={o!r}"
 
 
 def test_reference_test_is_discriminating(impl):
@@ -122,7 +122,7 @@ def test_reference_test_is_discriminating(impl):
     """
     seq = SEQUENCES["decaying"]
     baseline = drive_reference(seq)
-    assert baseline == pytest.approx(drive_port(seq, impl=impl), rel=1e-12)
+    assert baseline == pytest.approx(drive_port(seq, impl=impl), rel=1e-12, abs=0)
 
     perturbations = {
         "p": {"p": 1.05},
@@ -135,21 +135,24 @@ def test_reference_test_is_discriminating(impl):
     for label, kwargs in perturbations.items():
         perturbed = drive_port(seq, impl=impl, **kwargs)
         assert len(perturbed) == len(baseline)
-        differs = any(b != pytest.approx(q, rel=1e-9) for b, q in zip(baseline, perturbed, strict=True))
+        differs = any(b != pytest.approx(q, rel=1e-9, abs=0) for b, q in zip(baseline, perturbed, strict=True))
         assert differs, f"perturbing {label} did not change the trajectory — test is vacuous"
 
     # And the seeding specifically: an unseeded integral must not reproduce init_beta.
     cb = IMPLS[impl](target_ebops=TARGET, init_beta=INIT_BETA, i=0.5, warmup_epochs=0)
     setattr(cb, seed_flag(cb), True)  # deliberately skip seeding, as a naive port would
     unseeded = cb.step(1.6755e15)
-    assert unseeded != pytest.approx(INIT_BETA, rel=1e-6), "integral seeding is not load-bearing — the first output matched init_beta without it"
+    assert unseeded != pytest.approx(INIT_BETA, rel=1e-6, abs=0), (
+        "integral seeding is not load-bearing — the first output matched init_beta without it"
+    )
 
 
 def test_first_post_warmup_output_reproduces_init_beta(impl):
     """The controller starts from init_beta rather than jumping."""
     for ebops in (1.6755e15, 4.0e14, 1.0e15):
         cb = IMPLS[impl](target_ebops=TARGET, init_beta=INIT_BETA, i=0.5, warmup_epochs=0)
-        assert cb.step(ebops) == pytest.approx(INIT_BETA, rel=1e-9), f"at ebops={ebops:.3e}"
+        # exact up to HGQ2's 1e-9 in the seeding error (not in the step's error): measured 3.8e-9 relative at 4e14
+        assert cb.step(ebops) == pytest.approx(INIT_BETA, rel=1e-8, abs=0), f"at ebops={ebops:.3e}"
 
 
 def test_beta_moves_in_the_correct_direction(impl):
@@ -166,7 +169,7 @@ def test_unresponsive_metric_saturates_at_max_beta_and_stops(impl):
     """
     betas = drive_port(SEQUENCES["unresponsive"] * 5, max_beta=1e-7, impl=impl)
     assert max(betas) <= 1e-7 + 1e-18
-    assert betas[-1] == pytest.approx(1e-7, rel=1e-9), "should have reached the ceiling"
+    assert betas[-1] == pytest.approx(1e-7, rel=1e-9, abs=0), "should have reached the ceiling"
     # Without the clamp it would blow far past it, i.e. the clamp is doing work.
     unclamped = drive_port(SEQUENCES["unresponsive"] * 5, max_beta=float("inf"), impl=impl)
     assert max(unclamped) > 1e-5, f"clamp test is vacuous; unclamped max was {max(unclamped):.3e}"
@@ -175,7 +178,7 @@ def test_unresponsive_metric_saturates_at_max_beta_and_stops(impl):
 def test_warmup_holds_init_beta(impl):
     betas = drive_port([1.6755e15] * 6, warmup=4, impl=impl)
     assert betas[:4] == [INIT_BETA] * 4
-    assert betas[4] == pytest.approx(INIT_BETA, rel=1e-9)  # seeded, so continuous
+    assert betas[4] == pytest.approx(INIT_BETA, rel=1e-9, abs=0)  # seeded, so continuous
     assert betas[5] != betas[4]  # then it moves
 
 
@@ -216,12 +219,12 @@ def test_log_space_law_is_what_the_docstring_claims(impl):
     cb.step(e0)  # seeds; returns INIT_BETA
     got = cb.step(e1)
 
-    err0 = math.log10(e0 / TARGET + 1e-9)
-    integral = (math.log10(INIT_BETA) - 1.0 * err0) / 0.5  # post-seed, post first +=
+    seed_err = math.log10(e0 / TARGET + 1e-9)  # HGQ2 seeds with +1e-9, the step's own error has none
+    integral = (math.log10(INIT_BETA) - 1.0 * seed_err) / 0.5 - seed_err + math.log10(e0 / TARGET)  # post-seed, post first +=
     err1 = math.log10(e1 / TARGET)
     integral += err1
     expected = 10.0 ** (1.0 * err1 + 0.5 * integral)
-    assert got == pytest.approx(expected, rel=1e-12)
+    assert got == pytest.approx(expected, rel=1e-12, abs=0)
 
 
 # --------------------------------------------------------------------------------------
@@ -291,10 +294,10 @@ def test_hook_holds_init_beta_through_warmup_then_engages():
         assert written == [INIT_BETA] * 4, f"epoch {epoch} must hold init_beta, got {written}"
 
     seeded = run_hook(cb, module, 3)  # first controlled epoch == init_beta
-    assert seeded == pytest.approx([INIT_BETA] * 4, rel=1e-9)
+    assert seeded == pytest.approx([INIT_BETA] * 4, rel=1e-9, abs=0)
     moved = run_hook(cb, module, 4)  # then it must actually move
     assert moved[0] > INIT_BETA
-    assert moved == pytest.approx([moved[0]] * 4), "every layer must get the same beta"
+    assert moved == [moved[0]] * 4, "every layer must get the same beta"
 
 
 def test_hook_sums_ebops_over_all_layers():
@@ -306,7 +309,7 @@ def test_hook_sums_ebops_over_all_layers():
     # (0.00001%). Worth recording, because it bounds what "val/ebops is flat" can mean
     # -- the 0.0002% we measured across the beta sweep is ~20x above this floor, so it
     # is a real observation and not a precision artifact.
-    assert module.logged["train/pid_ebops"] == pytest.approx(1.6755e15, rel=1e-6)
+    assert module.logged["train/pid_ebops"] == pytest.approx(1.6755e15, rel=1e-6, abs=0)
 
 
 def test_hook_holds_beta_when_ebops_not_yet_populated():
@@ -318,7 +321,7 @@ def test_hook_holds_beta_when_ebops_not_yet_populated():
     assert module.logged["train/pid_ebops"] == 0.0
     # ...and the controller is still unseeded, so it engages cleanly once EBOPs appear.
     module = FakeModule([1.6755e15 / 2] * 2)
-    assert run_hook(cb, module, 1) == pytest.approx([INIT_BETA] * 2, rel=1e-9)
+    assert run_hook(cb, module, 1) == pytest.approx([INIT_BETA] * 2, rel=1e-9, abs=0)
 
 
 def test_hook_reports_saturation():
@@ -327,7 +330,7 @@ def test_hook_reports_saturation():
     for epoch in range(40):
         run_hook(cb, module, epoch)
     assert module.logged["train/pid_saturated"] == 1.0
-    assert module.logged["train/quant_beta"] == pytest.approx(1e-7, rel=1e-9)
+    assert module.logged["train/quant_beta"] == pytest.approx(1e-7, rel=1e-9, abs=0)
 
     calm_module = FakeModule([1.0e15])
     calm = BetaPID(target_ebops=TARGET, init_beta=INIT_BETA, i=0.5, warmup_epochs=0, max_beta=1e-7)
@@ -341,9 +344,9 @@ def test_damping_applies_only_below_target(impl):
     assert drive_port(under, damp=0.5, impl=impl)[-1] < drive_port(under, damp=0.0, impl=impl)[-1]
     # ...and has no effect while the model is still over budget.
     over = SEQUENCES["unresponsive"]
-    assert drive_port(over, damp=0.5, impl=impl) == pytest.approx(drive_port(over, damp=0.0, impl=impl), rel=1e-12)
+    assert drive_port(over, damp=0.5, impl=impl) == pytest.approx(drive_port(over, damp=0.0, impl=impl), rel=1e-12, abs=0)
     # Matching HGQ2 with damping on is the real check.
-    assert drive_reference(under, damp=0.5) == pytest.approx(drive_port(under, damp=0.5, impl=impl), rel=1e-12)
+    assert drive_reference(under, damp=0.5) == pytest.approx(drive_port(under, damp=0.5, impl=impl), rel=1e-12, abs=0)
 
 
 def test_hook_writes_what_the_controller_epoch_hook_returns():
@@ -369,4 +372,4 @@ def test_scheduler_ramp_is_the_shared_ramp():
         sched.on_train_batch_start(SimpleNamespace(global_step=step), module, None, 0)
         written = module.model.keras_layers()[0]._beta.value  # noqa: SLF001  (our own stub)
         assert written == ramp_beta(step, 1e-12, 5e-10, 100)
-    assert ramp_beta(37, 1e-12, 5e-10, 100) == pytest.approx(1e-12 + 0.37 * (5e-10 - 1e-12), rel=1e-12)
+    assert ramp_beta(37, 1e-12, 5e-10, 100) == pytest.approx(1e-12 + 0.37 * (5e-10 - 1e-12), rel=1e-12, abs=0)
