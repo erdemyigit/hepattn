@@ -69,7 +69,7 @@ class StepOutput(NamedTuple):
     losses: Any  # the loss_fn aux, e.g. {layer: {task: {name: scalar}}}
     penalty: Any  # sum of the HGQ2 EBOPs terms (beta * EBOPs); 0 when ebops_on is False
     regularization: Any  # sum of the weight-regularizer terms
-    grad_norm: Any  # global norm of the gradient of this (micro-)batch, before clipping
+    grad_norm: Any  # global norm of this (micro-)batch's gradient before clipping; NaN unless TrainStep(grad_norm=True)
 
 
 class EvalOutput(NamedTuple):
@@ -108,12 +108,14 @@ class TrainStep:
         loss_fn: ``loss_fn(outputs, targets) -> (scalar, aux pytree)``, traceable (``maskformer_loss``).
         matmul_precision: ``jax.default_matmul_precision`` inside the steps ("highest"), or None to keep the global one.
         donate: Donate the state to ``train_step`` (as Keras' trainer does).
+        grad_norm: Also return the global gradient norm (one more reduction over every gradient; the optimizer's clipping
+            computes its own).
 
     Raises:
         ValueError: If the model is not built or the optimizer is not built for its trainable variables.
     """
 
-    def __init__(self, model, optimizer, loss_fn: LossFn, *, matmul_precision: str | None = "highest", donate: bool = True):
+    def __init__(self, model, optimizer, loss_fn: LossFn, *, matmul_precision: str | None = "highest", donate: bool = True, grad_norm: bool = False):
         if not model.built:
             raise ValueError("build the model eagerly (one call on a real batch) before creating the jitted steps")
         if not optimizer.built or len(optimizer._trainable_variables) != len(model.trainable_variables):  # noqa: SLF001
@@ -122,6 +124,7 @@ class TrainStep:
         self.optimizer = optimizer
         self.loss_fn = loss_fn
         self.matmul_precision = matmul_precision
+        self.with_grad_norm = grad_norm
         self.ebops_leaves = EbopsLeaves(model)
         self._train = jax.jit(self._train_impl, static_argnames=("ebops_on",), donate_argnums=(0,) if donate else ())
         self._eval = jax.jit(self._eval_impl)
@@ -148,7 +151,8 @@ class TrainStep:
         with self._precision():
             (loss, aux), grads = jax.value_and_grad(self._objective, has_aux=True)(state.tv, state.ntv, batch, ebops_on)
         ntv, task, losses, penalty, regularization = aux
-        return grads, ntv, StepOutput(loss, task, losses, penalty, regularization, _global_norm(grads))
+        norm = _global_norm(grads) if self.with_grad_norm else jnp.full((), jnp.nan, jnp.float32)
+        return grads, ntv, StepOutput(loss, task, losses, penalty, regularization, norm)
 
     def _train_impl(self, state: TrainState, batch, ebops_on: bool):
         grads, ntv, out = self._grads_impl(state, batch, ebops_on)

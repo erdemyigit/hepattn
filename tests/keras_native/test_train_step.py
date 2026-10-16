@@ -294,3 +294,17 @@ def test_steps_request_highest_matmul_precision(float_model, batches):
     default, _ = dot_precisions(None)
     assert n_dots > 100 and highest >= n_dots, (highest, n_dots)
     assert default == 0, "the control already requests HIGHEST: the check is vacuous"
+
+
+def test_grad_norm_is_optional():
+    model, loss_fn = small_model_and_loss()
+    rng = np.random.default_rng(1)
+    batch = (rng.normal(size=(5, 4)).astype(np.float32), rng.normal(size=(5, 3)).astype(np.float32))
+    opt = build_optimizer(model, optimizer="AdamW", lrs_config=LRS, total_steps=100)
+    with_norm = TrainStep(model, opt, loss_fn, grad_norm=True)
+    grads, _ = with_norm.grads(with_norm.init_state(), batch)
+    expected = float(np.sqrt(sum(np.sum(np.square(np.asarray(g, np.float64))) for g in grads)))
+    _, out = with_norm.train_step(with_norm.init_state(), batch)
+    assert float(out.grad_norm) == pytest.approx(expected, rel=1e-6) and expected > 0
+    _, out = TrainStep(model, opt, loss_fn).train_step(with_norm.init_state(), batch)
+    assert np.isnan(float(out.grad_norm))
