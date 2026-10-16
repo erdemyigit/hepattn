@@ -1,0 +1,48 @@
+{
+ "src": "/private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/s5/old37/src",
+ "config": "/private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/s5/old37_polaris_hgq.yaml",
+ "rows": [
+  {
+   "task_loss": 155.7886505126953,
+   "e_eff_beta_weighted": 287970099197.2545,
+   "ebops_total_leaves": 1675602104048787.0,
+   "reg": 2.745482921600342,
+   "task_norm_q": 6.347661236527812,
+   "pen_norm_q": 84080868.55055283,
+   "task_norm_all": 1444.2164250427327,
+   "pen_norm_all": 84080868.55055283,
+   "n_params": 868,
+   "n_quant_params": 684,
+   "s_q": 13245960.270643758,
+   "s_all": 58219.02250423788
+  },
+  {
+   "task_loss": 126.44328308105469,
+   "e_eff_beta_weighted": 287970099197.2545,
+   "ebops_total_leaves": 1675602104048787.0,
+   "reg": 2.745482921600342,
+   "task_norm_q": 4.593510891084532,
+   "pen_norm_q": 84080868.55055283,
+   "task_norm_all": 1045.3182375345948,
+   "pen_norm_all": 84080868.55055283,
+   "n_params": 868,
+   "n_quant_params": 684,
+   "s_q": 18304271.078086257,
+   "s_all": 80435.66593543737
+  },
+  {
+   "task_loss": 135.00660705566406,
+   "e_eff_beta_weighted": 287970099197.2545,
+   "ebops_total_leaves": 1675602104048787.0,
+   "reg": 2.745482921600342,
+   "task_norm_q": 5.33423063406219,
+   "pen_norm_q": 84080868.55055283,
+   "task_norm_all": 1212.3423032906874,
+   "pen_norm_all": 84080868.55055283,
+   "n_params": 868,
+   "n_quant_params": 684,
+   "s_q": 15762510.90713011,
+   "s_all": 69354.06635760402
+  }
+ ]
+}

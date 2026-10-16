@@ -1,0 +1,25 @@
+Creating CLIC dataset with dummy data and 2 samples
+{
+ "decay": {
+  "count": 334,
+  "elements": 822123,
+  "torch_params": 46,
+  "kinds": {
+   "bias": 144,
+   "decoder.initial_queries": 1,
+   "encoder.register_tokens": 1,
+   "kernel": 180,
+   "tail": 8
+  }
+ },
+ "quantizer": {
+  "count": 982,
+  "elements": 15093029,
+  "torch_params": 982,
+  "kinds": {
+   "b": 288,
+   "f": 468,
+   "i": 226
+  }
+ }
+}

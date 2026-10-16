@@ -1,0 +1,48 @@
+{
+ "src": "/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-s5/src",
+ "config": "/private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/s5/new_polaris_hgq.yaml",
+ "rows": [
+  {
+   "task_loss": 58.49537658691406,
+   "e_eff_beta_weighted": 250913095677.1139,
+   "ebops_total_leaves": 250913099895.0,
+   "reg": 2.886101484298706,
+   "task_norm_q": 0.6060472389512226,
+   "pen_norm_q": 26521986.308105197,
+   "task_norm_all": 141.9020221343142,
+   "pen_norm_all": 26521986.308105197,
+   "n_params": 1314,
+   "n_quant_params": 982,
+   "s_q": 43762242.61660205,
+   "s_all": 186903.5120796334
+  },
+  {
+   "task_loss": 55.04588317871094,
+   "e_eff_beta_weighted": 251226914813.1139,
+   "ebops_total_leaves": 251226909856.0,
+   "reg": 2.886101484298706,
+   "task_norm_q": 0.49253309753336194,
+   "pen_norm_q": 26605172.37104999,
+   "task_norm_all": 115.0871799004002,
+   "pen_norm_all": 26605172.37104999,
+   "n_params": 1314,
+   "n_quant_params": 982,
+   "s_q": 54017024.4482867,
+   "s_all": 231174.075114838
+  },
+  {
+   "task_loss": 57.37295913696289,
+   "e_eff_beta_weighted": 251226914813.1139,
+   "ebops_total_leaves": 251226909856.0,
+   "reg": 2.886101484298706,
+   "task_norm_q": 0.6026408739846368,
+   "pen_norm_q": 26605172.37104999,
+   "task_norm_all": 140.4414482667338,
+   "pen_norm_all": 26605172.37104999,
+   "n_params": 1314,
+   "n_quant_params": 982,
+   "s_q": 44147640.02835997,
+   "s_all": 189439.6041866504
+  }
+ ]
+}

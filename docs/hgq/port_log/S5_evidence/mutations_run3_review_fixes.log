@@ -1,0 +1,10 @@
+private copy: /var/folders/wv/v0wbx5kn71jczwc72bxdtfsw0000gn/T/s5_mutations_lmqdkej9
+{"mutation": "M21 train_step returns the input ntv (drops the training-forward assigns; review N9)", "summary": "1 failed in 123.67s (0:02:03)", "failed": ["tests/keras_native/test_train_step.py::test_train_step_keeps_the_updated_non_trainable_state"], "killed": true}
+{"mutation": "M22 eval_step runs the model with training=True (review N13)", "summary": "1 failed in 69.50s (0:01:09)", "failed": ["tests/keras_native/test_train_step.py::test_eval_and_predict_run_in_inference_mode"], "killed": true}
+{"mutation": "M23 predict_step runs the model with training=True", "summary": "1 failed in 73.56s (0:01:13)", "failed": ["tests/keras_native/test_train_step.py::test_eval_and_predict_run_in_inference_mode"], "killed": true}
+{"mutation": "M24 HIGHEST only around the model forward, backward and loss dots at the default (review N50)", "summary": "1 failed in 13.64s", "failed": ["tests/keras_native/test_train_step.py::test_steps_request_highest_matmul_precision"], "killed": true}
+{"mutation": "M25 compile_counts reads the jit dispatch-cache size", "summary": "1 failed in 2.60s", "failed": ["tests/keras_native/test_train_step.py::test_compile_counts_are_traces_not_dispatch_cache_entries"], "killed": true}
+{"mutation": "M26 maskformer_loss_from_config ignores the matcher block", "summary": "1 failed in 50.20s", "failed": ["tests/keras_native/test_train_step.py::test_maskformer_loss_from_config_reads_the_tasks_and_the_matcher"], "killed": true}
+private copy: /var/folders/wv/v0wbx5kn71jczwc72bxdtfsw0000gn/T/s5_mutations_qulc45kv
+{"mutation": "M3 matmul precision context dropped", "summary": "1 failed in 12.62s", "failed": ["tests/keras_native/test_train_step.py::test_steps_request_highest_matmul_precision"], "killed": true}
+{"mutation": "M24 HIGHEST only around the model forward, backward and loss dots at the default (review N50)", "summary": "1 failed in 13.11s", "failed": ["tests/keras_native/test_train_step.py::test_steps_request_highest_matmul_precision"], "killed": true}

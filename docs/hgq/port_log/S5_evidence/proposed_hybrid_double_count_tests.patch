@@ -1,0 +1,89 @@
+diff -ru a/src/hepattn/keras/evaluate.py b/src/hepattn/keras/evaluate.py
+--- a/src/hepattn/keras/evaluate.py	2026-10-16 10:32:26
++++ b/src/hepattn/keras/evaluate.py	2026-10-16 10:32:26
+@@ -33,8 +33,7 @@
+     """Total EBOPs of the model for a representative batch: the sum of every HGQ2 leaf's own EBOPs.
+ 
+     This is the resource estimate and, since beta reaches every leaf (R4b), also the slope of
+-    the regularization loss up to the task heads' share, which ``quant_losses()`` counts twice
+-    (see ``effective_ebops``).
++    the regularization loss (``quant_losses()`` counts each layer once since S5; see ``effective_ebops``).
+     """
+     _populate_ebops(model, batch)
+     return leaves_total_ebops(model)
+@@ -50,8 +49,8 @@
+     History: the Polaris beta sweep was inert because beta was written only to the top-level
+     keras layers, while the QSoftmax tables (99.99% of the dense model's EBOPs) are nested
+     leaves with their own beta; ``E_eff`` was then ~5 orders of magnitude below
+-    ``total_ebops``. With every leaf written, ``E_eff`` equals ``total_ebops`` plus the
+-    task heads' EBOPs, which ``quant_losses()`` counts twice.
++    ``total_ebops``. With every leaf written, ``E_eff`` equals ``total_ebops`` (before S5 plus
++    the task heads' EBOPs, which ``quant_losses()`` counted twice).
+ 
+     The slope comes from the two probes; the floor from a third forward at beta 0, because
+     at the probes ``beta * E_eff`` (up to ~1e9) hides the floor (~1) in float32.
+diff -ru a/tests/keras/test_beta_reaches_every_leaf.py b/tests/keras/test_beta_reaches_every_leaf.py
+--- a/tests/keras/test_beta_reaches_every_leaf.py	2026-10-16 10:32:26
++++ b/tests/keras/test_beta_reaches_every_leaf.py	2026-10-16 10:32:26
+@@ -120,7 +120,7 @@
+ def test_evaluate_reads_and_calibrates_the_leaves_the_callbacks_steer(model):
+     """hepattn.keras.evaluate (beta calibration for polaris/09_measure_beta.py, eval reports) acts on the same leaves
+     as the callbacks. Measured ($S/r4b_fix/logs/evaluate_ebops2.out): totals equal; regions sum to the total, the task
+-    heads under ``tasks``; E_eff = total + task heads (counted twice by quant_losses()) to 9.6e-8 (linformer) and
++    heads under ``tasks``; E_eff = total (each layer once since S5; before, total + task heads) to 9.6e-8 (linformer) and
+     2.2e-9 (dense) relative, tolerance 2e-7. With the top-level walk evaluate read (review probe p4) linformer total
+     2.117e11 of 2.509e11 and regions 1.845e11, and E_eff 2.463e11 on the dense model, whose total is 1.907e15.
+     """
+@@ -133,4 +133,4 @@
+     assert sum(regions.values()) == pytest.approx(total, rel=1e-6)
+     assert regions["tasks"] == pytest.approx(heads, rel=1e-6)
+     e_eff, _ = evaluate.effective_ebops(kmodel, inputs)
+-    assert e_eff == pytest.approx(total + heads, rel=2e-7)
++    assert e_eff == pytest.approx(total, rel=2e-7)
+diff -ru a/tests/keras/test_effective_ebops.py b/tests/keras/test_effective_ebops.py
+--- a/tests/keras/test_effective_ebops.py	2026-10-16 10:32:26
++++ b/tests/keras/test_effective_ebops.py	2026-10-16 10:32:26
+@@ -6,7 +6,7 @@
+ (found in R4b): beta was written only to the top-level keras layers, while most of the
+ total sits in the exp/inv tables nested inside every QSoftmax, which are HGQ2 leaves with
+ their own beta. Beta now reaches every leaf (callbacks.write_beta), and the slope is
+-`total_ebops` plus the task heads' EBOPs, which `quant_losses()` counts twice.
++`total_ebops` (since S5 `quant_losses()` counts each layer once; before, the task heads counted twice).
+ 
+ Discriminating properties, each with the wrong implementation it catches:
+ - affine: the fitted (slope, floor) predicts quant_loss at a *third*, unprobed beta --
+@@ -81,8 +81,8 @@
+     assert predicted == pytest.approx(measured, rel=1e-3), f"not affine in beta: predicted {predicted:.6g} vs measured {measured:.6g}"
+ 
+ 
+-def test_slope_is_the_leaf_total_plus_the_task_heads(built):
+-    """E_eff = total_ebops + the task heads' EBOPs (quant_losses() counts those twice). Measured on this model
++def test_slope_is_the_leaf_total(built):
++    """E_eff = total_ebops (quant_losses() counts each layer once since S5; before, E_eff = total + the task heads). Measured on this model
+     ($S/r4b_fix/logs/evaluate_ebops2.out): relative 4.2e-8 (generated Polaris models: 9.6e-8, 2.2e-9), tolerance 2e-7.
+     With beta on the top-level layers only, the slope was ~5 orders of magnitude below the total.
+     """
+@@ -93,7 +93,8 @@
+     heads = sum(leaf_ebops(m) for m in {id(m): m for m in model.tasks.modules() if id(m) in leaves}.values())
+     assert reported > 0.0
+     assert heads > 0.0
+-    assert e_eff == pytest.approx(reported + heads, rel=2e-7)
++    assert e_eff == pytest.approx(reported, rel=2e-7)
++    assert abs(e_eff - (reported + heads)) > 2e-7 * e_eff, "control: the old double count would also pass"
+ 
+ 
+ def test_restores_layer_betas(built):
+diff -ru a/tests/keras/test_polaris_config.py b/tests/keras/test_polaris_config.py
+--- a/tests/keras/test_polaris_config.py	2026-10-16 11:13:47
++++ b/tests/keras/test_polaris_config.py	2026-10-16 11:13:47
+@@ -165,8 +165,8 @@
+         model(inputs)
+     # each product counted EBOPs in this training forward (leaf.losses alone also holds regularizer terms)
+     product_ebops = sum(float(ebops_term(leaf)) for leaf in products.values())
+-    # the walk yields the task heads twice (model.tasks and model.decoder.tasks, port_log/S3.md deviation 9)
+-    walked = [(id(layer) in products, float(t)) for layer in model.keras_layers() for t in layer.losses]
++    # quant_losses() sums each keras layer once (S5; keras_layers() yields the task heads twice, S3.md deviation 9)
++    walked = [(id(layer) in products, float(t)) for layer in model.unique_keras_layers() for t in layer.losses]
+     walked_products = sum(t for is_product, t in walked if is_product)
+     assert walked_products >= product_ebops * (1 - 1e-6)
+     assert float(model.quant_losses()) == pytest.approx(sum(t for _, t in walked), rel=1e-5)

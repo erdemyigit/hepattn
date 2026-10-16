@@ -127,14 +127,23 @@ class KerasMaskFormer(MaskFormer):
                 seen.add(id(module))
                 yield module
 
-    def quant_losses(self) -> Tensor:
-        """Sum of the HGQ2 EBOPs regularization terms collected from all keras layers.
+    def unique_keras_layers(self) -> list:
+        """``keras_layers()`` with each layer object once (first occurrence).
 
-        Keras layers register their EBOPs*beta losses via add_loss during training-mode
-        calls; collecting from top-level layers only avoids double counting (Layer.losses
-        already aggregates sublayers such as quantizers).
+        The task modules are registered twice in the torch module tree (``model.tasks`` and ``model.decoder.tasks``), so
+        ``keras_layers()`` yields every task-head layer twice (org model: 211 walked, 183 unique).
         """
-        terms = [loss for layer in self.keras_layers() for loss in layer.losses]
+        return list({id(layer): layer for layer in self.keras_layers()}.values())
+
+    def quant_losses(self) -> Tensor:
+        """Sum of the HGQ2 loss terms (EBOPs * beta, and the quantizer weight regularizers) of every keras layer, once.
+
+        Keras layers register their EBOPs*beta losses via add_loss during training-mode calls; collecting from top-level
+        layers only avoids double counting (Layer.losses already aggregates sublayers such as quantizers), and each
+        layer object is counted once (``unique_keras_layers``). Before S5 the task heads counted twice (+8.9% of the
+        penalty in G2 on the org model); the native step (``stateless_call(return_losses=True)``) counts each once.
+        """
+        terms = [loss for layer in self.unique_keras_layers() for loss in layer.losses]
         if not terms:
             return torch.zeros((), device=next(self.parameters()).device)
         return torch.stack([torch.as_tensor(t) for t in terms]).sum()

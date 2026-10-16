@@ -19,11 +19,14 @@ Env overrides:
     HGQ_DEVICES    GPUs for one DDP run           (default 4; validated run 7598515)
     HGQ_PRECISION  bf16-mixed | 32                (default bf16-mixed)
     HGQ_BETA_MODE  pid | schedule                 (default pid)
-    HGQ_BETA_END   final EBOPs penalty weight     (default 4.0e-15, schedule mode only)
-    HGQ_TARGET_EBOPS   EBOPs setpoint for pid mode    (default 1.0e15)
-    HGQ_INIT_BETA      starting beta for pid mode     (default 2.6e-10)
-    HGQ_MAX_BETA       pid beta ceiling               (default 1.0e-7)
+    HGQ_BETA_END   final EBOPs penalty weight     (default 4.0e-15, schedule mode only; NOT re-derived for the
+                                                   org model, see docs/hgq/BETA_SETPOINTS.md)
+    HGQ_TARGET_EBOPS   EBOPs setpoint for pid mode    (default 1.5e11; PROVISIONAL, docs/hgq/BETA_SETPOINTS.md)
+    HGQ_INIT_BETA      starting beta for pid mode     (default 8.7e-11; PROVISIONAL)
+    HGQ_MAX_BETA       pid beta ceiling               (default 3.3e-8; PROVISIONAL)
+    HGQ_MIN_BETA       pid beta floor, > 0            (default 2.3e-13; PROVISIONAL)
     HGQ_PID_I          pid integral gain              (default 0.5)
+    HGQ_BETA_START     schedule-mode ramp start, > 0  (default 1e-3 x HGQ_BETA_END)
     HGQ_PID_WARMUP_EPOCHS  epochs before pid engages  (default 2)
     HGQ_EPOCHS     max epochs                     (default 20)
     HGQ_WARMUP_EPOCHS  beta ramp length, in epochs (default 1.0)
@@ -66,29 +69,34 @@ BETA_END = float(os.environ.get("HGQ_BETA_END", "4.0e-15"))
 # needs the right beta known in advance; we do not have it, and calibrating it from
 # the reported total_ebops overstated the loss slope by 10,410x.
 #
-# Setpoint: the measured total is 1.6755e15, so 1.0e15 asks for a 40% cut. This is
-# deliberately NOT the hardware budget -- an XCVU13P holds ~2.15e6 EBOPs under
-# LUTs ~ exp(0.985*log(EBOPs)) against its 1.728M LUTs, i.e. 8e8x below where we are.
-# A setpoint that far away saturates the controller on its first epoch and degenerates
-# into training at max_beta. 1.0e15 is the setpoint that asks a question we can answer
-# in one run: does closed-loop pressure move the reported cost AT ALL?
-# STALE FOR THE ORG/MAIN MODEL: 1.6755e15 (and so this setpoint, INIT_BETA and the PID gain
-# below) was measured on the pre-retarget model, where 99.99% of the EBOPs came from the
-# decoder cross-attention softmax's -1e9 mask fill. The masked-Linformer attend softmax
-# takes no mask, so that term goes away (RETARGET_ORG_MAIN.md section 7, risk 1).
-# Re-measure total EBOPs on the R4b model and re-derive these before any sweep.
+# PROVISIONAL setpoints for the org/main model (masked Linformer k=64), re-derived on 2026-10-16
+# in docs/hgq/BETA_SETPOINTS.md (S5); confirm them with a Polaris beta scan before a sweep.
+# The pre-retarget values (1.0e15 / 2.6e-10 / 1.0e-7) belonged to a model whose 1.6755e15 EBOPs were
+# 99.98% decoder softmax tables that beta never reached, and INIT_BETA came from a scan at the old LR.
+#
+# MODEL_EBOPS: total EBOPs of this generated model at its initial bitwidths (exact torch-backend sum over
+# every HGQ2 leaf, CLIC dummy events: 2.509e11 / 2.512e11 / 2.512e11; the native JAX read-out agrees;
+# Polaris G2 on real events: 2.513e11). The old model measured 1.6755e15.
+MODEL_EBOPS = 2.511e11
 OLD_MODEL_EBOPS = 1.6755e15
-TARGET_EBOPS = float(os.environ.get("HGQ_TARGET_EBOPS", "1.0e15"))
-# Top of the recalibrated sweep -- the beta that moved /f furthest (0.165 bits off its
-# 8-bit init) without destabilising the task loss.
-INIT_BETA = float(os.environ.get("HGQ_INIT_BETA", "2.6e-10"))
-# Safety valve. total_ebops is a step function here (~0.6 bits of headroom before it
-# moves), so an unresponsive process variable WILL wind the integral up indefinitely.
-# Saturating this ceiling is an expected and informative outcome, not a failure.
-MAX_BETA = float(os.environ.get("HGQ_MAX_BETA", "1.0e-7"))
-# HGQ2's default integral gain of 2e-3 is tuned for hundred-epoch runs: at an error of
-# log10(1.6755) = 0.224 it moves beta by a factor of 1.001 per epoch. QAT costs 12.7
-# h/epoch here, so gain for roughly one decade per ten epochs instead.
+# Setpoint: the documented 40%-cut rule of the old setpoint (1.0e15 / 1.6755e15 = 0.597), applied to
+# MODEL_EBOPS. Deliberately NOT the hardware budget (an XCVU13P holds ~2.15e6 EBOPs): a setpoint that far
+# away saturates the controller on its first epoch. It asks whether closed-loop pressure moves the cost.
+TARGET_EBOPS = float(os.environ.get("HGQ_TARGET_EBOPS", "1.5e11"))
+# Starting beta: keeps the old calibrated ratio of penalty gradient to task gradient on the quantizer
+# (bitwidth) variables: 2.6e-10 x s_old / s_new = 2.6e-10 x 0.333 (per-batch 0.303-0.357), with
+# s = |grad_q(EBOPs penalty per unit beta)| / |grad_q(task loss)|, each model as its own callbacks
+# apply beta, on the same 3 x 2 CLIC dummy events (old model: commit 37ff127).
+INIT_BETA = float(os.environ.get("HGQ_INIT_BETA", "8.7e-11"))
+# Safety valve: the old 2.585 decades of headroom above INIT_BETA (1.0e-7 / 2.6e-10). An unresponsive
+# process variable winds the integral up; saturating the ceiling is informative, not a failure.
+MAX_BETA = float(os.environ.get("HGQ_MAX_BETA", "3.3e-8"))
+# Floor: the same 2.585 decades below INIT_BETA. It must be > 0: the JAX driver reads EBOPs as
+# penalty / beta (KERAS_JAX_PLAN.md section 3.6). The old default was 0.
+MIN_BETA = float(os.environ.get("HGQ_MIN_BETA", "2.3e-13"))
+# HGQ2's default integral gain of 2e-3 is tuned for hundred-epoch runs. Gain for roughly one decade per
+# ten epochs at the initial error log10(MODEL_EBOPS / TARGET_EBOPS) = log10(2.511e11 / 1.5e11) = 0.224:
+# 1 / (10 x 0.224) = 0.45, rounded to 0.5 (the old model's error was 0.224 too, by the same 40% rule).
 PID_I = float(os.environ.get("HGQ_PID_I", "0.5"))
 PID_WARMUP_EPOCHS = int(os.environ.get("HGQ_PID_WARMUP_EPOCHS", "2"))
 EPOCHS = int(os.environ.get("HGQ_EPOCHS", "20"))
@@ -105,6 +113,9 @@ BETA_END_EFFECTIVE = BETA_END * EBOPS_EVERY
 # comparable to the BetaScheduler runs.
 INIT_BETA_EFFECTIVE = INIT_BETA * EBOPS_EVERY
 MAX_BETA_EFFECTIVE = MAX_BETA * EBOPS_EVERY
+MIN_BETA_EFFECTIVE = MIN_BETA * EBOPS_EVERY
+# schedule mode: the ramp starts above 0, so that every step has an EBOPs read-out (penalty / beta)
+BETA_START_EFFECTIVE = float(os.environ.get("HGQ_BETA_START", str(1e-3 * BETA_END))) * EBOPS_EVERY
 
 # Beta ramp length. This was hardcoded at 42000 optimizer steps, which at 7769
 # steps/epoch meant beta only reached full strength at epoch 5.4 — a diagnostic sweep
@@ -254,13 +265,14 @@ if BETA_MODE == "pid":
             "i": PID_I,
             "warmup_epochs": PID_WARMUP_EPOCHS,
             "max_beta": MAX_BETA_EFFECTIVE,
+            "min_beta": MIN_BETA_EFFECTIVE,
         },
     })
 else:
     # Open-loop ramp: kept for reproducing the earlier sweeps.
     t["callbacks"].append({
         "class_path": "hepattn.keras.callbacks.BetaScheduler",
-        "init_args": {"beta_start": 0.0, "beta_end": BETA_END_EFFECTIVE, "warmup_steps": WARMUP_STEPS},
+        "init_args": {"beta_start": BETA_START_EFFECTIVE, "beta_end": BETA_END_EFFECTIVE, "warmup_steps": WARMUP_STEPS},
     })
 if not any("EBOPsMonitor" in c.get("class_path", "") for c in t["callbacks"]):
     t["callbacks"].append({"class_path": "hepattn.keras.callbacks.EBOPsMonitor"})
@@ -297,12 +309,15 @@ print(f"  precision  {PRECISION}")
 print(f"  lr max     {LR_MAX:.3e}   clip {CLIP}   (Lightning averages over accum: no rescaling)")
 print(f"  epochs     {EPOCHS}")
 if BETA_MODE == "pid":
-    print(f"  beta       PID -> target {TARGET_EBOPS:.3e} EBOPs (measured {OLD_MODEL_EBOPS:.4e} on the PRE-RETARGET model)")
-    if ATTN == "linformer":
-        print("             WARNING: setpoint, init beta and gain are not re-derived for this model; re-measure EBOPs first")
-    print(f"             init {INIT_BETA_EFFECTIVE:.2e}  ceiling {MAX_BETA_EFFECTIVE:.2e}  i={PID_I}  warmup {PID_WARMUP_EPOCHS} epoch(s)")
+    print(f"  beta       PID -> target {TARGET_EBOPS:.3e} EBOPs (model at init: {MODEL_EBOPS:.4e}; PROVISIONAL, BETA_SETPOINTS.md)")
+    if ATTN != "linformer":
+        print("             WARNING: the setpoints are derived for the linformer model; re-derive them for dense attention")
+    print(
+        f"             init {INIT_BETA_EFFECTIVE:.2e}  ceiling {MAX_BETA_EFFECTIVE:.2e}  floor {MIN_BETA_EFFECTIVE:.2e}"
+        f"  i={PID_I}  warmup {PID_WARMUP_EPOCHS} epoch(s)"
+    )
     headroom = math.log10(MAX_BETA_EFFECTIVE / INIT_BETA_EFFECTIVE)
-    err = math.log10(OLD_MODEL_EBOPS / TARGET_EBOPS)
+    err = math.log10(MODEL_EBOPS / TARGET_EBOPS)
     print(
         f"             {headroom:.2f} decades of headroom; at a constant error of {err:.3f}"
         f" the ceiling is reached in ~{headroom / (PID_I * err):.0f} epochs"
