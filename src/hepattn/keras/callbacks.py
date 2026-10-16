@@ -18,17 +18,19 @@ def quantized_leaves(model) -> list:
     return list(walk() if walk is not None else model.keras_layers())
 
 
-def total_ebops(model) -> float:
-    """Sum of every leaf's own EBOPs (``_ebops``; the ``ebops`` property of QSoftmax adds its tables, which are leaves
-    as well, so it is used only for layers without ``_ebops``).
+def leaf_ebops(layer) -> float:
+    """One leaf's own EBOPs (``_ebops``; the ``ebops`` property of QSoftmax adds its tables, which are leaves as well,
+    so it is used only for layers without ``_ebops``). HGQ2 stores ``_ebops`` as uint32 (RETARGET_ORG_MAIN.md
+    section 7, risk 3): a leaf above 4.29e9 EBOPs wraps.
     """
-    total = 0.0
-    for layer in quantized_leaves(model):
-        own = getattr(layer, "_ebops", None)
-        ebops = own.value if own is not None else getattr(layer, "ebops", None)
-        if ebops is not None:
-            total += float(torch.as_tensor(ebops))
-    return total
+    own = getattr(layer, "_ebops", None)
+    ebops = own.value if own is not None else getattr(layer, "ebops", None)
+    return 0.0 if ebops is None else float(torch.as_tensor(ebops))
+
+
+def total_ebops(model) -> float:
+    """Sum of every leaf's own EBOPs (``leaf_ebops``)."""
+    return sum((leaf_ebops(layer) for layer in quantized_leaves(model)), 0.0)
 
 
 def write_beta(model, beta: float) -> None:

@@ -17,7 +17,8 @@ pytest.importorskip("hepattn.keras", reason="hgq dependency group not installed"
 
 import org_model_utils as U  # ty: ignore [unresolved-import]
 
-from hepattn.keras.callbacks import BetaPID, BetaScheduler, EBOPsMonitor, total_ebops
+from hepattn.keras import evaluate
+from hepattn.keras.callbacks import BetaPID, BetaScheduler, EBOPsMonitor, leaf_ebops, total_ebops
 
 
 class Trainer:
@@ -109,3 +110,27 @@ def test_ebops_monitor_counts_every_leaf_once(model):
         assert top < 0.9 * own
     else:  # QSoftmax.ebops adds its tables, so for dense attention the top-level read was already complete
         assert top == pytest.approx(own, rel=1e-6)
+
+
+def task_head_ebops(kmodel) -> float:
+    leaves = {id(x) for x in kmodel.quantized_leaves()}
+    return sum(leaf_ebops(m) for m in {id(m): m for m in kmodel.tasks.modules() if id(m) in leaves}.values())
+
+
+def test_evaluate_reads_and_calibrates_the_leaves_the_callbacks_steer(model):
+    """hepattn.keras.evaluate (beta calibration for polaris/09_measure_beta.py, eval reports) acts on the same leaves
+    as the callbacks. Measured ($S/r4b_fix/logs/evaluate_ebops2.out): totals equal; regions sum to the total, the task
+    heads under ``tasks``; E_eff = total + task heads (counted twice by quant_losses()) to 9.6e-8 (linformer) and
+    2.2e-9 (dense) relative, tolerance 2e-7. With the top-level walk evaluate read (review probe p4) linformer total
+    2.117e11 of 2.509e11 and regions 1.845e11, and E_eff 2.463e11 on the dense model, whose total is 1.907e15.
+    """
+    _, kmodel, inputs = model
+    total = evaluate.total_ebops(kmodel, inputs)
+    assert total == pytest.approx(total_ebops(kmodel), rel=1e-6)
+    heads = task_head_ebops(kmodel)
+    assert heads > 0
+    regions = evaluate.ebops_by_region(kmodel, inputs)
+    assert sum(regions.values()) == pytest.approx(total, rel=1e-6)
+    assert regions["tasks"] == pytest.approx(heads, rel=1e-6)
+    e_eff, _ = evaluate.effective_ebops(kmodel, inputs)
+    assert e_eff == pytest.approx(total + heads, rel=2e-7)

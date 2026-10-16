@@ -69,6 +69,11 @@ calibrated first, and the obvious way to do it is wrong.** See the warning below
 > whose cost never enters the regularization loss. So `beta*E_eff` was ~1e-1 against a
 > task loss of ~30, not the ~6.8 the arithmetic predicted.
 >
+> **Corrected cause (R4b, `docs/hgq/port_log/R4b.md` deviation 3):** the QSoftmax cost does enter the loss, through
+> the exp/inv tables nested inside each QSoftmax. Those are HGQ2 leaves with their own beta, and the callbacks and
+> `effective_ebops` wrote beta only to the top-level layers. Beta now reaches every leaf, and `E_eff` equals
+> `total_ebops` plus the task heads' EBOPs. The table above was measured before that fix.
+>
 > **Calibrate against `E_eff`:**
 > ```python
 > from hepattn.keras.evaluate import effective_ebops

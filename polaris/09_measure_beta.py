@@ -125,9 +125,9 @@ regions = ebops_by_region(model, batch)
 bits = [p.detach().float().mean().item() for name, p in model.named_parameters() if name.endswith("/b")]
 
 print("\n================ EBOPs accounting ================")
-print(f"  reported total_ebops      {reported:>14.4g}   <- resource estimate, NOT the objective")
+print(f"  reported total_ebops      {reported:>14.4g}   <- resource estimate, every HGQ2 leaf once")
 print(f"  effective E_eff (slope)   {e_eff:>14.4g}   <- what beta trades against the task loss")
-print(f"  ratio total/E_eff         {reported / e_eff:>14.4g}")
+print(f"  ratio total/E_eff         {reported / e_eff:>14.4g}   <- below 1 by the task heads' share (quant_losses counts them twice)")
 print(f"  constant floor            {floor:>14.4g}   <- beta cannot influence this")
 print("\n  by region (reported):")
 for name, value in regions.items():

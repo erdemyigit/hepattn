@@ -1,18 +1,20 @@
 """effective_ebops: measure the EBOPs coefficient the training loss actually minimizes.
 
 Background: the Polaris beta sweep was calibrated from `total_ebops` and came out inert
--- four decades of beta moved the mean learned bitwidth by 0.01%. Cause: `quant_losses()`
-is affine in beta with a slope that is ~5 orders of magnitude below `total_ebops`, because
-most of the reported total comes from QSoftmax layers whose cost never enters the
-regularization loss. `effective_ebops` measures the slope instead.
+-- four decades of beta moved the mean learned bitwidth by 0.01%. `quant_losses()` is
+affine in beta, and its slope was ~5 orders of magnitude below `total_ebops`. The cause
+(found in R4b): beta was written only to the top-level keras layers, while most of the
+total sits in the exp/inv tables nested inside every QSoftmax, which are HGQ2 leaves with
+their own beta. Beta now reaches every leaf (callbacks.write_beta), and the slope is
+`total_ebops` plus the task heads' EBOPs, which `quant_losses()` counts twice.
 
 Discriminating properties, each with the wrong implementation it catches:
 - affine: the fitted (slope, floor) predicts quant_loss at a *third*, unprobed beta --
   catches a function that returns plausible-looking but unrelated numbers.
-- distinct: the slope is orders of magnitude below `total_ebops` -- catches "fixing" this
-  by aliasing it to total_ebops, which is exactly the bug that caused the inert sweep.
-- restores: layer betas are unchanged afterwards -- catches a probe that silently leaves
-  the model perturbed, which would corrupt a training run that called it mid-flight.
+- leaves: the slope equals the leaf total plus the task heads -- catches a beta probe that
+  misses nested leaves (the old slope was ~1e-5 of this) or a total that misses them.
+- restores: every leaf's beta is unchanged afterwards -- catches a probe that silently
+  leaves the model perturbed, which would corrupt a training run that called it mid-flight.
 - calibrates: beta derived as f*L/E_eff really does make the resource term f*L --
   catches sign and scale errors in the fit.
 """
@@ -26,7 +28,7 @@ from parity_utils import make_padded_batch  # noqa: F401  (ty: ignore) — pins 
 from test_maskformer_parity import clic_dummy_batch, make_keras_model  # ty: ignore
 
 from hepattn.keras import keras
-from hepattn.keras.callbacks import BitwidthMonitor
+from hepattn.keras.callbacks import BitwidthMonitor, leaf_ebops, write_beta
 from hepattn.keras.evaluate import effective_ebops, total_ebops
 
 QUANT = {
@@ -48,13 +50,16 @@ def built():
 
 
 def _betas(model):
-    return [float(keras.ops.convert_to_numpy(layer._beta)) for layer in model.keras_layers() if getattr(layer, "_beta", None) is not None]  # noqa: SLF001
+    return [float(keras.ops.convert_to_numpy(layer._beta)) for layer in model.quantized_leaves()]  # noqa: SLF001
+
+
+def _restore(model, betas):
+    for layer, beta in zip(model.quantized_leaves(), betas, strict=True):
+        layer._beta.assign(beta)  # noqa: SLF001
 
 
 def _quant_loss_at(model, inputs, beta):
-    layers = [layer for layer in model.keras_layers() if getattr(layer, "_beta", None) is not None]
-    for layer in layers:
-        layer._beta.assign(beta)  # noqa: SLF001
+    write_beta(model, beta)
     model.train()
     with torch.no_grad():
         model(inputs)
@@ -69,24 +74,26 @@ def test_affine_prediction_holds_at_an_unprobed_beta(built):
 
     probe = 1e-7  # strictly between the two fitted points, and not one of them
     predicted = floor + probe * e_eff
+    betas = _betas(model)
     measured = _quant_loss_at(model, inputs, probe)
-    for layer in model.keras_layers():  # restore
-        if getattr(layer, "_beta", None) is not None:
-            layer._beta.assign(QUANT["ebops"]["beta0"])  # noqa: SLF001
+    _restore(model, betas)
 
     assert predicted == pytest.approx(measured, rel=1e-3), f"not affine in beta: predicted {predicted:.6g} vs measured {measured:.6g}"
 
 
-def test_slope_is_far_below_total_ebops(built):
-    """The two must not be conflated — treating them as equal is the original bug."""
+def test_slope_is_the_leaf_total_plus_the_task_heads(built):
+    """E_eff = total_ebops + the task heads' EBOPs (quant_losses() counts those twice). Measured on this model
+    ($S/r4b_fix/logs/evaluate_ebops2.out): relative 4.2e-8 (generated Polaris models: 9.6e-8, 2.2e-9), tolerance 2e-7.
+    With beta on the top-level layers only, the slope was ~5 orders of magnitude below the total.
+    """
     model, inputs = built
     e_eff, _ = effective_ebops(model, inputs)
     reported = total_ebops(model, inputs)
+    leaves = {id(layer) for layer in model.quantized_leaves()}
+    heads = sum(leaf_ebops(m) for m in {id(m): m for m in model.tasks.modules() if id(m) in leaves}.values())
     assert reported > 0.0
-    assert e_eff < reported / 1e3, (
-        f"effective slope {e_eff:.4g} is within 1000x of total_ebops {reported:.4g} — "
-        "if these ever agree, the beta-calibration rationale needs revisiting"
-    )
+    assert heads > 0.0
+    assert e_eff == pytest.approx(reported + heads, rel=2e-7)
 
 
 def test_restores_layer_betas(built):
@@ -104,10 +111,9 @@ def test_calibration_round_trip(built):
 
     task_loss, fraction = 30.0, 0.25
     beta = fraction * task_loss / e_eff
+    betas = _betas(model)
     measured = _quant_loss_at(model, inputs, beta) - floor
-    for layer in model.keras_layers():  # restore
-        if getattr(layer, "_beta", None) is not None:
-            layer._beta.assign(QUANT["ebops"]["beta0"])  # noqa: SLF001
+    _restore(model, betas)
 
     assert measured == pytest.approx(fraction * task_loss, rel=1e-2), f"calibration off: wanted {fraction * task_loss:.4g}, got {measured:.4g}"
 
