@@ -88,6 +88,8 @@ MUTANTS = {
     ],
     "m18_posinf_to_minus_big": [(MATCHING, "posinf=_BIG", "posinf=-_BIG")],
     "m19_scipy_rejected": [(OBJECTIVE, '_HOST_SOLVERS = {"scipy", "lap1015_late"}', '_HOST_SOLVERS = {"lap1015_late"}')],
+    # fix round 2 (reviewer mutant r08 / C_big_f32max that survived e812fa9; equivalent for scipy)
+    "m20_big_is_f32max": [(MATCHING, "_BIG = float(np.finfo(np.float32).max / 10)", "_BIG = float(np.finfo(np.float32).max)")],
 }
 
 

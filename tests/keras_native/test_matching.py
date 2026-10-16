@@ -48,6 +48,22 @@ def _sanitised(costs):
     return np.nan_to_num(costs, nan=BIG, posinf=BIG, neginf=-BIG)
 
 
+def test_sentinel_equals_torch_prepare_costs():
+    """``matching._BIG`` and the local ``BIG`` equal the sentinel torch ``Matcher._prepare_costs`` writes for
+    NaN/+inf/-inf. scipy gives the same assignment for f32max and f32max/10, so the matched-total tests cannot
+    see a wrong sentinel; this pins the value itself.
+    """
+    costs = np.array([[[np.nan, np.inf], [-np.inf, 0.5]]], dtype=np.float32)
+    prepared, _ = Matcher(default_solver="scipy", adaptive_solver=False)._prepare_costs(torch.from_numpy(costs))  # noqa: SLF001
+    prepared = prepared.swapaxes(1, 2)  # back to [B, P, T]
+    torch_big = float(prepared[0, 0, 0])
+    assert torch_big == float(prepared[0, 0, 1]) == -float(prepared[0, 1, 0])
+    assert prepared[0, 1, 1] == np.float32(0.5)
+    assert np.float32(matching._BIG) == np.float32(torch_big)  # noqa: SLF001
+    assert np.float32(BIG) == np.float32(torch_big)
+    np.testing.assert_array_equal(_sanitised(costs), prepared)
+
+
 @pytest.mark.parametrize("nonfinite", [False, True], ids=["finite", "nan-and-inf"])
 def test_matched_total_cost_equals_torch_matcher_over_100_batches(nonfinite):
     """Matched totals equal torch ``Matcher`` (scipy) to rel 1e-6. With NaN/inf costs both sanitise to
