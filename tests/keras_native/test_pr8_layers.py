@@ -6,12 +6,17 @@ Covered: ``from_config`` of the merged config, FastLayerNorm, ``dense_norm_place
 layer-0 classification head, and the batch-of-one all-valid path. The masked-Linformer attention is lane R2's: the
 float parity rows here use dense attention (``attn_type: torch``), which is permutation-equivariant, so sorting is
 tested through its mechanics (sort index, round trip, a position-marking stub layer). Every tolerance is 2x the
-measured maximum (docs/hgq/port_log/R3.md); each has a control that exceeds it by at least 10x.
+measured maximum (docs/hgq/port_log/R3.md), except the whole-model rows, which keep the plan's ``maskformer.e2e``
+tolerance (``E2E``; plan 5.8, re-measured by R5); each has a control that exceeds it by at least 10x.
 """
 
+import collections
 import copy
 import importlib
+import inspect
+import itertools
 import math
+import re
 from pathlib import Path
 
 import jax
@@ -22,6 +27,7 @@ import torch
 import yaml
 from torch import nn
 
+from hepattn.keras_native.attention import Attention as NAttention
 from hepattn.keras_native.decoder import MaskFormerDecoderLayer as NDecoderLayer
 from hepattn.keras_native.dense import Dense as NDense
 from hepattn.keras_native.encoder import Encoder as NEncoder
@@ -30,6 +36,7 @@ from hepattn.keras_native.encoder import sort_index as native_sort_index
 from hepattn.keras_native.factory import LayerFactory
 from hepattn.keras_native.maskformer import from_config
 from hepattn.keras_native.norm import make_norm
+from hepattn.models.activation import SwiGLU
 from hepattn.models.decoder import MaskFormerDecoder, MaskFormerDecoderLayer
 from hepattn.models.dense import Dense
 from hepattn.models.encoder import Encoder
@@ -41,16 +48,17 @@ from .golden.cases import QUANT_SPECS
 from .golden.mf_cases import clic_dummy_batch
 from .parity_utils import assert_parity, max_errors
 from .porting import perturb_affine_params, port_any_attention, port_dense, port_maskformer, port_residual
-from .test_maskformer import assert_tree_parity, run_pair
+from .test_maskformer import assert_tree_parity, flatten_torch, run_pair
 
 REPO = Path(__file__).resolve().parents[2]
 CLIC = REPO / "src/hepattn/experiments/clic"
 SCALE_DICT = str(CLIC / "configs/clic_var_transform.yaml")
 
-# R2 lane: native build_attention still routes attn_type "linformer" to Helen's layer and ignores linformer_k (k=256).
-R2_LINFORMER_XFAIL = pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="R2: masked-Linformer branch with linformer_k (RETARGET_ORG_MAIN.md section 5.6)"
-)
+# Before the R2 merge, native build_attention routes attn_type "linformer" to Helen's layer (k=256, no linformer_core),
+# so the masked-Linformer rows are skipped. The condition is on the code, not a strict xfail: once R2's Attention (with
+# linformer_core) is in the tree they run as plain tests, and a wrong result fails instead of hiding as an xfail.
+R2_LANDED = "linformer_core" in inspect.signature(NAttention.__init__).parameters
+R2_REQUIRED = pytest.mark.skipif(not R2_LANDED, reason="needs R2's masked-Linformer Attention (RETARGET_ORG_MAIN.md section 5.6)")
 
 # Tolerances: 2x the measured maximum (R3.md, "Gates"; $S/r3/measure.out). The whole-model rows keep the plan's
 # maskformer.e2e tolerance (5e-5 / 1e-4, re-measured by R5); measured here: 8.6e-6 abs, 7% of it.
@@ -60,6 +68,7 @@ TOL_ENC = {"atol": 2 * 9.54e-7, "rtol": 0.0}
 TOL_DEC = {"atol": 2 * 9.54e-7, "rtol": 0.0}
 TOL_B1_EQUAL = 2 * 1.37e-6
 E2E = {"atol": 5e-5, "rtol": 1e-4}
+TOL_JIT_EAGER = 2 * 1.81e-5  # final mask logits, jit vs eager (R3_evidence/fix2/measure_jit_eager.out)
 LOGIT_ATTN_THRESHOLD = math.log(0.1 / 0.9)
 
 
@@ -219,12 +228,43 @@ def torch_param_count(module: nn.Module) -> int:
     return sum(p.numel() for p in module.parameters())
 
 
+def native_leaf_shapes(layers) -> collections.Counter:
+    return collections.Counter(tuple(v.shape) for layer in layers for v in layer.trainable_variables)
+
+
+def torch_leaf_shapes(module: nn.Module, split: bool = True) -> collections.Counter:
+    """Torch parameter shapes as the native leaves hold them: a Linear weight (out, in) as the kernel (in, out); the
+    packed attention ``in_proj`` (3 dim, dim) as three (dim, dim); a SwiGLU Linear (2h, in) as two (in, h) halves.
+    ``split=False`` keeps the packed shapes (a control: same element count, other shapes).
+    """
+    swiglu_linears = set()
+    for sub in module.modules():
+        if isinstance(sub, nn.Sequential):
+            seq = list(sub)
+            swiglu_linears |= {id(a) for a, b in itertools.pairwise(seq) if isinstance(a, nn.Linear) and isinstance(b, SwiGLU)}
+    shapes = collections.Counter()
+    for sub in module.modules():
+        for name, p in sub.named_parameters(recurse=False):
+            shape = tuple(p.shape)
+            parts = 1
+            if split and name.startswith("in_proj"):
+                parts = 3
+            elif split and id(sub) in swiglu_linears:
+                parts = 2
+            shape = (shape[0] // parts, *shape[1:])
+            if (isinstance(sub, nn.Linear) and name == "weight") or name == "in_proj_weight":
+                shape = shape[::-1]
+            shapes[shape] += parts
+    return shapes
+
+
 @pytest.mark.parametrize("dim", [32, 256])
 def test_variable_counts_equal_torch_with_dense_attention(dim):
     """Per part, the native trainable size equals the org torch parameter count (dense attention: Linformer is R2).
 
     Discriminating: an affine norm in place of FastLayerNorm adds 2 dim per norm, a packed SwiGLU with one bias half
-    or a missing register token changes the encoder count.
+    or a missing register token changes the encoder count. The per-part multisets of variable shapes (torch shapes
+    mapped by ``torch_leaf_shapes``) must also agree, so a transposed or re-split non-square kernel fails.
     """
     section = with_dense_attention(org_model_section(dim=None if dim == 256 else dim))
     tmodel = torch_from_section(section)
@@ -238,34 +278,66 @@ def test_variable_counts_equal_torch_with_dense_attention(dim):
     }
     for part, (tpart, npart) in pairs.items():
         t_count = torch_param_count(tpart)
-        n_count = sum(native_param_count(layer) for layer in npart) if isinstance(npart, list) else native_param_count(npart)
+        nlayers = list(npart) if not isinstance(npart, keras.layers.Layer) else [npart]
+        n_count = sum(native_param_count(layer) for layer in nlayers)
         assert n_count == t_count, f"{part}: native {n_count} vs torch {t_count}"
+        assert native_leaf_shapes(nlayers) == torch_leaf_shapes(tpart), f"{part}: variable shapes differ"
+        # control: the packed in_proj / SwiGLU shapes have the same element count, so only the shape check sees them
+        assert native_leaf_shapes(nlayers) != torch_leaf_shapes(tpart, split=False), part
     for ttask, ntask in zip(tmodel.tasks, nmodel.tasks, strict=True):
         assert native_param_count(ntask) == torch_param_count(ttask), ttask.name
+        assert native_leaf_shapes([ntask]) == torch_leaf_shapes(ttask), f"{ttask.name}: variable shapes differ"
     assert native_param_count(nmodel) == torch_param_count(tmodel), "whole model"
     assert not any(isinstance(m, nn.LayerNorm) and m.elementwise_affine for m in tmodel.modules()), "torch side: all norms are FastLayerNorm"
 
 
-@R2_LINFORMER_XFAIL
+NATIVE_PROJ = re.compile(r"/((?:encoder|decoder)_l(\d+)_(attn|q_ca|q_sa|kv_ca))_(?:attend|project|project_unmasked)_([EF])/")
+TORCH_PROJ = re.compile(r"^(encoder\.layers|decoder\.decoder_layers)\.(\d+)\.(attn|q_ca|q_sa|kv_ca)\.fn\.proj_([kv])$")
+
+
+def native_projection_rows(model) -> dict[tuple[str, int, str, str], int]:
+    """Rows of each native sequence projection (R2 names: E for ``proj_k``, F for ``proj_v``): the kernel of
+    ``..._{E,F}_proj`` plus the renorm ``tail``, keyed (encoder|decoder, layer, part, k|v). Every k is 64.
+    """
+    rows = collections.Counter()
+    for v in model.variables:
+        match = NATIVE_PROJ.search(v.path)
+        if match is None or not v.path.endswith(("_proj/kernel", "/tail")):
+            continue
+        assert v.shape[1] == 64, (v.path, v.shape)
+        side = "encoder" if match.group(1).startswith("encoder") else "decoder"
+        rows[side, int(match.group(2)), match.group(3), {"E": "k", "F": "v"}[match.group(4)]] += v.shape[0]
+    return dict(rows)
+
+
+def torch_projection_rows(model) -> dict[tuple[str, int, str, str], int]:
+    rows = {}
+    for name, p in model.named_parameters():
+        match = TORCH_PROJ.match(name)
+        if match is not None:
+            assert p.shape[1] == 64, (name, p.shape)
+            rows["encoder" if match.group(1) == "encoder.layers" else "decoder", int(match.group(2)), match.group(3), match.group(4)] = p.shape[0]
+    return rows
+
+
+@R2_REQUIRED
 def test_linformer_projection_shapes_equal_torch():
-    """Plan 5.1 shape gate: ``proj_k`` (168, 64) in the encoder, (160, 64) in ``q_ca`` / ``kv_ca``, and (150, 64) in
-    native ``q_sa`` against (160, 64) in torch (native drops the dead tail rows, plan 5.6). Needs R2's Linformer branch.
+    """Plan 5.1 shape gate: ``proj_k`` / ``proj_v`` (168, 64) in the encoder, (160, 64) in ``q_ca`` / ``kv_ca``, and
+    (150, 64) in native ``q_sa`` against (160, 64) in torch (native drops the dead tail rows, plan 5.6). Native rows are
+    R2's projection kernel plus its renorm tail (``kv_ca``: 150 + 10). Runs once R2's Attention is in the tree.
     """
     section = org_model_section()
     tmodel = torch_from_section(section)
     nmodel = native_from_section(section)
     inputs, _ = clic_dummy_batch()
     nmodel(inputs, training=False)
-    n_shapes = {v.path: tuple(v.shape) for v in nmodel.variables if v.path.endswith(("proj_k", "proj_v"))}
-    t_shapes = {k: tuple(p.shape) for k, p in tmodel.named_parameters() if k.endswith(("proj_k", "proj_v"))}
-    assert len(n_shapes) == len(t_shapes) == 2 * (6 + 4 * 3)
-    enc = [s for p, s in n_shapes.items() if "/encoder_l" in p]
-    assert enc and all(s == (168, 64) for s in enc), enc
-    for part, rows in (("q_ca", 160), ("kv_ca", 160), ("q_sa", 150)):
-        got = [s for p, s in n_shapes.items() if f"_{part}" in p]
-        assert got and all(s == (rows, 64) for s in got), (part, got)
-    assert all(s == (168, 64) for k, s in t_shapes.items() if k.startswith("encoder."))
-    assert all(s == (160, 64) for k, s in t_shapes.items() if k.startswith("decoder."))
+    t_rows, n_rows = torch_projection_rows(tmodel), native_projection_rows(nmodel)
+    assert len(t_rows) == 2 * (6 + 4 * 3), sorted(t_rows)
+    assert set(n_rows) == set(t_rows), set(n_rows) ^ set(t_rows)
+    expected = {"attn": 168, "q_ca": 160, "kv_ca": 160, "q_sa": 160}
+    assert all(rows == expected[key[2]] for key, rows in t_rows.items()), t_rows
+    for key, rows in n_rows.items():
+        assert rows == (150 if key[2] == "q_sa" else t_rows[key]), (key, rows)
 
 
 # ------------------------------------------------------------------------------- 5.2 FastLayerNorm
@@ -500,28 +572,38 @@ def swiglu_input(name: str, seed: int = 7) -> np.ndarray:
 
 
 def test_swiglu_leaves_and_names():
-    """Leaf rule (plan 5.4): x1 ``{name}_hidden{i}``, gate ``{name}_hidden{i}_gate`` (silu inside), elementwise einsum
-    ``{name}_hidden{i}_glu``; one graph in float and quantized mode, so both have the same variable layout.
+    """Leaf rule (plan 5.4), with the hybrid twin's names and equation (R4a): x1 ``{name}_hidden{i}_x1``, x2
+    ``{name}_hidden{i}_x2`` (silu inside), einsum ``{name}_hidden{i}_glu`` ``bnc,bnc->bnc``; one graph in float and
+    quantized mode, so both have the same variable layout. Other ranks are folded into rank 3 around the einsum.
     """
     from hgq.layers import QDense, QEinsum  # noqa: PLC0415
 
     for quant in (None, QUANT_SPECS["high"]):
         _, ndense = swiglu_pair("two_hidden", quant)
         names = [layer.name for layer in (*ndense.hidden, *ndense.gates, *ndense.products, ndense.final)]
-        assert names == ["d_hidden0", "d_hidden1", "d_hidden0_gate", "d_hidden1_gate", "d_hidden0_glu", "d_hidden1_glu", "d_final"]
+        assert names == ["d_hidden0_x1", "d_hidden1_x1", "d_hidden0_x2", "d_hidden1_x2", "d_hidden0_glu", "d_hidden1_glu", "d_final"]
         # explicit letters, not "...": HGQ2 expands "..." from a Python set, so the string would depend on the hash seed
-        assert [p.get_config()["equation"] for p in ndense.products] == ["abd,abd->abd"] * 2
+        assert [p.get_config()["equation"] for p in ndense.products] == ["bnc,bnc->bnc"] * 2
         assert [g.activation.__name__ for g in ndense.gates] == ["silu", "silu"]
         assert all(h.activation.__name__ == "linear" for h in ndense.hidden)
         assert [h.kernel.shape for h in ndense.hidden] == [(32, 48), (48, 40)] == [g.kernel.shape for g in ndense.gates]
         if quant is not None:
             assert all(isinstance(layer, QDense) for layer in (*ndense.hidden, *ndense.gates))
             assert all(isinstance(layer, QEinsum) for layer in ndense.products)
-    factory = LayerFactory(QUANT_SPECS["high"])
-    with factory.scopes():
-        rank2 = NDense(input_size=8, activation="SwiGLU", factory=factory, name="r2")
-        rank2.build((None, 8))
-    assert rank2.products[0].get_config()["equation"] == "ad,ad->ad"
+    tdense, _ = swiglu_pair("two_hidden")
+    for shape in ((5, 32), (2, 3, 7, 32)):  # rank 2 and rank 4, folded to (B, -1, C) around the rank-3 einsum
+        factory = LayerFactory(QUANT_SPECS["high"])
+        with factory.scopes():
+            folded = NDense(**SWIGLU_CONFIGS["two_hidden"], factory=factory, name="f")
+            folded.build((None, *shape[1:]))
+        assert folded.products[0].get_config()["equation"] == "bnc,bnc->bnc"
+        port_dense(tdense, folded)
+        x = np.random.default_rng(3).standard_normal(shape).astype(np.float32)
+        with torch.no_grad():
+            ref = tdense(torch.from_numpy(x)).numpy()
+        got = np.asarray(folded(x, training=False))
+        assert got.shape == ref.shape
+        assert np.abs(got - ref).max() < 0.1 * np.abs(ref).max(), "high-spec rank-folded SwiGLU must follow torch"
 
 
 @pytest.mark.parametrize("name", SWIGLU_CONFIGS)
@@ -652,9 +734,15 @@ def test_swiglu_quantized_trains_under_jit_with_ebops():
         assert leaf_ebops(leaf, shapes) > 0, f"{leaf.name}: no EBOPs"
 
 
-@pytest.mark.parametrize("part", ["encoder", "decoder_layer"])
+LINFORMER_DEC = {"attn_type": "linformer", "linformer_seq_len": DEC_N, "linformer_k": 8}
+
+
+@pytest.mark.parametrize("part", ["encoder", "decoder_layer", pytest.param("decoder_layer_linformer", marks=R2_REQUIRED)])
 def test_pr8_layers_train_under_jit(part):
-    """JIT gate at the high spec for the sorting encoder (2 layers, registers) and a PR #8 decoder layer at depth 0."""
+    """JIT gate at the high spec for the sorting encoder (2 layers, registers) and a PR #8 decoder layer at depth 0,
+    with dense and (after the R2 merge) masked-Linformer attention. Linformer: ``q_sa`` (30 queries, seq_len 40) must
+    run the unmasked project core, as org (``mask=None``); the masked core has tail rows with zero gradient here.
+    """
     factory = LayerFactory(QUANT_SPECS["high"])
     if part == "encoder":
         cfg = encoder_cfg("legacy", 2)
@@ -667,8 +755,11 @@ def test_pr8_layers_train_under_jit(part):
         kwargs = {"kv_mask": mask, "x_sort_value": sort_value}
     else:
         q, kv, attn_mask, kv_mask = decoder_inputs()
+        cfg = decoder_cfg(0)
+        if part == "decoder_layer_linformer":
+            cfg["attn_kwargs"] = {**cfg["attn_kwargs"], **LINFORMER_DEC}
         with factory.scopes():
-            module = NDecoderLayer(**decoder_cfg(0), factory=factory, name="decoder_l0")
+            module = NDecoderLayer(**cfg, factory=factory, name="decoder_l0")
             module.build(q.shape, kv.shape)
         idx = np.stack([np.random.default_rng(s).permutation(DEC_N) for s in range(2)]).astype(np.int32)
         x = q
@@ -861,6 +952,30 @@ def test_key_sort_idx_reaches_decoder_q_ca(batch):
     assert rec.calls[0]["kv_sort_idx"] is None, "without input_sort_field no sort index is passed"
 
 
+def test_model_with_sorting_traces_under_jit(batch):
+    """``MaskFormer.call`` with ``input_sort_field`` under ``jax.jit``, the inputs (``node_phi`` included) traced: one
+    compile over 3 phi permutations, each equal to the eager call. A host-side sort (numpy argsort) cannot trace.
+    """
+    nmodel = native_from_section(with_dense_attention(org_model_section(dim=32)))
+    nmodel(batch, training=False)
+    tv = [v.value for v in nmodel.trainable_variables]
+    ntv = [v.value for v in nmodel.non_trainable_variables]
+    key = "final.mask.pflow_node_logit"
+
+    @jax.jit
+    def forward(tv, ntv, inputs):
+        out, _ = nmodel.stateless_call(tv, ntv, inputs, training=False)
+        return flatten_torch(out)[key]
+
+    rng = np.random.default_rng(4)
+    for _ in range(3):
+        inputs = dict(batch)
+        inputs["node_phi"] = np.stack([rng.permutation(row) for row in batch["node_phi"]]).astype(np.float32)
+        eager = np.asarray(flatten_torch(nmodel(inputs, training=False))[key])
+        np.testing.assert_allclose(np.asarray(forward(tv, ntv, inputs)), eager, rtol=0.0, atol=TOL_JIT_EAGER)
+    assert forward._cache_size() == 1  # noqa: SLF001
+
+
 # ------------------------------------------------------------------------------ batch of one, all valid
 def one_event(num_nodes: int) -> dict:
     """The first dummy event cut to ``num_nodes`` nodes, every node valid (B=1)."""
@@ -950,7 +1065,12 @@ def test_model_encoder_layers_see_tokens_sorted_by_phi(batch):
     nmodel.encoder.layers = [rec]
     nmodel(batch, training=False)
     embed = np.asarray(nmodel.input_nets[0](batch))
-    idx = np.asarray(native_sort_index(batch["node_phi"], batch["node_valid"]))
-    regs = nmodel.encoder.num_register_tokens
-    np.testing.assert_array_equal(np.asarray(rec.tokens)[:, regs:], np.asarray(gather_tokens(embed, idx)))
-    assert not np.array_equal(np.asarray(rec.tokens)[:, regs:], embed), "the fixture's phi order must not be the input order"
+    valid = batch["node_valid"]
+    ref_idx = torch_sort_index(torch.from_numpy(batch["node_phi"]), torch.from_numpy(valid)).numpy()
+    tokens = np.asarray(rec.tokens)[:, nmodel.encoder.num_register_tokens :]
+    for event in range(len(valid)):
+        count = int(valid[event].sum())
+        np.testing.assert_array_equal(tokens[event, :count], embed[event, ref_idx[event, :count]])  # torch's valid order
+        padding = sorted(map(tuple, tokens[event, count:].tolist()))
+        assert padding == sorted(map(tuple, embed[event, ~valid[event]].tolist())), "padding last, as a set"
+    assert not np.array_equal(tokens, embed), "the fixture's phi order must not be the input order"
