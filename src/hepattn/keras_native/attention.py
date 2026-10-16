@@ -81,6 +81,8 @@ class Attention(keras.layers.Layer):
         ``"project_unmasked"`` (no mask at all: no renorm leaves and no rows of E/F past the key length), or
         ``"auto"``: ``"project"`` for a self-attention build (``k_shape`` None or the same object as ``q_shape``,
         as org's ``q is k`` test), else ``"attend"``. A call that does not match the core raises ValueError.
+        ``"auto"`` is for direct ``build`` calls: a keras auto-build of ``layer(x, x, x)`` passes distinct shape
+        tuples and resolves to ``"attend"``. Model code names the core at every call site.
 
         q/k/v kernels start as org's xavier-uniform on the packed (3 dim, dim) in-projection, U(+-sqrt(6 / (4 dim))),
         with zero bias. A hepattn norm that keras_native does not implement raises NotImplementedError (``check_norm``).
