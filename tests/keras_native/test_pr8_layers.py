@@ -980,6 +980,55 @@ def test_model_with_sorting_traces_under_jit(batch):
     assert forward._cache_size() == 1  # noqa: SLF001
 
 
+# --------------------------------------------------------------------- model, masked-Linformer attention
+def org_linformer_pair(inputs: dict, seed: int = 30, sort: bool = True):
+    """Torch and ported native MaskFormer of base.yaml + linformer.yaml at dim 32 (masked-Linformer attention, k=64)."""
+    section = org_model_section(dim=32)
+    tmodel = torch_from_section(section, seed)
+    perturb_affine_params(tmodel, seed)
+    nsection = copy.deepcopy(section)
+    if not sort:
+        nsection["model"]["init_args"]["input_sort_field"] = None
+    nmodel = native_from_section(nsection)
+    nmodel(inputs, training=False)
+    port_maskformer(tmodel, nmodel)
+    return tmodel, nmodel
+
+
+@R2_REQUIRED
+def test_org_linformer_model_equals_torch(batch, monkeypatch):
+    """R2 x R3 wiring (added at the rt/integration merge): R3's model with R2's masked-Linformer cores against org torch.
+
+    Every output at the maskformer.e2e tolerance and the attention masks exactly equal (measured 2.9e-6 max,
+    ``R-merge.md``). Controls, each > 10x the tolerance: no input sorting (measured 1.13 on the final mask logits),
+    and ``kv_sort_idx`` withheld from the decoder only, so ``q_ca`` reads E/F rows in the wrong order.
+    """
+    tmodel, nmodel = org_linformer_pair(batch)
+    assert {layer.q_ca.fn.core_kind for layer in nmodel.decoder.layers} == {"attend"}
+    out_t, out_n = run_pair(tmodel, nmodel, batch)
+    bools = assert_tree_parity("maskformer.org_linformer", out_t, out_n)
+    assert len([key for key in bools if key.endswith(".attn_mask")]) == 4
+    for key in bools:  # the boolean check is not luck: every valid logit is >= 10x the native error from the threshold
+        logit_key = key.replace("attn_mask", "mask.pflow_node_logit")
+        logit_t, logit_n = out_t[logit_key].astype(np.float64), np.asarray(out_n[logit_key])
+        keep = logit_t > -1e30
+        margin = np.abs(logit_t[keep] - LOGIT_ATTN_THRESHOLD).min()
+        assert margin >= 10 * np.abs(logit_t[keep] - logit_n[keep]).max(), f"{logit_key}: margin {margin:.2e}"
+
+    key = "final.mask.pflow_node_logit"
+    keep = out_t[key] > -1e30
+    tol = 10 * (E2E["atol"] + E2E["rtol"] * np.abs(out_t[key][keep]).max())
+    _, out_c = run_pair(*org_linformer_pair(batch, sort=False), batch)
+    diff = np.abs(out_t[key][keep].astype(np.float64) - np.asarray(out_c[key])[keep]).max()
+    assert diff > tol, f"no sorting changes {key} by only {diff:.2e}"
+
+    call = NDecoderLayer.call
+    monkeypatch.setattr(NDecoderLayer, "call", lambda self, *a, kv_sort_idx=None, **k: call(self, *a, kv_sort_idx=None, **k))  # noqa: ARG005
+    got = np.asarray(flatten_torch(nmodel(batch, training=False))[key])
+    diff = np.abs(out_t[key][keep].astype(np.float64) - got[keep]).max()
+    assert diff > tol, f"withholding kv_sort_idx from q_ca changes {key} by only {diff:.2e}"
+
+
 # ------------------------------------------------------------------------------ batch of one, all valid
 def one_event(num_nodes: int) -> dict:
     """The first dummy event cut to ``num_nodes`` nodes, every node valid (B=1)."""
