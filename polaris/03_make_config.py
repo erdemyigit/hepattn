@@ -72,6 +72,12 @@ BETA_END = float(os.environ.get("HGQ_BETA_END", "4.0e-15"))
 # A setpoint that far away saturates the controller on its first epoch and degenerates
 # into training at max_beta. 1.0e15 is the setpoint that asks a question we can answer
 # in one run: does closed-loop pressure move the reported cost AT ALL?
+# STALE FOR THE ORG/MAIN MODEL: 1.6755e15 (and so this setpoint, INIT_BETA and the PID gain
+# below) was measured on the pre-retarget model, where 99.99% of the EBOPs came from the
+# decoder cross-attention softmax's -1e9 mask fill. The masked-Linformer attend softmax
+# takes no mask, so that term goes away (RETARGET_ORG_MAIN.md section 7, risk 1).
+# Re-measure total EBOPs on the R4b model and re-derive these before any sweep.
+OLD_MODEL_EBOPS = 1.6755e15
 TARGET_EBOPS = float(os.environ.get("HGQ_TARGET_EBOPS", "1.0e15"))
 # Top of the recalibrated sweep -- the beta that moved /f furthest (0.165 bits off its
 # 8-bit init) without destabilising the task loss.
@@ -291,10 +297,12 @@ print(f"  precision  {PRECISION}")
 print(f"  lr max     {LR_MAX:.3e}   clip {CLIP}   (Lightning averages over accum: no rescaling)")
 print(f"  epochs     {EPOCHS}")
 if BETA_MODE == "pid":
-    print(f"  beta       PID -> target {TARGET_EBOPS:.3e} EBOPs (measured now: 1.6755e15)")
+    print(f"  beta       PID -> target {TARGET_EBOPS:.3e} EBOPs (measured {OLD_MODEL_EBOPS:.4e} on the PRE-RETARGET model)")
+    if ATTN == "linformer":
+        print("             WARNING: setpoint, init beta and gain are not re-derived for this model; re-measure EBOPs first")
     print(f"             init {INIT_BETA_EFFECTIVE:.2e}  ceiling {MAX_BETA_EFFECTIVE:.2e}  i={PID_I}  warmup {PID_WARMUP_EPOCHS} epoch(s)")
     headroom = math.log10(MAX_BETA_EFFECTIVE / INIT_BETA_EFFECTIVE)
-    err = math.log10(1.6755e15 / TARGET_EBOPS)
+    err = math.log10(OLD_MODEL_EBOPS / TARGET_EBOPS)
     print(
         f"             {headroom:.2f} decades of headroom; at a constant error of {err:.3f}"
         f" the ceiling is reached in ~{headroom / (PID_I * err):.0f} epochs"
