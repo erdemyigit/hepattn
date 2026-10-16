@@ -5,7 +5,7 @@ The checks come as a set, because each one alone can pass vacuously:
 - the paired delta: the high spec stays close to the torch float net, the low spec is at least 10x further away and
   still correlated with it (a low spec that zeroes every weight would also be "far away");
 - liveness: switching off the input quantizer of any one of the three leaves changes the low-spec output;
-- EBOPs: every leaf adds a positive, differentiable EBOPs term in training mode.
+- EBOPs: in training mode every leaf counts EBOPs (leaf.ebops > 0) and adds the differentiable term beta * ebops.
 
 The high-spec floor (1.1e-2 to 1.3e-2) is the HGQ2 default bias quantizer, which the factory scopes do not set:
 a plain SiLU Dense(256) has the same floor (1.31e-2, R4a log). That floor hides any SwiGLU error below about 1e-2, so
@@ -135,12 +135,22 @@ def test_quantized_swiglu_leaves_are_live(name):
             assert change > 1e-3, f"input quantizer of {leaf.name} is inert (output change {change:.3e})"
 
 
+def ebops_term(leaf) -> torch.Tensor:
+    """The EBOPs loss term of a leaf after a training-mode forward.
+
+    leaf.losses also holds the quantizers' regularizer terms (3.3e-3 each), so a nonzero sum does not show that the
+    leaf counted EBOPs: a call without training=True leaves leaf.ebops at 0 and adds no beta * ebops term.
+    """
+    ebops, beta = float(leaf.ebops), float(leaf.beta)
+    assert ebops > 0 and beta > 0, f"{leaf.name}: ebops {ebops}, beta {beta} (called without training=True?)"
+    terms = [t for t in leaf.losses if float(t) == pytest.approx(beta * ebops, rel=1e-5)]
+    assert len(terms) == 1, f"{leaf.name}: no loss term equals beta * ebops = {beta * ebops:.4e}: {[float(t) for t in leaf.losses]}"
+    return terms[0]
+
+
 def test_quantized_swiglu_ebops_per_leaf():
     tdense, x = fixture("ffn_256")
     kdense = quantized_twin(tdense, HIGH_QUANT, x).train()
     kdense(x)
-    for leaf in (kdense.hidden[0], kdense.gates[0], kdense.products[0]):
-        assert leaf.losses, f"{leaf.name} added no EBOPs loss"
-        term = sum(leaf.losses)
-        assert term.requires_grad, f"{leaf.name}: EBOPs term is not differentiable"
-        assert float(term) / float(leaf.beta) > 0, f"{leaf.name}: zero EBOPs"
+    for leaf in (kdense.hidden[0], kdense.gates[0], kdense.products[0], kdense.final):
+        assert ebops_term(leaf).requires_grad, f"{leaf.name}: EBOPs term is not differentiable"

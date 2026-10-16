@@ -17,6 +17,7 @@ pytest.importorskip("hepattn.keras", reason="hgq dependency group not installed"
 
 import org_model_utils as U  # ty: ignore [unresolved-import]
 import yaml
+from test_swiglu_quantized import ebops_term  # ty: ignore [unresolved-import]
 
 from hepattn.keras.dense import KerasDense
 from hepattn.keras.encoder import KerasEncoder
@@ -113,15 +114,18 @@ def test_swiglu_products_are_trained_with_the_model(generated):
     optimized = {id(p) for p in decay + quant}
     leaf_vars = [w for leaf in products.values() for w in leaf.trainable_weights]
     assert leaf_vars and all(id(w.value) in optimized for w in leaf_vars)
+    for layer in model.keras_layers():  # as BetaScheduler/BetaPID set it; the config's initial beta is 0
+        if getattr(layer, "_beta", None) is not None:
+            layer._beta.assign(1e-6)  # noqa: SLF001
     model.train()
     with torch.no_grad():
         model(inputs)
-    product_terms = sum(float(t) for leaf in products.values() for t in leaf.losses)
+    # each product counted EBOPs in this training forward (leaf.losses alone also holds regularizer terms)
+    product_ebops = sum(float(ebops_term(leaf)) for leaf in products.values())
     # the walk yields the task heads twice (model.tasks and model.decoder.tasks, port_log/S3.md deviation 9)
     walked = [(id(layer) in products, float(t)) for layer in model.keras_layers() for t in layer.losses]
     walked_products = sum(t for is_product, t in walked if is_product)
-    assert product_terms > 0
-    assert walked_products >= product_terms * (1 - 1e-6)
+    assert walked_products >= product_ebops * (1 - 1e-6)
     assert float(model.quant_losses()) == pytest.approx(sum(t for _, t in walked), rel=1e-5)
 
 
