@@ -25,7 +25,9 @@ Deviations from torch (documented in docs/hgq/port_log/S5.md):
   update ``alpha * m / (sqrt(v) + eps)``); torch adds it after (``m / bc1 / (sqrt(v) / sqrt(bc2) + eps)``). Same for
   ``eps = 0``; otherwise the effective epsilon is ``eps * sqrt(bc2)`` in torch's terms (0.032x at step 1, -> 1x).
 - Clipping: Keras scales by ``clip / max(norm, clip)``, torch by ``min(1, clip / (norm + 1e-6))``.
-- Past ``total_steps`` torch raises; this schedule holds the value at ``total_steps``.
+- Past ``total_steps`` torch raises; this schedule holds the value at ``total_steps``, the last step torch defines
+  (its anneal there runs past ``min_lr`` by ``pct = (total - p1) / (total - 1 - p1)``, about 1.7e-5 * max_lr above
+  ``min_lr`` at 400 steps). The last LR Lightning applies is torch's value at ``total_steps - 1`` = ``min_lr``.
 """
 
 import math

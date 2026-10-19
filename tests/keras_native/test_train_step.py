@@ -7,7 +7,9 @@
   constants) on the full model; control: identity indices give different gradients.
 - Penalty check (the spike's): the jitted step-0 loss minus an independent eager task loss equals the eager sum of the
   EBOPs terms (+ regularizers), rel <= 1e-5; control: with ``ebops_on=False`` it does not.
-- Changing beta between steps keeps the compile count and scales the penalty by the beta ratio.
+- Changing beta between steps keeps the compile count and scales the penalty by the beta ratio, also in the driver's
+  flow from ``init_state`` (a weak-typed beta would retrace there).
+- The steps refuse an optimizer built for another model with as many variables (identity check, not a count).
 - PeriodicEBOPs: ``ebops_on=False`` gives exactly 0 penalty and the same regularizer sum, from the same cached executables.
 - Port of ``tests/keras/test_training.py``: over 30 steps the loss falls and the quantizer variables move.
 - Gradient accumulation through the matched loss: one host call per micro-batch, one update per k micro-batches.
@@ -198,6 +200,16 @@ def test_beta_change_keeps_the_executable_and_scales_the_penalty(setup, batches)
     steps, state0, _ = setup
     _, out1 = steps.train_step(copy_state(state0), batches[0], ebops_on=True)
     before = steps.compile_counts()["train"]
+    # the driver's flow: init_state (no set_beta) -> step -> set_beta -> step. A set_beta that changed the abstract
+    # signature (e.g. a weak-typed beta) retraces here; the fixture's state0 already went through set_beta, so the
+    # comparison above alone could not see it.
+    fresh = steps.init_state()
+    stepped, _ = steps.train_step(fresh, batches[0], ebops_on=True)
+    rebeta = steps.set_beta(stepped, 3 * BETA)
+    for i in steps.ebops_leaves.beta_index:
+        assert rebeta.ntv[i].dtype == state0.ntv[i].dtype and not rebeta.ntv[i].weak_type, (i, rebeta.ntv[i])
+    steps.train_step(rebeta, batches[0], ebops_on=True)
+    assert steps.compile_counts()["train"] == before, "init_state or set_beta changed the step's signature (retrace)"
     state2 = steps.set_beta(copy_state(state0), 7 * BETA)
     assert steps.read_beta(state2) == pytest.approx(7 * BETA, rel=1e-6)
     _, out2 = steps.train_step(state2, batches[0], ebops_on=True)
@@ -290,6 +302,20 @@ def test_state_donation_and_model_variables(donate):
     np.testing.assert_allclose(np.asarray(model(batch[0])), np.asarray(steps.predict_step(new, batch[0])), rtol=1e-6, atol=1e-7)
     steps.train_step(new, batch)  # assign_to_model copied: donating `new` must not free the Keras variables
     assert not any(v.value.is_deleted() for v in model.trainable_variables)
+
+
+def test_steps_refuse_an_optimizer_built_for_another_model():
+    """The guard compares the optimizer's variables with the model's by identity, not by count."""
+    model, loss_fn = small_model_and_loss()
+    other, _ = small_model_and_loss()
+    assert len(other.trainable_variables) == len(model.trainable_variables)  # control: a count check cannot tell them apart
+    opt_other = build_optimizer(other, optimizer="AdamW", lrs_config=LRS, total_steps=100)
+    with pytest.raises(ValueError, match=r"built for model\.trainable_variables"):
+        TrainStep(model, opt_other, loss_fn)
+    unbuilt = keras.optimizers.AdamW(learning_rate=1e-3)
+    with pytest.raises(ValueError, match=r"built for model\.trainable_variables"):
+        TrainStep(model, unbuilt, loss_fn)
+    TrainStep(model, build_optimizer(model, optimizer="AdamW", lrs_config=LRS, total_steps=100), loss_fn)  # its own: accepted
 
 
 def test_eval_and_predict_compile_once_and_leave_the_state(setup, batches):
