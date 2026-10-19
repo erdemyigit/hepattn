@@ -14,7 +14,10 @@ Workers: with ``num_workers > 0`` the loader starts its workers with ``spawn`` (
 moves the sampler to the next epoch with ``set_epoch``). The process is multithreaded once JAX has a backend, and
 JAX warns at every ``os.fork()`` that this "will likely lead to a deadlock" (jax/_src/xla_bridge.py, ``_at_fork``);
 ``fork`` is the Python 3.12 default on Linux (Polaris), ``spawn`` on macOS. A spawned worker receives the dataset
-pickled, once per run; its start cost with real CLIC sizes is to be measured on Polaris (S6a log).
+pickled, once per run; its start cost with real CLIC sizes is to be measured on Polaris (S6a log). ``spawn``
+re-imports the driver's main module in every worker, so the driver keeps its work under
+``if __name__ == "__main__":`` and runs no JAX computation at import (each worker would otherwise start a JAX
+backend, and on a GPU preallocate memory). Importing this module or ``hepattn.keras_native`` starts no backend.
 """
 
 import multiprocessing
