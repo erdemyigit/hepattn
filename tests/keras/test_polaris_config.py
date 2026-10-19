@@ -165,8 +165,8 @@ def test_swiglu_products_are_trained_with_the_model(generated):
         model(inputs)
     # each product counted EBOPs in this training forward (leaf.losses alone also holds regularizer terms)
     product_ebops = sum(float(ebops_term(leaf)) for leaf in products.values())
-    # the walk yields the task heads twice (model.tasks and model.decoder.tasks, port_log/S3.md deviation 9)
-    walked = [(id(layer) in products, float(t)) for layer in model.keras_layers() for t in layer.losses]
+    # quant_losses() sums each keras layer once (S5; keras_layers() yields the task heads twice, S3.md deviation 9)
+    walked = [(id(layer) in products, float(t)) for layer in model.unique_keras_layers() for t in layer.losses]
     walked_products = sum(t for is_product, t in walked if is_product)
     assert walked_products >= product_ebops * (1 - 1e-6)
     assert float(model.quant_losses()) == pytest.approx(sum(t for _, t in walked), rel=1e-5)

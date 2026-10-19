@@ -120,7 +120,7 @@ def task_head_ebops(kmodel) -> float:
 def test_evaluate_reads_and_calibrates_the_leaves_the_callbacks_steer(model):
     """hepattn.keras.evaluate (beta calibration for polaris/09_measure_beta.py, eval reports) acts on the same leaves
     as the callbacks. Measured ($S/r4b_fix/logs/evaluate_ebops2.out): totals equal; regions sum to the total, the task
-    heads under ``tasks``; E_eff = total + task heads (counted twice by quant_losses()) to 9.6e-8 (linformer) and
+    heads under ``tasks``; E_eff = total (each layer once since S5; before, total + task heads) to 9.6e-8 (linformer) and
     2.2e-9 (dense) relative, tolerance 2e-7. With the top-level walk evaluate read (review probe p4) linformer total
     2.117e11 of 2.509e11 and regions 1.845e11, and E_eff 2.463e11 on the dense model, whose total is 1.907e15.
     """
@@ -133,4 +133,4 @@ def test_evaluate_reads_and_calibrates_the_leaves_the_callbacks_steer(model):
     assert sum(regions.values()) == pytest.approx(total, rel=1e-6)
     assert regions["tasks"] == pytest.approx(heads, rel=1e-6)
     e_eff, _ = evaluate.effective_ebops(kmodel, inputs)
-    assert e_eff == pytest.approx(total + heads, rel=2e-7)
+    assert e_eff == pytest.approx(total, rel=2e-7)

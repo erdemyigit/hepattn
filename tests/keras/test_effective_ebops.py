@@ -6,7 +6,7 @@ affine in beta, and its slope was ~5 orders of magnitude below `total_ebops`. Th
 (found in R4b): beta was written only to the top-level keras layers, while most of the
 total sits in the exp/inv tables nested inside every QSoftmax, which are HGQ2 leaves with
 their own beta. Beta now reaches every leaf (callbacks.write_beta), and the slope is
-`total_ebops` plus the task heads' EBOPs, which `quant_losses()` counts twice.
+`total_ebops` (since S5 `quant_losses()` counts each layer once; before, the task heads counted twice).
 
 Discriminating properties, each with the wrong implementation it catches:
 - affine: the fitted (slope, floor) predicts quant_loss at a *third*, unprobed beta --
@@ -81,8 +81,8 @@ def test_affine_prediction_holds_at_an_unprobed_beta(built):
     assert predicted == pytest.approx(measured, rel=1e-3), f"not affine in beta: predicted {predicted:.6g} vs measured {measured:.6g}"
 
 
-def test_slope_is_the_leaf_total_plus_the_task_heads(built):
-    """E_eff = total_ebops + the task heads' EBOPs (quant_losses() counts those twice). Measured on this model
+def test_slope_is_the_leaf_total(built):
+    """E_eff = total_ebops (quant_losses() counts each layer once since S5; before, E_eff = total + the task heads). Measured on this model
     ($S/r4b_fix/logs/evaluate_ebops2.out): relative 4.2e-8 (generated Polaris models: 9.6e-8, 2.2e-9), tolerance 2e-7.
     With beta on the top-level layers only, the slope was ~5 orders of magnitude below the total.
     """
@@ -93,7 +93,8 @@ def test_slope_is_the_leaf_total_plus_the_task_heads(built):
     heads = sum(leaf_ebops(m) for m in {id(m): m for m in model.tasks.modules() if id(m) in leaves}.values())
     assert reported > 0.0
     assert heads > 0.0
-    assert e_eff == pytest.approx(reported + heads, rel=2e-7)
+    assert e_eff == pytest.approx(reported, rel=2e-7)
+    assert abs(e_eff - (reported + heads)) > 2e-7 * e_eff, "control: the old double count would also pass"
 
 
 def test_restores_layer_betas(built):

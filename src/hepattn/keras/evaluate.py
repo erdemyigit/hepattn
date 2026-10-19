@@ -33,8 +33,7 @@ def total_ebops(model: nn.Module, batch: dict) -> float:
     """Total EBOPs of the model for a representative batch: the sum of every HGQ2 leaf's own EBOPs.
 
     This is the resource estimate and, since beta reaches every leaf (R4b), also the slope of
-    the regularization loss up to the task heads' share, which ``quant_losses()`` counts twice
-    (see ``effective_ebops``).
+    the regularization loss (``quant_losses()`` counts each layer once since S5; see ``effective_ebops``).
     """
     _populate_ebops(model, batch)
     return leaves_total_ebops(model)
@@ -50,8 +49,8 @@ def effective_ebops(model: nn.Module, batch: dict, probes: tuple[float, float] =
     History: the Polaris beta sweep was inert because beta was written only to the top-level
     keras layers, while the QSoftmax tables (99.99% of the dense model's EBOPs) are nested
     leaves with their own beta; ``E_eff`` was then ~5 orders of magnitude below
-    ``total_ebops``. With every leaf written, ``E_eff`` equals ``total_ebops`` plus the
-    task heads' EBOPs, which ``quant_losses()`` counts twice.
+    ``total_ebops``. With every leaf written, ``E_eff`` equals ``total_ebops`` (before S5 plus
+    the task heads' EBOPs, which ``quant_losses()`` counted twice).
 
     The slope comes from the two probes; the floor from a third forward at beta 0, because
     at the probes ``beta * E_eff`` (up to ~1e9) hides the floor (~1) in float32.
