@@ -65,6 +65,7 @@ def test_train_batches_drop_last_and_are_static_int32(data_config, dataset):
         shapes = shapes or current
         assert current == shapes
         assert batch.host["event_number"].dtype == np.int64
+        assert "event_number" not in batch.targets and "event_number" not in batch.inputs  # host only, not sent
     assert batches[0].inputs["node_features"].shape == (BATCH, 160, 27)
     assert batches[0].targets["particle_class"].dtype == np.int32
 
@@ -93,6 +94,7 @@ def test_val_batches_are_padded_with_invalid_events(data_config, dataset):
     assert (last.targets["particle_incidence"][pad] == 0).all()
     assert (last.inputs["node_features"][pad] == 0).all()
     assert last.host["event_number"].tolist() == [8, 9, -1, -1]
+    assert "event_number" not in last.targets
     # the real events are the dataset's, unchanged
     inputs, targets = dataset[9]
     np.testing.assert_array_equal(last.inputs["node_features"][1], inputs["node_features"].numpy())

@@ -190,11 +190,18 @@ class WeightedMean:
         return self.total / self.weight if self.weight else float("nan")
 
 
+def _take_events(tree, keep: np.ndarray):
+    if isinstance(tree, dict):
+        return {k: _take_events(v, keep) for k, v in tree.items()}
+    return np.asarray(tree)[keep]
+
+
 class ClicMetrics:
     """The validation / test metrics of ``MPflow.log_metrics`` for one stage, accumulated over batches.
 
     ``update(preds, targets)``: ``preds`` is ``{layer: {task: {key: array}}}`` (``predict`` of the matched outputs),
-    ``targets`` the batch targets, both numpy with padding events removed. ``compute()`` returns
+    ``targets`` the batch targets, both numpy (or device arrays), without padding events or with ``event_valid``
+    given. ``compute()`` returns
     ``{"<stage>/<layer>_<name>": value}`` with the Lightning module's names.
     """
 
@@ -224,7 +231,11 @@ class ClicMetrics:
             self.counters[key] = factory()
         return self.counters[key]
 
-    def update(self, preds: dict, targets: dict) -> None:
+    def update(self, preds: dict, targets: dict, event_valid=None) -> None:
+        """Add one batch. ``event_valid`` (bool ``[B]``) drops the padding events of a padded val / test batch first."""
+        if event_valid is not None:
+            keep = np.asarray(event_valid, bool)
+            preds, targets = _take_events(preds, keep), _take_events(targets, keep)
         batch_size = float(np.asarray(targets["particle_valid"]).shape[0])
         class_labels = np.asarray(targets["particle_class"])
         truth_valid = class_labels < self.num_classes - 1
