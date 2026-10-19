@@ -317,6 +317,38 @@ M = [
         "jax",
         [f"{T_TS}::test_eval_loss_is_task_plus_regularization"],
     ),
+    (
+        "M36 learning_rate maps final_div_factor to max / end (review 3, R10)",
+        OPT,
+        "        final_div_factor=initial / end,\n",
+        "        final_div_factor=peak / end,\n",
+        "jax",
+        [T_OPT],
+    ),
+    (
+        "M37 ramp without the clamp at warmup_steps, hybrid suite (review 3, R7)",
+        BC,
+        "    fraction = min(1.0, step / max(1, warmup_steps))\n",
+        "    fraction = step / max(1, warmup_steps)\n",
+        "torch",
+        [T_PID],
+    ),
+    (
+        "M38 set_beta writes a weak-typed beta (review 3, driver-flow retrace)",
+        EB,
+        "            ntv[i] = jnp.full(np.shape(ntv[i]), beta, dtype=ntv[i].dtype)\n",
+        "            ntv[i] = jnp.asarray(beta)\n",
+        "jax",
+        [f"{T_TS}::test_beta_change_keeps_the_executable_and_scales_the_penalty"],
+    ),
+    (
+        "M39 optimizer guard compares counts only (review 3)",
+        TS,
+        " or any(a is not b for a, b in zip(tracked, model.trainable_variables, strict=True)):\n",
+        ":\n",
+        "jax",
+        [f"{T_TS}::test_steps_refuse_an_optimizer_built_for_another_model"],
+    ),
 ]
 
 

@@ -1,0 +1,12 @@
+# Run 5 (review 3): M36-M39 against the new tests (S5_mutations.py M36 M37 M38 M39; M39 re-run after ruff added strict= to the guard)
+{"mutation": "M36 learning_rate maps final_div_factor to max / end (review 3, R10)", "summary": "2 failed, 11 passed in 66.63s (0:01:06)", "failed": ["tests/keras_native/test_optim.py::test_learning_rate_maps_the_lrs_config_like_torch[1e-06]", "tests/keras_native/test_optim.py::test_learning_rate_maps_the_lrs_config_like_torch[1e-08]"], "killed": true}
+{"mutation": "M37 ramp without the clamp at warmup_steps, hybrid suite (review 3, R7)", "summary": "1 failed, 42 passed in 0.72s", "failed": ["tests/keras/test_beta_pid.py::test_scheduler_ramp_is_the_shared_ramp"], "killed": true}
+{"mutation": "M38 set_beta writes a weak-typed beta (review 3, driver-flow retrace)", "summary": "1 failed in 161.84s (0:02:41)", "failed": ["tests/keras_native/test_train_step.py::test_beta_change_keeps_the_executable_and_scales_the_penalty"], "killed": true}
+{"mutation": "M39 optimizer guard compares counts only (review 3)", "summary": "1 failed in 2.11s", "failed": ["tests/keras_native/test_train_step.py::test_steps_refuse_an_optimizer_built_for_another_model"], "killed": true}
+
+# Controls: the OLD tests at daf4b0c (git archive HEAD) under M36 + M37 + M38 applied together: all pass (the mutants survive the old tests)
+## jax: tests/keras_native/test_optim.py + test_train_step.py::test_beta_change_keeps_the_executable_and_scales_the_penalty
+12 passed in 155.68s (0:02:35)
+## torch: tests/keras/test_beta_pid.py
+43 passed in 0.81s
+## M39: no test of the guard existed before (test_steps_refuse_an_optimizer_built_for_another_model is new)
