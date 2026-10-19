@@ -1,0 +1,17 @@
+# Overlay on base.yaml + linformer.yaml that tells LightningCLI's merge from a key-by-key dict merge
+# (test_config.py::test_overlays_merge_as_lightningcli). Keys sit next to the class entries' class_path, in the short
+# form eval.yaml uses; attn_kwargs and decoder_layer_config are dict-typed, so LightningCLI replaces them whole.
+model:
+  model:
+    encoder:
+      attn_type: torch
+      attn_kwargs:
+        num_heads: 8
+    decoder:
+      num_decoder_layers: 2
+      decoder_layer_config:
+        dim: 256
+        attn_kwargs:
+          num_heads: 8
+data:
+  num_val: 10

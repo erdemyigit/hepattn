@@ -2,8 +2,10 @@
 
 Four forms are read (plan section 3.7; ``docs/hgq/port_log/S6a.md``):
 
-1. the raw CLIC YAMLs, several merged in order (org: ``base.yaml``, then ``linformer.yaml``; dicts merge key by key,
-   every other value, lists included, is replaced, as LightningCLI and ``polaris/03_make_config.py`` do);
+1. the raw CLIC YAMLs, several merged in order as LightningCLI merges several ``--config`` files (org: ``base.yaml``,
+   then ``linformer.yaml``; ``merge_configs``: sections and class init args merge key by key, keys next to a
+   ``class_path`` are init args, and lists, scalars and dict-typed arguments such as ``attn_kwargs`` are replaced
+   whole; ``polaris/03_make_config.py`` merges every dict key by key, which gives the same result for org's overlay);
 2. ``pflow_hgq.yaml`` (Helen's hybrid config);
 3. the generated ``polaris_hgq.yaml`` (``polaris/03_make_config.py``; encoder as a plain dict, ``quant`` block);
 4. a jsonargparse-normalised run config (the ``config.yaml`` that ``SaveConfig`` writes, or ``--print_config``):
@@ -55,16 +57,8 @@ class ConfigError(ValueError):
     """A config that the keras_native driver cannot run."""
 
 
-def deep_merge(base: dict, overlay: dict) -> dict:
-    """``overlay`` over ``base``: dicts merge key by key, every other value (lists too) is replaced. Returns a copy."""
-    out = copy.deepcopy(base)
-    for key, value in overlay.items():
-        out[key] = deep_merge(out[key], value) if isinstance(value, dict) and isinstance(out.get(key), dict) else copy.deepcopy(value)
-    return out
-
-
 def read_yaml(paths: str | Path | list[str | Path]) -> dict:
-    """One YAML file, or several merged in order with ``deep_merge``.
+    """One YAML file, or several merged in order with ``merge_configs`` (as several LightningCLI ``--config``).
 
     Raises:
         ConfigError: If no file is given or a file's top level is not a mapping.
@@ -77,7 +71,7 @@ def read_yaml(paths: str | Path | list[str | Path]) -> dict:
         loaded = yaml.safe_load(Path(path).read_text())
         if not isinstance(loaded, dict):
             raise ConfigError(f"{path}: the top level is not a mapping")
-        cfg = deep_merge(cfg, loaded)
+        cfg = merge_configs(cfg, loaded)
     return cfg
 
 
@@ -192,6 +186,93 @@ _NOT_ARGS = {"self", "factory", "name", "layer_name"}
 _NOT_MODEL = {"matcher"}
 
 
+# YAML merge as LightningCLI (jsonargparse 4.40.1, measured; docs/hgq/port_log/S6a.md decision 13). A class entry is
+# a dict with class_path / init_args, or a plain dict at a class-typed parameter (the torch MaskFormer's raw decoder).
+_CLASS_ENTRY_KEYS = {"class_path", "init_args", "dict_kwargs"}
+# plain-dict parameters that are dict-typed (replaced whole) although their key is in _CLASS_OF_KEY
+_DICT_TYPED = {"KerasMaskFormer": {"encoder", "decoder"}}
+
+
+def _fold(node: Any) -> Any:
+    """Keys next to ``class_path`` moved into ``init_args`` (jsonargparse's short form), recursively.
+
+    Raises:
+        ConfigError: If a class entry has both ``init_args`` and such keys (jsonargparse rejects it).
+    """
+    if isinstance(node, list):
+        return [_fold(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    node = {k: _fold(v) for k, v in node.items()}
+    stray = {k: v for k, v in node.items() if k not in _CLASS_ENTRY_KEYS}
+    if "class_path" in node and stray:
+        if "init_args" in node:
+            raise ConfigError(f"class entry {node['class_path']!r} has init_args and also {sorted(stray)} next to them")
+        node = {**{k: v for k, v in node.items() if k in _CLASS_ENTRY_KEYS}, "init_args": stray}
+    return node
+
+
+def _is_class_entry(node: Any, key: str | None, parent: str | None) -> bool:
+    if not isinstance(node, dict):
+        return False
+    return bool(_CLASS_ENTRY_KEYS & set(node)) or (key in _CLASS_OF_KEY and key not in _DICT_TYPED.get(parent or "", ()))
+
+
+def _split_entry(node: dict) -> tuple[str | None, dict, Any]:
+    if not _CLASS_ENTRY_KEYS & set(node):
+        return None, dict(node), None
+    if set(node) - _CLASS_ENTRY_KEYS:  # left after _fold only without a class_path
+        raise ConfigError(f"class entry {node} has init_args and also other keys next to them")
+    return node.get("class_path"), dict(node.get("init_args") or {}), node.get("dict_kwargs")
+
+
+def _merge_value(base: Any, overlay: Any, key: str, parent: str | None) -> Any:
+    both_dicts = isinstance(base, dict) and isinstance(overlay, dict)
+    if not both_dicts or not (_is_class_entry(base, key, parent) or _is_class_entry(overlay, key, parent)):
+        return copy.deepcopy(overlay)  # scalars, lists, None and dict-typed arguments are replaced whole
+    base_path, base_args, base_kwargs = _split_entry(base)
+    path, args, kwargs = _split_entry(overlay)
+    if base_path and path and _short(base_path) != _short(path):
+        raise ConfigError(f"{key}: an overlay that changes class_path {base_path!r} -> {path!r} is not supported")
+    path = path or base_path
+    merged = _merge_args(base_args, args, _short(path) if path else _CLASS_OF_KEY.get(key))
+    if path is None:
+        return merged
+    out = {"class_path": path, "init_args": merged}
+    if (kwargs if kwargs is not None else base_kwargs) is not None:
+        out["dict_kwargs"] = copy.deepcopy(kwargs if kwargs is not None else base_kwargs)
+    return out
+
+
+def _merge_args(base: dict, overlay: dict, parent: str | None) -> dict:
+    out = copy.deepcopy(base)
+    for key, value in overlay.items():
+        out[key] = _merge_value(base[key], value, key, parent) if key in base else copy.deepcopy(value)
+    return out
+
+
+def merge_configs(base: dict, overlay: dict) -> dict:
+    """``overlay`` over ``base`` as LightningCLI merges two ``--config`` files. Returns a copy.
+
+    Top-level sections (``model``, ``data``, ``trainer``) are argument groups and merge key by key. Inside them, a
+    class entry merges its init args key by key (keys next to ``class_path`` count as init args); every other value
+    is replaced whole: scalars, lists, None, and dict-typed arguments such as ``lrs_config``, ``attn_kwargs``,
+    ``decoder_layer_config`` and the hybrid ``KerasMaskFormer``'s ``encoder`` / ``decoder``.
+
+    ``ConfigError`` (raised by the helpers) for an overlay that changes a ``class_path`` (jsonargparse keeps only the
+    init args the new class accepts, which needs the class) or a class entry with both ``init_args`` and other keys.
+    """
+    base, overlay = _fold(base), _fold(overlay)
+    out = copy.deepcopy(base)
+    for key, value in overlay.items():
+        old = base.get(key)
+        if isinstance(old, dict) and isinstance(value, dict) and not (_is_class_entry(old, key, None) or _is_class_entry(value, key, None)):
+            out[key] = _merge_args(old, value, None)  # an argument group
+        else:
+            out[key] = _merge_value(old, value, key, None) if key in base else copy.deepcopy(value)
+    return out
+
+
 def _defaults(class_name: str) -> dict:
     out: dict = {}
     for cls in _DEFAULTS_FROM.get(class_name, ()):
@@ -288,9 +369,13 @@ class CheckpointCallback:
     """What one Lightning ``ModelCheckpoint`` does (lightning 2.5.2 ``callbacks/model_checkpoint.py``), not its YAML text.
 
     ``every_n_epochs`` / ``every_n_train_steps``: 0 is "no trigger"; with neither set, Lightning uses
-    ``every_n_epochs=1`` (``__init_triggers``), i.e. a save at every validation end. ``save_top_k`` -1 keeps every
-    checkpoint; with ``monitor`` None, 1 keeps only the newest. ``save_last``: ``last`` is rewritten at every save
-    and at every validation end. ``dirpath`` None is Lightning's default directory.
+    ``every_n_epochs=1`` (``__init_triggers``), i.e. a save at every train epoch end, after that epoch's validation
+    (with ``val_check_interval`` 1.0, as in every CLIC config, Lightning saves in ``on_train_epoch_end``, not in
+    ``on_validation_end``: ``model_checkpoint.py:324-339,429-447``; an epoch stopped by ``max_steps`` runs no
+    validation and is saved with the last logged monitor value). ``save_top_k`` -1 keeps every checkpoint, 0 none;
+    with ``monitor`` None, 1 keeps only the newest. ``save_last``: ``last`` is rewritten at every save and at every
+    epoch end. ``dirpath`` None is Lightning's default directory. ``checkpoint.CheckpointManager.from_callback``
+    builds the manager that does this.
     """
 
     monitor: str | None
