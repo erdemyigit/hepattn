@@ -3,6 +3,8 @@
 - OneCycle LR equals torch ``OneCycleLR`` at 20 sampled optimizer steps, with and without gradient accumulation (the
   Keras schedule sees micro-steps; control: without the ``steps_per_update`` division it runs k times too fast).
   torch also cycles beta1; ours keeps it fixed (documented deviation, asserted so it cannot change silently).
+- ``learning_rate(lrs_config)`` maps ``initial``/``max``/``end`` like ``MPflowHGQ.configure_optimizers``: equal to torch over
+  the whole tail (steps 350-400), also with ``end != initial`` (where ``final_div_factor`` != 1).
 - OneCycle holds its value past ``total_steps`` (control: the unclamped anneal moves on).
 - Weight decay skips exactly the variables with ``quantizer`` in their path, for AdamW and Lion, by state (``_use_weight_decay``)
   and by effect (a zero-gradient step only decays); control: ``var_names=["quantizer"]`` excludes none of them. The
@@ -27,7 +29,7 @@ import pytest
 import torch
 import yaml
 
-from hepattn.keras_native.optim import OneCycleLR, build_optimizer, optimizer_from_config
+from hepattn.keras_native.optim import OneCycleLR, build_optimizer, learning_rate, optimizer_from_config
 from hepattn.keras_native.train_step import TrainStep
 
 from .golden.cases import QUANT_SPECS
@@ -39,6 +41,7 @@ LRS = {"initial": 1e-6, "max": 8e-5, "end": 1e-6, "pct_start": 0.05, "weight_dec
 TOTAL = 400
 SAMPLED = [0, 1, 2, 10, 18, 19, 20, 21, 22, 40, 100, 150, 200, 250, 300, 350, 397, 398, 399, 400]
 LR_RTOL = 2.3e-6  # measured max rel 1.12e-6 (float32 schedule vs torch's float64), x2
+LR_ATOL = 1.3e-7  # in units of max_lr: measured 6.25e-8 (float32 vs float64, steps 0-400, end 1e-6 and 1e-8), x2
 
 
 def torch_onecycle(lrs: dict, total: int, steps: list[int]) -> tuple[list[float], list[float]]:
@@ -93,6 +96,26 @@ def test_onecycle_equals_torch_at_20_steps(k):
         assert rel([float(fast(k * n + k - 1)) for n in SAMPLED], ref).max() > 0.1
     # documented deviation: torch cycles beta1 (0.95 -> 0.85 -> 0.95); ours stays 0.9
     assert min(betas) == pytest.approx(0.85) and max(betas) == pytest.approx(0.95)
+
+
+@pytest.mark.parametrize("end", [1e-6, 1e-8])
+def test_learning_rate_maps_the_lrs_config_like_torch(end):
+    """``learning_rate(lrs_config)`` (the factory's path, not the test's ``keras_schedule``) against torch, tail included.
+
+    ``end = 1e-8 != initial`` makes ``final_div_factor`` matter (production has initial == end, where it is 1).
+    """
+    lrs = {**LRS, "end": end}
+    steps = [*SAMPLED[:-4], *range(350, 401)]
+    ref, _ = torch_onecycle(lrs, TOTAL, steps)
+    ours = [float(learning_rate(lrs, TOTAL)(n)) for n in steps]
+    # float32 schedule: the error is ~eps * max_lr (measured 6.25e-8 * max_lr for both ends); near min_lr = 1e-8 that is
+    # 7.3e-5 relative (step 398), so the relative tolerance applies only where end == initial
+    err = np.abs(np.asarray(ours) - np.asarray(ref))
+    assert err.max() <= LR_ATOL * lrs["max"], list(zip(steps, ours, ref, strict=True))
+    if end == LRS["initial"]:
+        assert rel(ours, ref).max() <= LR_RTOL  # measured 1.42e-6 (step 374)
+    assert min(ref) == pytest.approx(end, rel=1e-6), "the samples miss the end of the cycle"
+    assert learning_rate({**lrs, "skip_scheduler": True}, TOTAL) == lrs["initial"]
 
 
 def test_onecycle_holds_its_value_past_total_steps():
