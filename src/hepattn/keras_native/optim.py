@@ -171,7 +171,7 @@ def optimizer_from_config(model_section: dict, trainer_section: dict, model, tot
     Raises:
         NotImplementedError: For ``gradient_clip_algorithm`` other than ``norm``.
     """
-    algorithm = trainer_section.get("gradient_clip_algorithm", "norm")
+    algorithm = trainer_section.get("gradient_clip_algorithm") or "norm"  # None (explicit null) is Lightning's "norm"
     if algorithm != "norm":
         raise NotImplementedError(f"gradient_clip_algorithm={algorithm!r} is not supported (only 'norm')")
     return build_optimizer(
