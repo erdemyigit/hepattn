@@ -155,8 +155,10 @@ def main(args: list[str] | None = None) -> None:
         from hepattn.keras.export import build_functional_dense, report_hls_resources  # noqa: PLC0415
 
         head = qmodel.tasks[0].net  # classification head, applied per query -> (num_queries, dim)
-        n_queries = qmodel.decoder._num_queries  # noqa: SLF001
-        functional = build_functional_dense(head, input_shape=(n_queries, qmodel.dim), name="clf_head")
+        first = head.hidden[0] if len(head.hidden) else head.final
+        shape = tuple(first._build_shapes_dict["input_shape"][1:])  # noqa: SLF001  (the shape the forward built it with)
+        # "lut": the org heads use SiLU, which hls4ml 1.3.0 cannot convert inline (hepattn.keras_native.export)
+        functional = build_functional_dense(head, input_shape=shape, name="clf_head", activations="lut")
         hls_report = report_hls_resources(functional, Path(opts.out or ".").parent / "hls_clf_head")
 
     report = build_report(q_metrics, q_ebops, region_ebops, hls_report, f_metrics, opts.num_events)

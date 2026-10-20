@@ -143,3 +143,36 @@ def test_evaluate_hgq_main_with_a_float_baseline(ported, tmp_path):
     text = out.read_text()
     assert "| Metric | Quantized | Float baseline | Δ |" in text
     assert "Total EBOPs:" in text and "nan" not in text.split("## Resource cost")[1].split("\n")[2].lower()
+
+
+def loaded_hybrid():
+    cfg = model_cfg(HYB)
+    inputs, _ = stored_hybrid()
+    model = port_to_keras.build_keras_maskformer_from_config(cfg, quant=cfg["init_args"]["quant"]).eval()
+    return port_to_keras.load_keras_state(model, HYB / "model.ckpt", inputs), inputs
+
+
+@pytest.mark.parametrize("which", ["innet0", "mask_object"])
+def test_hybrid_export_assembles_swiglu_nets(which):
+    """``hepattn.keras.export.build_functional_dense`` no longer refuses SwiGLU (it raised NotImplementedError)."""
+    from hepattn.keras.export import build_functional_dense  # noqa: PLC0415
+
+    model, _ = loaded_hybrid()
+    net = model.input_nets[0].net if which == "innet0" else model.tasks[1].object_net
+    assert net.gate
+    shape = tuple(net.hidden[0]._build_shapes_dict["input_shape"][1:])  # noqa: SLF001
+    functional = build_functional_dense(net, input_shape=shape, name=which)
+    x = torch.randn(3, *shape, generator=torch.Generator().manual_seed(0))
+    with torch.no_grad():
+        ref = net(x)
+        assert torch.equal(ref, functional(x, training=False))
+        assert not torch.allclose(ref, net.final(net.hidden[0](x, training=False), training=False), atol=1e-3)  # control
+
+
+def test_evaluate_hgq_hls_report_on_the_org_head(tmp_path):
+    """``--hls`` converts the org classification head (SiLU) in its LUT export form (inline silu does not convert)."""
+    out = tmp_path / "report.md"
+    evaluate_hgq.main(["--config", str(HYB / "config.yaml"), "--state", str(HYB / "model.ckpt"), "--num-events", "4", "--hls", "--out", str(out)])
+    text = out.read_text()
+    assert "## hls4ml conversion" in text and '"n_layers"' in text and "warning" not in text
+    assert (tmp_path / "hls_clf_head/firmware/myproject.cpp").is_file()

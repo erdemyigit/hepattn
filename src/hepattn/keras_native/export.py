@@ -56,7 +56,8 @@ def build_functional_dense(ndense: Dense, input_shape: tuple[int, ...], name: st
     """A keras functional model of a native ``Dense`` from its live sublayers.
 
     Args:
-        ndense: The built (float or HGQ2) native ``Dense``.
+        ndense: The built (float or HGQ2) native ``Dense``, or the hybrid's ``KerasDense`` (the same ``hidden``,
+            ``gates``, ``products``, ``final``, ``gate``, ``dropout`` layout; ``hepattn.keras.export`` delegates here).
         input_shape: Per-sample input shape the layers were built with, e.g. ``(num_queries, dim)`` for a per-query head:
             HGQ2 datalane quantizers are per element of that shape.
         name: Model name.
@@ -89,7 +90,7 @@ def build_functional_dense(ndense: Dense, input_shape: tuple[int, ...], name: st
             x = apply(layer, x)
             continue
         x1, x2 = apply(layer, x), apply(ndense.gates[i], x)
-        size = ndense.hidden_sizes[i]
+        size = x1.shape[-1]
         if len(x1.shape) == 3:
             x = ndense.products[i]([x1, x2])
         else:
