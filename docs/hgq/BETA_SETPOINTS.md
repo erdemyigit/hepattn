@@ -47,6 +47,24 @@ Linformer k = 256, its own `03_make_config.py`). New tree: this branch.
 `INIT_BETA` = 2.6e-10 x 0.333 = 8.65e-11, rounded to 8.7e-11 (the batches span 7.9e-11 to 9.3e-11; the all-variable norm
 gives 8.9e-11). With PeriodicEBOPs x 8 the generated `init_beta` is 6.96e-10.
 
+**Re-run spread (S5+S6 critique, 2026-10-20, [port_log/S56-critique.md](port_log/S56-critique.md)).** The same scripts,
+4 fresh processes per tree (new: `git archive 2e12012`; old: `git archive 37ff127`), the same 3 batches. The keras weight
+init is not seeded (`S5_grad_ratio.py` seeds torch only), so every process builds other initial weights. Deterministic
+parts reproduce exactly: EBOPs at init 2.509e11 / 2.512e11 / 2.512e11, old-model `|grad_q penalty|` 8.408e7. The task
+gradients do not: old `|grad_q task|` 4.70-9.10, new 0.471-0.567. The factor s_q(old) / s_q(new):
+
+| Run | per batch | mean | all-variable mean |
+|---|---|---|---|
+| 1 | 0.182, 0.214, 0.216 | 0.204 | 0.210 |
+| 2 | 0.273, 0.317, 0.332 | 0.307 | 0.313 |
+| 3 | 0.258, 0.324, 0.304 | 0.295 | 0.302 |
+| 4 | 0.217, 0.263, 0.266 | 0.249 | 0.255 |
+
+Over the 12 rows: 0.182-0.332, mean 0.264, so `INIT_BETA` 6.9e-11 (range 4.7e-11 to 8.6e-11). The S5 value 0.333
+(8.7e-11) is at the top of this spread: all 4 run means are lower. 8.7e-11 is kept (it is inside the Polaris scan
+below, which brackets it by 4x each way), but read it as "7e-11 to 9e-11, init-dependent", not as a 3-digit value.
+To narrow it, average over seeded inits (`keras.utils.set_random_seed`) or measure at the scan's starting weights.
+
 ## Method and its limits
 
 - The gradient-ratio rule keeps the relative pull of the EBOPs penalty on the bitwidths that the old sweep judged as
