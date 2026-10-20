@@ -333,6 +333,7 @@ class Trainer:
         self.epoch_logs: dict[str, float] = {}
         self.train_logs: dict[str, float] = {}
         self.resumed_from: Path | None = None
+        self.warm_started_from: Path | None = None
         self.first_step_s: float | None = None
 
     # ------------------------------------------------------------------------------------------- jitted helpers
@@ -485,6 +486,29 @@ class Trainer:
         self.epoch_logs = dict(meta.get("epoch_logs") or {})
         self.train_logs = dict(meta.get("train_logs") or {})
         self.resumed_from = path.resolve()
+        return meta
+
+    def warm_start(self, path: str | Path) -> dict:
+        """Load the model variables (weights, quantizer state, beta) of a checkpoint and keep everything else fresh.
+
+        For a checkpoint of another run or a converted Lightning checkpoint
+        (``hepattn.experiments.clic.convert_to_native``): the optimizer state, step, LR schedule, beta controller and
+        data position start as in a new run; an optimizer state in the file is not read. Call before ``fit``.
+
+        ``checkpoint.load_checkpoint`` refuses another model config (hash) and a missing or corrupted file.
+
+        Raises:
+            ValueError: If called after a ``restore`` or after training started.
+        """
+        if self.resumed_from is not None or self.global_step or self.micro_step:
+            raise ValueError("warm_start needs a fresh trainer (no restore, no step)")
+        path = Path(path)
+        model = self.steps.model
+        (tv, ntv, _), meta = ckpt.load_checkpoint(path, model, None, expect_config_hash=self.rc.model_hash)
+        self.state = TrainState([jnp.asarray(x) for x in tv], [jnp.asarray(x) for x in ntv], self.state.ov)
+        if self.has_ebops:
+            self.beta = self.steps.read_beta(self.state)
+        self.warm_started_from = path.resolve()
         return meta
 
     def _managers(self) -> list:
@@ -664,6 +688,7 @@ class Trainer:
             "compile_counts": self.compile_counts(),
             "first_step_s": self.first_step_s,
             "resumed_from": None if self.resumed_from is None else str(self.resumed_from),
+            "warm_started_from": None if self.warm_started_from is None else str(self.warm_started_from),
             "settings": asdict(self.s),
             "last_val": self.last_val,
             "beta": self.beta,
