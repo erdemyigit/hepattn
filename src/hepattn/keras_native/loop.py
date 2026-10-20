@@ -639,11 +639,14 @@ class Trainer:
 
     def _on_epoch_end(self, epoch: int, val: DataSource | None, epochs_csv: CsvLog) -> None:
         """Validation (a complete epoch only), the ``MetricsCsvWriter`` row, then the epoch / last checkpoints."""
-        if val is not None and (epoch + 1) % self.s.check_val_every_n_epoch == 0:
+        validated = val is not None and (epoch + 1) % self.s.check_val_every_n_epoch == 0
+        if validated:
             self.last_val = self.validate(val)
             epochs_csv.append({**self.train_logs, **self.epoch_logs, **self.last_val, "epoch": float(epoch), "step": float(self.global_step)})
         args = self._save_args()
-        if self.epoch_manager is not None:
+        # Lightning ModelCheckpoint._should_save_on_train_epoch_end: with check_val_every_n_epoch != 1 it saves only at
+        # a validation end, so an epoch without validation writes no epoch file (it would carry the previous val/loss)
+        if self.epoch_manager is not None and (validated or self.s.check_val_every_n_epoch == 1):
             if self.last_val is not None:
                 self.epoch_manager.maybe_save_epoch(epoch, self.global_step, self.last_val, *args, self.meta())
             else:

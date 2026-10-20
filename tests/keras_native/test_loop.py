@@ -380,31 +380,63 @@ def test_val_metrics_drop_the_padding_events_and_pool_the_layers(run_a):
     assert set(expected) <= set(metrics_csv[-1])
 
 
+# Measured (CPU, this run): the logged float32 mean of per-variable means is 1.915e-6 relative from the float64 numpy
+# value (summation order and precision); the tolerance is 2x. Min and max are compared exactly.
+MEASURED_BITS_MEAN_REL = 1.915e-6
+
+
+def bit_reduction(model, tv, ntv, suffix: str) -> tuple[float, float, float, int]:
+    """``BitwidthMonitor``'s reduction in numpy over the variables whose path ends in ``/<suffix>`` (``tv`` / ``ntv`` in
+    the order of ``model.trainable_variables`` / ``non_trainable_variables``): mean of the per-variable means, min of
+    the mins, max of the maxes, count.
+    """
+    pairs = [*zip(model.trainable_variables, tv, strict=True), *zip(model.non_trainable_variables, ntv, strict=True)]
+    sel = [np.asarray(a, np.float64) for v, a in pairs if v.path.rsplit("/", 1)[-1] == suffix]
+    return float(np.mean([a.mean() for a in sel])), float(min(a.min() for a in sel)), float(max(a.max() for a in sel)), len(sel)
+
+
 def test_log_cadence_lr_bits_val_interval_and_precision(run_a, tmp_path):
     """Log every 3 optimizer steps (across the epoch boundary: 4 steps per epoch) and validate every 2nd epoch.
 
     Checks the logged steps (Lightning: ``global_step % n == 0``), ``train/lr`` = the schedule at that step's update
-    (``(step - 1) * k`` micro-batches), ``bits_*_n`` = trainable + non-trainable quantizer variables, one validation
-    row (epoch 1), and "highest" on every dot of the val and tail programs.
+    (``(step - 1) * k`` micro-batches), the bitwidth values = ``BitwidthMonitor``'s reduction over trainable and
+    non-trainable quantizer variables, one validation row (epoch 1) and one epoch checkpoint (Lightning saves only at a
+    validation end when ``check_val_every_n_epoch != 1``), and "highest" on every dot of the val and tail programs.
     """
     rc = run_a["rc"]
-    t = trainer(rc, tmp_path, run_a["train"], max_epochs=2, log_every_n_steps=3, check_val_every_n_epoch=2)
-    with pytest.warns(UserWarning, match="epoch 0: no validation has run"):
-        t.fit(run_a["train"], run_a["val"])
+    t = trainer(rc, tmp_path, run_a["train"], max_epochs=3, log_every_n_steps=3, check_val_every_n_epoch=2)
+    t.fit(run_a["train"], run_a["val"])
     rows = loop.read_csv(tmp_path / "steps.csv")
-    assert [r["step"] for r in rows] == [3.0, 6.0]
+    assert [r["step"] for r in rows] == [3.0, 6.0, 9.0, 12.0]
+    # epochs 0 and 2 run no validation: no epoch file (the epoch-2 one would carry epoch 1's val/loss)
+    assert sorted(p.name for p in (tmp_path / "ckpts").glob("epoch-*.npz")) == ["epoch-001-step-000000008.npz"]
     for r in rows:
         assert r["train/lr"] == float(t.schedule((int(r["step"]) - 1) * t.k))
         assert r["train/lr"] != float(t.schedule(int(r["step"]) * t.k))  # control: the next update's LR
     epochs = loop.read_csv(tmp_path / "metrics.csv")
     assert [r["epoch"] for r in epochs] == [1.0]
-    assert epochs[0]["train/loss"] == rows[-1]["train/loss"]  # the epoch row carries the last logged train row
+    assert epochs[0]["train/loss"] == rows[1]["train/loss"]  # the epoch row carries the last logged train row (step 6)
     model = t.steps.model
     for suffix in loop.BIT_SUFFIXES:
         trainable = sum(v.path.rsplit("/", 1)[-1] == suffix for v in model.trainable_variables)
         frozen = sum(v.path.rsplit("/", 1)[-1] == suffix for v in model.non_trainable_variables)
         assert rows[-1][f"train/bits_{suffix}_n"] == trainable + frozen == epochs[0][f"val/bits_{suffix}_n"]
     assert sum(v.path.rsplit("/", 1)[-1] in loop.BIT_SUFFIXES for v in model.non_trainable_variables) > 0  # else vacuous
+    # the values: the step-12 row from the final state, the epoch-1 val row from the epoch-1 checkpoint (step 8)
+    keys = loop.ckpt.state_keys(model, t.steps.optimizer)
+    saved = npz_arrays(tmp_path / "ckpts/epoch-001-step-000000008.npz")
+    epoch1 = tuple([saved[f"{g}/{k}"] for k in keys[g]] for g in ("tv", "ntv"))
+    spread, rel = [], []
+    for stage, row, (tv, ntv) in (("train", rows[-1], (t.state.tv, t.state.ntv)), ("val", epochs[0], epoch1)):
+        for suffix in loop.BIT_SUFFIXES:
+            mean, lo, hi, n = bit_reduction(model, tv, ntv, suffix)
+            assert row[f"{stage}/bits_{suffix}_n"] == n
+            assert (row[f"{stage}/bits_{suffix}_min"], row[f"{stage}/bits_{suffix}_max"]) == (lo, hi), (stage, suffix)
+            rel.append(abs(row[f"{stage}/bits_{suffix}_mean"] / mean - 1))
+            spread.append(hi - lo)
+    print(f"bits mean: float32 device vs float64 numpy, max rel {max(rel):.3e}")
+    assert max(rel) <= 2 * MEASURED_BITS_MEAN_REL
+    assert max(spread) > 0  # else a min / max mix-up would pass
     batch = list(run_a["val"].epoch(0))[-1]
     val_text = t._val.lower(t.state, batch.inputs, batch.targets).as_text()  # noqa: SLF001
     res = t._val(t.state, batch.inputs, batch.targets)  # noqa: SLF001
@@ -458,3 +490,56 @@ def test_csv_log_grows_its_header(tmp_path):
     assert [r["val/loss"] for r in loop.read_csv(tmp_path / "m.csv")] == [2.0, 1.5, 1.0]
     assert again.keep(lambda r: r["epoch"] < 1) == 2
     assert [r["epoch"] for r in loop.read_csv(tmp_path / "m.csv")] == [0.0]
+
+
+def test_max_steps_stops_inside_an_epoch(run_a, tmp_path):
+    """``max_steps`` 5 with 4 steps per epoch: the LR schedule is 5 steps long, the run stops after step 5 (inside epoch
+    1, so no epoch-1 validation), and ``last`` is the step-5 file. Control: the 3-epoch schedule (12 steps) differs.
+    """
+    rc = run_a["rc"]
+    t = trainer(rc, tmp_path, run_a["train"], max_steps=5)
+    summary = t.fit(run_a["train"], run_a["val"])
+    assert (summary["global_step"], summary["total_steps"], t.micro_step, t.epoch, t.batch) == (5, 5, 10, 1, 2)
+    rows = loop.read_csv(tmp_path / "steps.csv")
+    assert [r["step"] for r in rows] == [1.0, 2.0, 3.0, 4.0, 5.0]
+    five = loop.learning_rate(loop.lrs_config(rc), 5, steps_per_update=t.k)
+    twelve = loop.learning_rate(loop.lrs_config(rc), 12, steps_per_update=t.k)
+    assert [r["train/lr"] for r in rows] == [float(five((int(r["step"]) - 1) * t.k)) for r in rows]
+    assert [r["train/lr"] for r in rows] != [float(twelve((int(r["step"]) - 1) * t.k)) for r in rows]
+    assert [r["epoch"] for r in loop.read_csv(tmp_path / "metrics.csv")] == [0.0]
+    assert loop.json.loads((tmp_path / "ckpts/last.json").read_text())["file"] == "step-000000005.npz"
+
+
+def test_limit_val_batches_validates_the_first_batches_only(run_a):
+    """``limit_val_batches`` 1: val/loss is the first batch's task loss (4 real events). Control: all 3 batches differ."""
+    t = run_a["trainer"]
+    first = next(iter(run_a["val"].epoch(0)))
+    assert first.num_real == 4
+    expected = float(t._val(t.state, first.inputs, first.targets)["task"])  # noqa: SLF001
+    full = t.validate(run_a["val"])
+    settings = t.s
+    try:
+        t.s = dataclasses.replace(settings, limit_val_batches=1)
+        limited = t.validate(run_a["val"])
+    finally:
+        t.s = settings
+    assert limited["val/loss"] == expected
+    assert full["val/loss"] != expected
+
+
+def test_seed_sets_the_model_init_and_the_train_order(run_a, tmp_path):
+    """Seeds 7, 7 and 8 (not 42: ``CLICDataset`` seeds the global RNGs with 42 in its constructor, so a dropped
+    ``set_random_seed`` would still give the seed-42 init): one seed gives the same initial state and epoch-0 order
+    bitwise; another seed gives another init and another order.
+    """
+    rc = run_a["rc"]
+    inits, orders = [], []
+    for i, seed in enumerate((7, 7, 8)):
+        train, _ = sources(rc, seed=seed)
+        orders.append([b.host["event_number"].tolist() for b in train.epoch(0)])
+        t = trainer(rc, tmp_path / str(i), train, seed=seed)
+        inits.append(state_arrays(t))
+    assert differing(inits[0], inits[1]) == []
+    assert orders[0] == orders[1]
+    assert any(k.startswith("tv/") for k in differing(inits[0], inits[2]))
+    assert orders[0] != orders[2]
