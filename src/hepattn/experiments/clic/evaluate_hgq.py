@@ -17,6 +17,7 @@ batches — an approximation that tightens with more, larger batches; noted in t
 """
 
 import argparse
+import copy
 import json
 import math
 from collections import defaultdict
@@ -27,16 +28,23 @@ import torch
 import yaml
 
 from hepattn.experiments.clic.pflow_data import PflowDataModule
-from hepattn.experiments.clic.port_to_keras import build_keras_maskformer_from_config
+from hepattn.experiments.clic.port_to_keras import build_keras_maskformer_from_config, load_keras_state, read_model_state
 from hepattn.keras import set_keras_default_device
 from hepattn.keras.evaluate import ebops_by_region, total_ebops
 
 
 def load_state(model, state_path: str | Path) -> None:
-    state = torch.load(state_path, map_location="cpu", weights_only=False)
-    if isinstance(state, dict) and "state_dict" in state:  # Lightning checkpoint
-        state = {k.removeprefix("model."): v for k, v in state["state_dict"].items() if k.startswith("model.")}
-    model.load_state_dict(state)
+    """Strict load of a Lightning checkpoint or a ``port_to_keras`` state into a materialized, registered model."""
+    model.load_state_dict(read_model_state(state_path))
+
+
+def float_model_cfg(model_cfg: dict) -> dict:
+    """``model_cfg`` without its quant spec: ``build_keras_maskformer_from_config(cfg, quant=None)`` keeps the quant
+    spec of a ``KerasMaskFormer`` config (``None`` means "no override" there), so the float baseline must drop it.
+    """
+    cfg = copy.deepcopy(model_cfg)
+    cfg.get("init_args", {}).pop("quant", None)
+    return cfg
 
 
 def build_loader(data_cfg: dict, num_events: int):
@@ -129,10 +137,9 @@ def main(args: list[str] | None = None) -> None:
     loader = build_loader(raw["data"], opts.num_events)
     first_inputs, _ = next(iter(loader))
 
-    qmodel = build_keras_maskformer_from_config(model_cfg, quant=quant).eval()
-    with torch.no_grad():
-        qmodel(first_inputs)  # materialize lazily-built quantized layers
-    load_state(qmodel, opts.state)
+    # materialize (lazy layers, linformer cores) and register the keras weights before the strict load: a Lightning
+    # checkpoint of MPflowHGQ holds every kernel (MPflowHGQ.setup registers them), an unregistered model has none
+    qmodel = load_keras_state(build_keras_maskformer_from_config(model_cfg, quant=quant).eval(), opts.state, first_inputs)
 
     q_metrics = physics_metrics(qmodel, loader)
     q_ebops = total_ebops(qmodel, first_inputs)
@@ -140,8 +147,7 @@ def main(args: list[str] | None = None) -> None:
 
     f_metrics = None
     if opts.float_state:
-        fmodel = build_keras_maskformer_from_config(model_cfg, quant=None).eval()
-        load_state(fmodel, opts.float_state)
+        fmodel = load_keras_state(build_keras_maskformer_from_config(float_model_cfg(model_cfg)).eval(), opts.float_state, first_inputs)
         f_metrics = physics_metrics(fmodel, loader)
 
     hls_report = None

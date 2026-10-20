@@ -6,11 +6,19 @@ Usage:
 
 The config is the experiment YAML (as saved by the CLI into the run directory). The
 torch model is instantiated from its model.model section via jsonargparse — exactly
-the mechanism LightningCLI uses — its attention backends are switched to the portable
-"torch" SDPA path, the checkpoint weights are loaded, and everything is ported into a
-KerasMaskFormer built from the same section. The result is saved as a torch state
-dict, loadable with KerasMaskFormer.load_state_dict after building the model with
-build_keras_maskformer_from_config (any quant spec — float weights warm-start QAT).
+the mechanism LightningCLI uses — its attention backends other than linformer are
+switched to the portable "torch" SDPA path (a linformer attention owns trained
+projections and keeps its backend), the checkpoint weights are loaded, and everything
+is ported into a KerasMaskFormer built from the same section. The keras model then runs
+one forward on dummy events of the config's sizes (``materialize``: builds the lazy
+layers and applies the ported Linformer projections; ``state_dict()`` of an unbuilt
+linformer core raises) and registers its keras weights on the torch module tree
+(``register_keras_parameters``; without it an HGQ2 layer's kernel, bias, beta and ebops
+are not in ``state_dict()``). The result is saved as a torch state
+dict, loadable with ``load_keras_state`` (build, materialize, register, strict load),
+for any quant spec — float weights warm-start QAT.
+
+For the keras_native (JAX) model use ``convert_to_native`` instead.
 """
 
 import argparse
@@ -23,7 +31,8 @@ from torch import nn
 
 from hepattn.keras.maskformer import KerasMaskFormer
 from hepattn.keras.porting import port_maskformer
-from hepattn.models.encoder import change_attn_backends
+from hepattn.models.attention import Attention
+from hepattn.models.encoder import Encoder
 from hepattn.models.maskformer import MaskFormer
 
 
@@ -77,13 +86,63 @@ def build_keras_maskformer_from_config(model_cfg: dict, quant: dict | None = Non
     )
 
 
+def portable_attention(model: nn.Module) -> int:
+    """Switch every non-linformer attention to the "torch" backend; returns the number of modules switched.
+
+    ``change_attn_backends(model, "torch")`` raises for a linformer attention (org: "linformer owns trained projection
+    parameters"), and the hybrid ports a linformer attention to its masked-Linformer core, not to SDPA.
+    """
+    switched = 0
+    for module in model.modules():
+        if (isinstance(module, Encoder) and module.attn_type not in {"linformer", "torch"}) or (
+            isinstance(module, Attention) and module.attn_type not in {"linformer", "torch"}
+        ):
+            module.set_backend("torch")
+            switched += 1
+    return switched
+
+
+def read_model_state(path: str | Path) -> dict:
+    """The model state of a Lightning checkpoint (``model.`` prefix removed) or of a saved state dict.
+
+    ``weights_only=True``: a Lightning checkpoint of these models holds tensors and plain containers only, so no
+    pickled code runs.
+    """
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    if isinstance(state, dict) and "state_dict" in state:
+        state = {k.removeprefix("model."): v for k, v in state["state_dict"].items() if k.startswith("model.")}
+    return state
+
+
 def load_torch_model(model_cfg: dict, ckpt_path: str | Path) -> MaskFormer:
     model = instantiate_model_section(model_cfg)
-    change_attn_backends(model, "torch")
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    state = {k.removeprefix("model."): v for k, v in ckpt["state_dict"].items() if k.startswith("model.")}
-    model.load_state_dict(state)
+    portable_attention(model)
+    model.load_state_dict(read_model_state(ckpt_path))
     return model.eval()
+
+
+def dummy_inputs(data_cfg: dict, num_events: int = 2) -> dict:
+    """``CLICDataset`` dummy events at the config's node / object counts (to materialize the lazy keras layers)."""
+    from torch.utils.data import DataLoader  # noqa: PLC0415
+
+    from hepattn.experiments.clic.pflow_data import CLICDataset  # noqa: PLC0415
+
+    keys = ("inputs", "targets", "num_objects", "max_nodes", "incidence_cutval", "scale_dict_path")
+    kwargs = {key: data_cfg[key] for key in keys if key in data_cfg}
+    dataset = CLICDataset(filepath="unused", num_events=num_events, dummy_data=True, **kwargs)
+    inputs, _ = next(iter(DataLoader(dataset, batch_size=num_events)))
+    return inputs
+
+
+def load_keras_state(model: KerasMaskFormer, state_path: str | Path, inputs: dict) -> KerasMaskFormer:
+    """Materialize ``model`` on ``inputs``, register its keras weights, then load a state strictly.
+
+    ``load_state_dict`` raises ``RuntimeError`` if the state does not hold exactly the model's keys.
+    """
+    model.materialize(inputs)
+    model.register_keras_parameters()
+    model.load_state_dict(read_model_state(state_path), strict=True)
+    return model
 
 
 def main(args: list[str] | None = None) -> None:
@@ -99,6 +158,8 @@ def main(args: list[str] | None = None) -> None:
     torch_model = load_torch_model(model_cfg, opts.ckpt)
     keras_model = build_keras_maskformer_from_config(model_cfg)
     port_maskformer(torch_model, keras_model)
+    keras_model.materialize(dummy_inputs(raw["data"]))
+    keras_model.register_keras_parameters()
 
     torch.save(keras_model.state_dict(), opts.out)
     print(f"ported {opts.ckpt} -> {opts.out}")
