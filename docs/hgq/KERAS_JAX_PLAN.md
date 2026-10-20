@@ -1,7 +1,7 @@
 # Plan: move HGQ2 QAT training to pure Keras on JAX
 
-Status: G1 GO; S1-S4 merged into `keras-jax` on 2026-10-15; retargeted to the org/main float Linformer model (`ac0da8f`)
-on 2026-10-16 ([RETARGET_ORG_MAIN.md](RETARGET_ORG_MAIN.md), stages R0-R5; see "Status" below). Originally a proposal that waited for G1.
+Status: G1 GO (its trainer gap still OPEN until G3); S1-S4 merged into `keras-jax` on 2026-10-15; retargeted to the org/main float Linformer model (`ac0da8f`)
+on 2026-10-16; S5, S6a, S6b done on 2026-10-20 (G3 and the Polaris smoke not run yet) ([RETARGET_ORG_MAIN.md](RETARGET_ORG_MAIN.md), stages R0-R5; see "Status" below). Originally a proposal that waited for G1.
 Date: 2026-10-14. Branch: `keras-jax` (pushed only up to `197ede2`), worktree `hepattn-keras-jax`.
 Scope: only the CLIC HGQ2 quantization-aware training, evaluation and export path. The other
 experiments (`atlas_muon`, `trackml`, `tide`, ...) and the float torch model stay on torch and Lightning.
@@ -9,6 +9,21 @@ experiments (`atlas_muon`, `trackml`, `tide`, ...) and the float torch model sta
 All paths are relative to the `hepattn-keras-jax` worktree unless they start with `SP/`, which means
 `.venv-jax/lib/python3.12/site-packages/` (keras 3.15.0, hgq2 0.1.9, jax 0.11.2, scipy 1.18.1).
 Commits are on `keras-jax` (`git log main..keras-jax`).
+
+## Status update (2026-10-20, after S5, S6a and S6b)
+
+**Done:** S5 train step / optimizer / EBOPs / beta ([port_log/S5.md](port_log/S5.md)), S6a config, checkpoints, data,
+metrics, prediction writer ([port_log/S6a.md](port_log/S6a.md)), their merge ([port_log/S56-merge.md](port_log/S56-merge.md)),
+and S6b, the single-device training driver ([port_log/S6b.md](port_log/S6b.md)):
+`python -m hepattn.experiments.clic.main_jax fit|test` ([KERAS_NATIVE.md](KERAS_NATIVE.md), "Training"). On CPU it
+trains the generated Polaris config end to end (at test sizes), resumes bit for bit from every checkpoint position
+tested (inside an epoch, at an epoch end, after the PID's epoch step), compiles 2 train + 1 val programs per run, and
+logs the hybrid's names (`val/loss` = task loss, measured on the hybrid: S5's "task + quant_losses" was wrong). G2 was
+measured on Polaris (native fwd + bwd 165.2 ms vs hybrid ~1615 ms at b16, fp32; at JAX's default matmul precision, not
+the production "highest"). **Not run:** **G3** (`polaris/17_g3_step.pbs`: >= 1.8x the hybrid in-run step at b32,
+matching <= 15%; also the G1 gap, TF32 and the EBOPs share at b32) and the real-data smoke
+(`polaris/16_jax_smoke.pbs`). **G1 is not resolved** (the Keras-trainer gap is measured only by G3). Next: the two
+Polaris jobs, then S7 (converter, export) and S8 (G4).
 
 ## Status update (2026-10-16, after the retarget R0-R5)
 

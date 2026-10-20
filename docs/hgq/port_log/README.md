@@ -23,6 +23,7 @@ Setup and test commands: [KERAS_NATIVE.md](../KERAS_NATIVE.md).
 | S5 train step, optimizer, EBOPs / beta, BetaPID, hybrid `quant_losses` fix, beta setpoints | [S5.md](S5.md) (`S5_*.py`, `S5_evidence/`) | `s5/train` / `hepattn-s5` |
 | S6a config loader, checkpoint, data adapter, metrics, prediction writer | [S6a.md](S6a.md) (`S6a_mutations.py`) | `s6/io` / `hepattn-s6` |
 | Merge of S5 and S6a, cross-lane resume test (`TrainStep` state through a checkpoint); delta fix of the last review rounds (LightningCLI merge forms, LR tolerances, resume-safe pruning) | [S56-merge.md](S56-merge.md) (`S56_merge_mutations.py`, `S56_delta_mutations.py`, `S56_evidence/`) | `keras-jax` / `hepattn-keras-jax` |
+| S6b training driver (`loop.py`, `cli.py`, `main_jax.py`), Polaris smoke and G3 scripts | [S6b.md](S6b.md) (`S6b_mutations.py`, `S6b_val_loss_probe.py`, `S6b_evidence/`) | `keras-jax` / `hepattn-keras-jax` |
 
 ## Gates carried to a later stage
 

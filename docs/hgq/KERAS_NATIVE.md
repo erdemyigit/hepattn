@@ -4,7 +4,7 @@
 JAX (plan: [KERAS_JAX_PLAN.md](KERAS_JAX_PLAN.md); stage logs: [port_log/](port_log/README.md)).
 No module in it imports torch. `hepattn/keras/` (the hybrid, torch backend) stays the parity oracle.
 
-## Modules (state after the S1-S4 merge)
+## Modules (state after S6b)
 
 | Stage | Modules | Tests (`tests/keras_native/`) |
 |---|---|---|
@@ -13,10 +13,13 @@ No module in it imports torch. `hepattn/keras/` (the hybrid, torch backend) stay
 | S3 | `tasks.py` (4 task forwards), `decoder.py`, `maskformer.py` (`MaskFormer`, `from_config`) | `test_maskformer.py`, `test_mf_golden.py`, `test_mf_jit.py` |
 | S4 | `losses.py`, `matching.py` (host scipy LSAP via `jax.pure_callback`), `objective.py` (`matched_loss`) | `test_objective_parity.py`, `test_matching.py`, `test_objective_e2e.py` |
 | merge | | `test_lane_integration.py` (S3 model through the S4 loss, one jitted step) |
+| S5 | `train_step.py` (`TrainStep`), `optim.py`, `ebops.py`, `beta_control.py` | `test_train_step.py`, `test_optim.py`, `test_ebops.py`, `test_beta_control.py` |
+| S6a | `config.py`, `checkpoint.py`, `data.py`, `metrics.py`, `predict_writer.py` (+ `experiments/clic/native_data.py`, the torch data half) | `test_config.py`, `test_checkpoint.py`, `test_data.py`, `test_metrics.py`, `test_predict_writer.py`, `test_resume_cross_lane.py` |
+| S6b | `loop.py` (`Trainer`), `cli.py` (+ `experiments/clic/main_jax.py`, the entry point) | `test_loop.py`, `test_cli.py` |
 
 `matching.py` imports `jax` directly (`jax.pure_callback`, `jax.lax.stop_gradient`), so the matched loss
 (`objective.match_layers` / `matched_loss`) runs only on the JAX backend. Every other module uses `keras.ops` only.
-Not started: S5 train step, S6 driver/data/checkpoints/eval, S7 converter/export (plan section 4).
+Not started: S7 converter/export, S8 Polaris validation (plan section 4).
 
 ## Environment (macOS arm64, CPU)
 
@@ -105,6 +108,46 @@ puts keras on torch. `tests/conftest.py` therefore **ignores** `tests/keras_nati
 the jax backend, and the terminal summary prints `tests/keras_native ignored: ...`. Naming `tests/keras_native`
 (or a file in it) on the command line under another backend still raises: pytest loads that conftest at startup.
 So the native suite never runs in the CI unit job; run it with the command above.
+
+## Training (the S6b driver)
+
+`python -m hepattn.experiments.clic.main_jax` runs one training on one device (JAX picks the GPU when the CUDA jax is
+installed; there is no DDP). It reads the same YAML files as the hybrid (`config.load_config`: one file, several merged
+as LightningCLI merges them, the generated `polaris_hgq.yaml`, or a saved run `config.yaml`) and runs the hybrid's fit
+loop with the jitted steps (module docstring of `keras_native/loop.py` for the hook order and the logged names).
+
+```bash
+# Polaris: generate the config in fp32 on one device (the driver refuses bf16-mixed: fp32 first, user decision)
+HGQ_PRECISION=32 HGQ_DEVICES=1 DATA_DIR=$DATA_ROOT .venv-jax/bin/python polaris/03_make_config.py
+export JAX_COMPILATION_CACHE_DIR=$WORK_ROOT/jax_cache        # ~2 min per program on an A100 without it
+PYTHONPATH=$PWD/src .venv-jax/bin/python -m hepattn.experiments.clic.main_jax fit \
+  --config polaris_hgq.yaml --run-dir $WORK_ROOT/runs/r1
+# resume the same run (a walltime chain): the newest checkpoint of the run directory
+PYTHONPATH=$PWD/src .venv-jax/bin/python -m hepattn.experiments.clic.main_jax fit \
+  --config polaris_hgq.yaml --run-dir $WORK_ROOT/runs/r1 --resume last
+# prediction h5 (the PflowPredictionWriter layout) of a checkpoint
+PYTHONPATH=$PWD/src .venv-jax/bin/python -m hepattn.experiments.clic.main_jax test \
+  --config polaris_hgq.yaml --ckpt $WORK_ROOT/runs/r1/ckpts/epoch-004-step-....npz
+
+# local check on dummy events at test sizes (CPU, ~1 min)
+env -u KERAS_BACKEND PYTHONPATH=$PWD/src .venv-jax/bin/python -m hepattn.experiments.clic.main_jax fit \
+  --config tests/keras_native/s6b_fixtures/tiny_polaris.yaml --run-dir /tmp/r_tiny --dummy-data
+```
+
+`--help` lists the overrides (`--max-epochs`, `--max-steps`, `--limit-train-batches`, `--limit-val-batches`,
+`--batch-size`, `--num-workers`, `--num-train`, `--num-val`, `--log-every-n-steps`, `--ckpt-every-n-steps`,
+`--ckpt-save-top-k`, `--seed`, `--matmul-precision`, `--no-donate`, `--compile-cache`, `--metrics-per-layer`).
+A run directory holds: `config.yaml` (the merged config), `run.json` (options, versions, model hash, `total_steps`),
+`ckpts/` (`step-*.npz` every `every_n_train_steps` of the YAML's `ModelCheckpoint`, `epoch-*-step-*.npz` after each
+validation as hepattn's `Checkpoint`, pointers `last.json` / `best.json` on `val/loss`), `steps.csv` (one row per logged
+optimizer step), `metrics.csv` (one row per validation epoch, the hybrid `MetricsCsvWriter` layout) and `summary.json`
+(counters, compile counts, persistent-cache hits). Use one run directory per run and its resumes; the YAML's
+`CKPT_DIR` and `MetricsCsvWriter` paths are not used. A resume needs the same config and the same epoch length
+and total steps (the LR schedule): the driver refuses another. On CPU a resume continues bit for bit.
+
+The DataLoader workers (`data.num_workers`, 8 in the Polaris config) are spawned; keep `main_jax` as the entry point
+(its `__main__` guard is what a spawned worker re-imports). What differs from the Lightning run is listed in
+[port_log/S6b.md](port_log/S6b.md) (deviations).
 
 ## Rules for code in keras_native
 
