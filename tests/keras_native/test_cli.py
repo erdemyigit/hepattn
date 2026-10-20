@@ -9,11 +9,18 @@ selects JAX), on the tiny generated Polaris config:
 2. ``fit --resume`` from the step-6 checkpoint of run 1 in a new process and run directory: the final checkpoint equals
    run 1's bit for bit, the logged rows after the resume equal run 1's, and the compiles are persistent-cache hits
    (control: run 1, with an empty cache, has none);
-3. ``test`` on run 1's best checkpoint: the prediction h5 holds the 10 test events in order, without padding rows.
+3. ``test`` on run 1's best checkpoint: the prediction h5 holds the 10 test events in order, without padding rows;
+4. ``fit --resume last`` in a copy of run 1's finished directory: ``last`` is the step-12 checkpoint, written before
+   epoch 2's end hooks, so the resume re-runs that validation (deviation 6); it writes ``run-r1.json`` /
+   ``config-r1.yaml`` next to run 1's files and replaces, not repeats, the epoch-2 CSV row;
+5. run 1's ``config.yaml`` holds the command-line options: ``load_config`` of it gives run 1's effective settings.
 """
 
+import argparse
+import dataclasses
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -22,6 +29,8 @@ import numpy as np
 import pytest
 
 from hepattn.keras_native import loop
+from hepattn.keras_native.cli import apply_overrides
+from hepattn.keras_native.config import load_config
 
 from .s6b_utils import REPO, TINY, differing, npz_arrays
 
@@ -47,7 +56,9 @@ def runs(tmp_path_factory):
     second = run_cli("fit", *common, "--run-dir", base / "run2", "--resume", base / "run1/ckpts/step-000000006.npz")
     best = base / "run1/ckpts" / json.loads((base / "run1/ckpts/best.json").read_text())["file"]
     tested = run_cli("test", "--config", TINY, "--dummy-data", "--compile-cache", cache, "--ckpt", best, "--out", base / "pred.h5")
-    return {"base": base, "first": first, "second": second, "test": tested}
+    shutil.copytree(base / "run1", base / "run1_again")
+    again = run_cli("fit", *common, "--run-dir", base / "run1_again", "--resume", "last")  # finished: no step runs
+    return {"base": base, "first": first, "second": second, "test": tested, "again": again}
 
 
 def test_fit_writes_checkpoints_logs_and_summary(runs):
@@ -101,3 +112,39 @@ def test_test_command_writes_the_prediction_file(runs):
         assert f["object_masks"].shape[0] == 10
         assert {"truth_masks", "mask_logits"} <= set(f["object_masks"].dtype.names)
     assert "test/final_obj_class_accuracy_micro" in runs["test"]["metrics"]
+
+
+def test_resume_in_the_run_directory_keeps_the_first_run_files(runs):
+    run1, copy, again = runs["base"] / "run1", runs["base"] / "run1_again", runs["again"]
+    assert again["resumed_from"].endswith("step-000000012.npz") and again["global_step"] == 12
+    assert (copy / "run.json").read_text() == (run1 / "run.json").read_text()  # the resume wrote its own file
+    revision = json.loads((copy / "run-r1.json").read_text())
+    assert revision["resume"].endswith("step-000000012.npz")
+    # the resume's own options (no --num-workers 2); run 1's config.yaml stays as run 1 wrote it
+    assert load_config(copy / "config-r1.yaml").data.num_workers == 0
+    assert load_config(copy / "config.yaml").data.num_workers == 2
+    assert len(loop.read_csv(copy / "steps.csv")) == 12  # nothing after the checkpoint, nothing repeated
+    a, b = loop.read_csv(run1 / "metrics.csv"), loop.read_csv(copy / "metrics.csv")
+    assert [r["epoch"] for r in b] == [0.0, 1.0, 2.0]  # epoch 2's row dropped, then written again
+    assert b[-1]["val/loss"] == a[-1]["val/loss"]
+    assert (copy / "ckpts/epoch-002-step-000000012-r1.npz").is_file()  # deviation 6: the re-run epoch-end save
+
+
+def test_saved_config_holds_the_command_line_options(runs):
+    """``fit --config <run>/config.yaml`` repeats the run: data, checkpoint and trainer settings and the model."""
+    run1 = runs["base"] / "run1"
+    saved = load_config(run1 / "config.yaml")
+    args = argparse.Namespace(ckpt_every_n_steps=2, ckpt_save_top_k=-1, num_workers=2)
+    effective = apply_overrides(load_config(TINY), args)
+    assert saved.data == effective.data
+    assert saved.checkpoint == effective.checkpoint
+    assert saved.model_hash == effective.model_hash
+    settings = json.loads((run1 / "run.json").read_text())["settings"]
+    reread = dataclasses.asdict(loop.LoopSettings.from_run_config(saved, settings["run_dir"]))
+    yaml_keys = ("max_epochs", "max_steps", "limit_train_batches", "limit_val_batches", "log_every_n_steps", "check_val_every_n_epoch", "seed")
+    assert {k: reread[k] for k in yaml_keys} == {k: settings[k] for k in yaml_keys}
+    # control: the YAML without the options (what config.yaml held before) is another run
+    plain = load_config(TINY)
+    assert plain.data.num_workers != saved.data.num_workers
+    assert plain.checkpoint.step != saved.checkpoint.step
+    assert dataclasses.replace(saved.checkpoint.step, every_n_train_steps=2, save_top_k=-1) == saved.checkpoint.step

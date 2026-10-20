@@ -8,17 +8,22 @@
 
 Several ``--config`` files merge in order, as LightningCLI does (``config.load_config``). The options below override
 the YAML (they are the Lightning trainer / data arguments a Polaris job sets on the command line). Everything a run
-writes goes under ``--run-dir``: ``config.yaml`` (the merged config the run used), ``run.json`` (options, versions,
-model hash), ``ckpts/``, ``steps.csv`` (every logged step), ``metrics.csv`` (every validation epoch, the hybrid
-``MetricsCsvWriter`` layout) and ``summary.json`` (counters, compile counts, persistent-cache events). A run directory
-belongs to one run and its resumes (checkpoint pruning looks at every file in ``ckpts``); the YAML's checkpoint and
-``MetricsCsvWriter`` paths are not used.
+writes goes under ``--run-dir``: ``config.yaml`` (the merged config with the command-line data, trainer, seed and
+step-checkpoint options written in, so ``fit --config <run-dir>/config.yaml`` repeats the run; ``--matmul-precision``,
+``--no-donate`` and ``--metrics-per-layer`` are in ``run.json`` only), ``run.json`` (options, versions, model hash),
+``ckpts/``, ``steps.csv`` (every logged step), ``metrics.csv`` (every validation epoch, the hybrid
+``MetricsCsvWriter`` layout) and ``summary.json`` (counters, compile counts, persistent-cache events of the latest
+process). A later process in the same directory (a resume) writes ``config-r<n>.yaml`` / ``run-r<n>.json`` and keeps
+the first ones, and drops the CSV rows written after its checkpoint. A run directory belongs to one run and its
+resumes (checkpoint pruning looks at every file in ``ckpts``); the YAML's checkpoint and ``MetricsCsvWriter`` paths
+are not used.
 
 The persistent JAX compilation cache (``--compile-cache``, default ``$JAX_COMPILATION_CACHE_DIR`` or
 ``~/.cache/hepattn/jax``) lets a resumed or repeated run skip the ~2 min compile per program on an A100.
 """
 
 import argparse
+import copy
 import dataclasses
 import json
 import os
@@ -86,10 +91,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+DATA_OPTIONS = ("batch_size", "num_workers", "num_train", "num_val", "num_test", "train_path", "valid_path", "test_path")
+TRAINER_OPTIONS = ("max_epochs", "max_steps", "limit_train_batches", "limit_val_batches", "log_every_n_steps", "check_val_every_n_epoch")
+STEP_CALLBACK = "lightning.pytorch.callbacks.ModelCheckpoint"
+
+
 def apply_overrides(rc: RunConfig, args: argparse.Namespace) -> RunConfig:
     """``rc`` with the data and checkpoint options of ``args``."""
     data = {}
-    for key in ("batch_size", "num_workers", "num_train", "num_val", "num_test", "train_path", "valid_path", "test_path"):
+    for key in DATA_OPTIONS:
         value = getattr(args, key, None)
         if value is not None:
             data[key] = value
@@ -104,6 +114,47 @@ def apply_overrides(rc: RunConfig, args: argparse.Namespace) -> RunConfig:
         )
         rc = dataclasses.replace(rc, checkpoint=dataclasses.replace(rc.checkpoint, step=step))
     return rc
+
+
+def effective_raw(rc: RunConfig, args: argparse.Namespace) -> dict:
+    """``rc.raw`` with the command-line options written in: the YAML that ``load_config`` reads back to the same data,
+    checkpoint and trainer settings (``rc`` is ``apply_overrides``'s result).
+    """
+    raw = copy.deepcopy(rc.raw)
+    data = raw.setdefault("data", {})
+    for key in DATA_OPTIONS:
+        if getattr(args, key, None) is not None:
+            data[key] = getattr(args, key)
+    trainer = raw.setdefault("trainer", {})
+    for key in TRAINER_OPTIONS:
+        if getattr(args, key, None) is not None:
+            trainer[key] = getattr(args, key)
+    if getattr(args, "seed", None) is not None:
+        raw["seed_everything"] = args.seed
+    if getattr(args, "ckpt_every_n_steps", None) is not None or getattr(args, "ckpt_save_top_k", None) is not None:
+        step = rc.checkpoint.step
+        values = {"every_n_train_steps": step.every_n_train_steps, "save_top_k": step.save_top_k, "save_last": step.save_last}
+        callbacks = trainer.setdefault("callbacks", []) or []
+        trainer["callbacks"] = callbacks
+        for i, entry in enumerate(callbacks):
+            name = entry["class_path"] if isinstance(entry, dict) else str(entry)
+            if name.rsplit(".", 1)[-1] == "ModelCheckpoint":
+                entry = entry if isinstance(entry, dict) else {"class_path": name}
+                entry["init_args"] = {**(entry.get("init_args") or {}), **values}
+                callbacks[i] = entry
+                break
+        else:
+            callbacks.append({"class_path": STEP_CALLBACK, "init_args": {**values, "monitor": step.monitor}})
+    return raw
+
+
+def _revision(path: Path) -> Path:
+    """``path``, or ``<stem>-r<n><suffix>`` (next free ``n``) if it exists."""
+    n, out = 0, path
+    while out.exists():
+        n += 1
+        out = path.with_name(f"{path.stem}-r{n}{path.suffix}")
+    return out
 
 
 def _versions() -> dict:
@@ -165,13 +216,15 @@ def fit(args: argparse.Namespace, data_factory: DataFactory) -> dict:
         if args.resume == "last":
             pointer = run_dir / "ckpts" / "last.json"
             if not pointer.is_file():
-                raise SystemExit(f"--resume last: {pointer} does not exist")
+                # the hepattn Checkpoint (epoch) callback forces save_last off, as in the hybrid: only a step callback
+                # (the YAML's ModelCheckpoint or --ckpt-every-n-steps) writes ``last``
+                raise SystemExit(f"--resume last: {pointer} does not exist (no step checkpoint callback?); pass an epoch checkpoint path")
             resume = run_dir / "ckpts" / json.loads(pointer.read_text())["file"]
         trainer.restore(resume)
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "config.yaml").write_text(yaml.safe_dump(rc.raw, sort_keys=False))
+    _revision(run_dir / "config.yaml").write_text(yaml.safe_dump(effective_raw(rc, args), sort_keys=False))
     loop.write_json(
-        run_dir / "run.json",
+        _revision(run_dir / "run.json"),
         {
             "argv": sys.argv,
             "args": vars(args),
@@ -211,7 +264,7 @@ def test(args: argparse.Namespace, data_factory: DataFactory) -> dict:
     trainer = loop.Trainer(rc, settings, sample=_first(source), train_batches=meta["micro_per_epoch"])
     trainer.total_steps = meta["total_steps"]  # restore() checks the schedule length; the test stage does not step
     trainer.micro_per_epoch = meta["micro_per_epoch"]
-    trainer.restore(ckpt)
+    trainer.restore(ckpt, check_seed=False)
     out = Path(args.out) if args.out else output_path(ckpt)
     metrics = trainer.test(source, out, source.num_events, limit_batches=args.limit_test_batches)
     result = {"h5": str(out), "ckpt": str(ckpt), "metrics": metrics, "compile_counts": trainer.compile_counts()}
