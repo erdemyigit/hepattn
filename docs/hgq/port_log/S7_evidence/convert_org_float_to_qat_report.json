@@ -1,0 +1,32 @@
+{
+ "checkpoint": {
+  "epoch": 0,
+  "global_step": 4,
+  "path": "tests/keras_native/s7_fixtures/org_float/model.ckpt",
+  "pytorch-lightning_version": "2.5.2",
+  "sha256": "c7b5beacaa87747d499d3dd244c36f4ce4d0f6acef503062b2ea4beaa2172e54"
+ },
+ "config": [
+  "tests/keras_native/s7_fixtures/org_float/config.yaml"
+ ],
+ "config_hash": "106dae9a3a18a2863f21667f1fb7d40e8fdfcc1e7d79f494f02bbfa94d3a62a8",
+ "dropped_rows": {
+  "decoder_l0_q_sa_project_unmasked_E": 48,
+  "decoder_l0_q_sa_project_unmasked_F": 48,
+  "decoder_l1_q_sa_project_unmasked_E": 48,
+  "decoder_l1_q_sa_project_unmasked_F": 48
+ },
+ "ignored": [
+  "decoder.tasks.0.loss_weights",
+  "tasks.0.loss_weights"
+ ],
+ "native_kept_initial": 1825,
+ "native_variables": 1986,
+ "native_written": 161,
+ "source": "torch",
+ "target_config": [
+  "tests/keras_native/s7_fixtures/hybrid/config.yaml"
+ ],
+ "torch_tensors": 131,
+ "torch_tensors_read": 129
+}

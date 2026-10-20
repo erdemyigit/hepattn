@@ -1,7 +1,7 @@
 # Plan: move HGQ2 QAT training to pure Keras on JAX
 
 Status: G1 GO (its trainer gap still OPEN until G3); S1-S4 merged into `keras-jax` on 2026-10-15; retargeted to the org/main float Linformer model (`ac0da8f`)
-on 2026-10-16; S5, S6a, S6b done on 2026-10-20 (G3 and the Polaris smoke not run yet) ([RETARGET_ORG_MAIN.md](RETARGET_ORG_MAIN.md), stages R0-R5; see "Status" below). Originally a proposal that waited for G1.
+on 2026-10-16; S5, S6a, S6b done on 2026-10-20 (Polaris: real-data smoke passed, G3 queued); S7 done on 2026-10-20 (branch `s7/export`) ([RETARGET_ORG_MAIN.md](RETARGET_ORG_MAIN.md), stages R0-R5; see "Status" below). Originally a proposal that waited for G1.
 Date: 2026-10-14. Branch: `keras-jax` (pushed only up to `826bc0a`, after R5; S5 and S6 are not pushed), worktree `hepattn-keras-jax`.
 Scope: only the CLIC HGQ2 quantization-aware training, evaluation and export path. The other
 experiments (`atlas_muon`, `trackml`, `tide`, ...) and the float torch model stay on torch and Lightning.
@@ -9,6 +9,20 @@ experiments (`atlas_muon`, `trackml`, `tide`, ...) and the float torch model sta
 All paths are relative to the `hepattn-keras-jax` worktree unless they start with `SP/`, which means
 `.venv-jax/lib/python3.12/site-packages/` (keras 3.15.0, hgq2 0.1.9, jax 0.11.2, scipy 1.18.1).
 Commits are on `keras-jax` (`git log main..keras-jax`).
+
+## Status update (2026-10-20, after S7)
+
+**Done:** S7 ([port_log/S7.md](port_log/S7.md)), on branch `s7/export` (worktree `hepattn-s7`, from `f30d650`):
+- converter `python -m hepattn.experiments.clic.convert_to_native` (outside `keras_native`: imports torch) from a
+  Lightning `.ckpt` + its saved `config.yaml` of (a) the org float model and (b) the hybrid HGQ2 model, into the native
+  model and S6a's checkpoint format; `main_jax fit --init-from` warm-starts from it ([KERAS_NATIVE.md](KERAS_NATIVE.md));
+- export under JAX (`keras_native/export.py`): functional assembly from the trained layers (SwiGLU included), export
+  forms for the renorm `kept` leaf (exact) and inline silu / sigmoid (approximate); every org-model leaf kind generates
+  hls4ml code; C simulation bit-exact for 22 of 22 models on falcon ([FPGA_STATUS.md](FPGA_STATUS.md));
+- hybrid CLIs `port_to_keras` / `evaluate_hgq` run on the org model (R4b / S56 open issues closed).
+Section 3.9's "existing Polaris `.ckpt` files are loaded through the S7 converter" holds for hybrid checkpoints
+written by `MPflowHGQ` (they hold every keras weight) and org float checkpoints; the optimizer state is not converted.
+**Not run:** G3 (queued on Polaris); S8.
 
 ## Status update (2026-10-20, after S5, S6a and S6b)
 
@@ -546,7 +560,7 @@ S5 needs lanes A and B. S8 needs all four lanes.
   - The prediction h5 has the same keys, shapes and dtypes as `PflowPredictionWriter` for the same weights.
   - The metrics equal `torchmetrics` on fixed predictions.
   - The YAML loader reads `pflow_hgq.yaml` and the generated `polaris_hgq.yaml` (`polaris/03_make_config.py`) unchanged.
-- **S7:**
+- **S7:** (*done 2026-10-20: [port_log/S7.md](port_log/S7.md); the gates as run are listed there*)
   - A converted hybrid checkpoint gives forwards equal to the hybrid's golden files at the S3 tolerances.
   - `tests/keras/test_export.py` (9 tests) passes under `KERAS_BACKEND=jax`. The csim gates run on linux.
 - **S8 / G4 (Polaris):**

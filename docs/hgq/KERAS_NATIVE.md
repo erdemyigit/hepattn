@@ -4,7 +4,7 @@
 JAX (plan: [KERAS_JAX_PLAN.md](KERAS_JAX_PLAN.md); stage logs: [port_log/](port_log/README.md)).
 No module in it imports torch. `hepattn/keras/` (the hybrid, torch backend) stays the parity oracle.
 
-## Modules (state after S6b)
+## Modules (state after S7)
 
 | Stage | Modules | Tests (`tests/keras_native/`) |
 |---|---|---|
@@ -17,10 +17,11 @@ No module in it imports torch. `hepattn/keras/` (the hybrid, torch backend) stay
 | S5 | `train_step.py` (`TrainStep`), `optim.py`, `ebops.py`, `beta_control.py` | `test_train_step.py`, `test_optim.py`, `test_ebops.py`, `test_beta_control.py` |
 | S6a | `config.py`, `checkpoint.py`, `data.py`, `metrics.py`, `predict_writer.py` (+ `experiments/clic/native_data.py`, the torch data half) | `test_config.py`, `test_checkpoint.py`, `test_data.py`, `test_metrics.py`, `test_predict_writer.py`, `test_resume_cross_lane.py`, `test_data_real.py` (`requiresdata`) |
 | S6b | `loop.py` (`Trainer`), `cli.py` (+ `experiments/clic/main_jax.py`, the entry point) | `test_loop.py`, `test_cli.py` |
+| S7 | `export.py` (functional assembly, export forms, hls4ml); `loop.Trainer.warm_start` (`main_jax fit --init-from`); + `experiments/clic/convert_to_native.py` (the converter: imports torch, so outside this package) | `test_convert.py`, `test_convert_fit.py`, `test_export.py` (`s7_fixtures/`); hybrid side: `tests/keras/test_clic_clis.py` |
 
 `matching.py` imports `jax` directly (`jax.pure_callback`, `jax.lax.stop_gradient`), so the matched loss
 (`objective.match_layers` / `matched_loss`) runs only on the JAX backend. Every other module uses `keras.ops` only.
-Not started: S7 converter/export, S8 Polaris validation (plan section 4).
+Not started: S8 Polaris validation (plan section 4).
 
 ## Environment (macOS arm64, CPU)
 
@@ -86,6 +87,12 @@ until lane R4 makes the generated Polaris config do so.
 
 With these, every module of `hepattn.models` and `hepattn.utils`, plus `hepattn.experiments.clic.lightning_module`
 and `pflow_data`, imports under `KERAS_BACKEND=jax` (41 modules, 0 failures, measured 2026-10-14).
+
+S7 added hls4ml and da4ml (the versions of the hybrid env) for the export tests:
+
+```bash
+uv pip install --python .venv-jax/bin/python "hls4ml==1.3.0" "da4ml==0.6.0"
+```
 
 The full resolved set is in [keras_native_env.txt](keras_native_env.txt) (`uv pip freeze`). The canonical way to
 recreate the venv is `uv venv --python 3.12.0 .venv-jax && uv pip sync --python .venv-jax/bin/python
@@ -173,6 +180,53 @@ The DataLoader workers (`data.num_workers`, 8 in the Polaris config) are spawned
 (its `__main__` guard is what a spawned worker re-imports). What differs from the Lightning run is listed in
 [port_log/S6b.md](port_log/S6b.md) (deviations).
 
+## Converting a Lightning checkpoint (S7)
+
+`python -m hepattn.experiments.clic.convert_to_native` turns a Lightning checkpoint of the org float model
+(`main.py`, `hepattn.models.MaskFormer`) or of the hybrid HGQ2 model (`main_hgq.py`, `KerasMaskFormer`) into a native
+checkpoint (the `checkpoint.py` format, model variables only, step 0). It needs the run's saved `config.yaml` (the
+source model) and reads the `.ckpt` with `torch.load(weights_only=True)`:
+
+```bash
+# hybrid QAT run -> native, same model (weights, quantizer bitwidths, beta)
+PYTHONPATH=$PWD/src .venv-jax/bin/python -m hepattn.experiments.clic.convert_to_native \
+  --config <run>/config.yaml --ckpt <run>/ckpts/epoch=...ckpt --out converted.npz --report converted.json
+# org float run -> the QAT model of another config (a QAT warm start: the quantizers keep their initial state)
+PYTHONPATH=$PWD/src .venv-jax/bin/python -m hepattn.experiments.clic.convert_to_native \
+  --config <float_run>/config.yaml --ckpt <float_run>/ckpts/epoch=...ckpt --target-config polaris_hgq.yaml --out warm.npz
+# train from it (warm start: optimizer, step, LR schedule, beta controller and data position start fresh)
+PYTHONPATH=$PWD/src .venv-jax/bin/python -m hepattn.experiments.clic.main_jax fit \
+  --config polaris_hgq.yaml --run-dir runs/r1 --init-from warm.npz
+# or evaluate it
+PYTHONPATH=$PWD/src .venv-jax/bin/python -m hepattn.experiments.clic.main_jax test --config <run>/config.yaml --ckpt converted.npz
+```
+
+The target config defaults to `--config`; `main_jax` refuses a checkpoint of another model (config hash). The converter
+checks both directions: every source tensor is read (the task `loss_weights` buffers are compared with the native
+class weights; the hybrid's `proj_*_dead` rows are dropped, as org never reads them) and every native variable is
+written (a float source into a QAT target leaves only the HGQ2 quantizer state, `beta` and `ebops` at their initial
+values); anything else raises `ConversionError`. For a float target it also reports the torch-vs-native forward
+difference on two dummy events (`max_abs_diff` in the report). The mapping and its gates: module docstring and
+[port_log/S7.md](port_log/S7.md). The optimizer state of the Lightning checkpoint is not converted (a resume of a
+Lightning run continues as a warm start).
+
+## Export to hls4ml (S7)
+
+`hepattn.keras_native.export` assembles keras functional models from the trained layers (no copy, bit-identical):
+`build_functional_dense` (any native `Dense`, SwiGLU included), `leaf_model` (one HGQ2 leaf), and the export forms of
+the leaves hls4ml 1.3.0 does not convert bit-exactly as trained: `kept_export_form` (the renorm `kept` einsum as a
+`QEinsumDense` with the frozen table; equal to the leaf) and `activation_export_form` (inline silu / sigmoid as a
+linear `QDense` + a rank-2 table; approximate). `convert_to_hls` runs hls4ml's HGQ2 flow. Every HGQ2 leaf kind of the
+org model generates code through these; C simulation needs Linux:
+
+```bash
+env -u KERAS_BACKEND PYTHONPATH=src .venv-jax/bin/python docs/hgq/port_log/S7_csim.py export /tmp/s7_csim   # macOS
+KERAS_BACKEND=jax PYTHONPATH=src python docs/hgq/port_log/S7_csim.py csim /tmp/s7_csim                      # Linux
+```
+
+The Linux side needs only keras, hgq2, jax (CPU), hls4ml and da4ml (`S7_csim.py` docstring). Measured on falcon:
+docs/hgq/FPGA_STATUS.md and [port_log/S7.md](port_log/S7.md).
+
 ## Rules for code in keras_native
 
 - No `import torch` in any module. `tests/keras_native/test_import_hygiene.py` (a) imports every module of the
@@ -180,8 +234,8 @@ The DataLoader workers (`data.num_workers`, 8 in the Polaris config) are spawned
   `.py` file and fails on any import, at any depth (also inside functions, also `importlib.import_module`),
   of torch, torchmetrics, lightning, pytorch_lightning, lion_pytorch, torchjd, or a hepattn module outside
   `hepattn.keras_native`. New modules are covered automatically.
-- Consequence: code that needs torch (the S7 torch-ckpt converter, an S6 adapter around the torch
-  `DataLoader`) lives outside `keras_native`, e.g. in a sibling module or a script.
+- Consequence: code that needs torch (the S7 converter `experiments/clic/convert_to_native.py`, the S6 adapter around
+  the torch `DataLoader`) lives outside `keras_native`, e.g. in a sibling module or a script.
 - `keras_native/__init__.py` imports no submodule (lanes add modules without editing it). It also must not set
   or check the backend: `factory.py` is re-exported to the torch hybrid through `hepattn/keras/factory.py`.
 - Static shapes, deterministic layer names as in the hybrid, and unsupported configs raise.

@@ -196,12 +196,12 @@ The resulting state loads into a `KerasMaskFormer` built from the same config
 (float, or quantized for a QAT warm start — kernels/biases share one layout; use
 `hepattn.keras.porting.port_keras_to_keras` for float→quant keras-side ports).
 
-Not yet for the org Linformer model (R4b open issue): `port_to_keras` fails at `change_attn_backends(model, "torch")`,
-which org refuses for linformer, and once that is fixed it must call `keras_model.materialize(batch)` after
-`port_maskformer` and before `state_dict()` (the save raises otherwise). `evaluate_hgq --float-state` must materialize
-the float model before `load_state_dict` in the same way. `build_keras_maskformer_from_config` (used by `port_to_keras`,
-`eval_keras` and `evaluate_hgq`) keeps `input_sort_field` of a torch config since the retarget critique
-(`tests/keras/test_port_to_keras_config.py`); before, it built an unsorted hybrid for the org model.
+Works for the org Linformer model since S7 (`tests/keras/test_clic_clis.py`): linformer attentions keep their
+backend (`change_attn_backends(model, "torch")` raises for them), and the CLI materializes the keras model on dummy
+events of the config's sizes and registers its keras weights before `state_dict()`. Load the state with
+`port_to_keras.load_keras_state(model, path, inputs)` (materialize, `register_keras_parameters`, strict load).
+`build_keras_maskformer_from_config` keeps `input_sort_field` of a torch config (`tests/keras/test_port_to_keras_config.py`).
+For the keras_native (JAX) model, convert with `convert_to_native` instead ([KERAS_NATIVE.md](KERAS_NATIVE.md)).
 
 ## Evaluating a trained model
 
@@ -218,6 +218,10 @@ python -m hepattn.experiments.clic.evaluate_hgq \
     [--float-state <float_state.pt>]   # side-by-side quantized-vs-float columns
     [--hls]                            # + hls4ml conversion/resource report on the classifier head
 ```
+
+Since S7 the quantized model is materialized and its keras weights registered before the strict load (a
+`MPflowHGQ` checkpoint holds every HGQ2 kernel), `--float-state` builds the float model without the config's quant
+spec, and `--hls` converts the head in its LUT export form (inline SiLU does not convert, docs/hgq/FPGA_STATUS.md).
 
 Notes:
 - Point `--config`'s `test_path` at a **train-format** file (`val_clic_fix.root` or

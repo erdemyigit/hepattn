@@ -1,8 +1,8 @@
 # FPGA conversion status (hls4ml 1.3.0, HGQ2 0.1.9)
 
-Measured on this repository's models and pinned by `tests/keras/test_export.py`
-(the characterization tests fail if an upstream release changes any row — update
-this document when they do).
+Measured on this repository's models and pinned by `tests/keras/test_export.py` (hybrid, torch backend) and
+`tests/keras_native/test_export.py` (native, JAX backend). The characterization tests fail if an upstream release
+changes a row: update this document when they do.
 
 ## Support matrix
 
@@ -11,9 +11,13 @@ this document when they do).
 | `QDense` (linear / relu), rank-2 per-token | ✅ | ✅ verified (linux¹) |
 | `QDense` pointwise, rank-3 `(150, dim)` (CLIC head shape) | ✅ | ✅ verified (linux¹) |
 | Attention core: `QDense`×4 + `QEinsum`×2 + `QSoftmax`, fixed shapes | ✅ | ✅ verified (linux¹) |
-| silu **inline** in `QDense(activation="silu")` | ❌ (converter TypeError) | — |
-| silu as `QUnaryFunctionLUT(allow_heterogeneous_table=False)`, rank-2 | ✅ ² | codegen ✅ (add a csim gate next) |
+| silu **inline** in `QDense(activation="silu")` | ❌ rank 3: `TypeError` in hls4ml `bit_exact.py:602` (`np.ones(k)` on an array); rank 2 followed by a layer: shape `AssertionError` (same cause); rank 2 as the last layer: writes a call to `nnet::silu`, which no hls4ml 1.3.0 template defines³ | — |
+| sigmoid **inline** in `QDense` (the encoder value-residual mix) | ✅ | ❌ hls4ml's own sigmoid table: all 2304 outputs differ, max 9.8e-4³ |
+| silu / sigmoid as `QDense` (linear) + rank-2 `QUnaryFunctionLUT` (the S7 `activation_export_form`) | ✅ ² | ✅ verified (linux³); approximate to the trained layer (half a lane step) |
 | `QUnaryFunctionLUT` on rank-3 (pointwise) inputs | ❌ (HGQ2 table-shape bug) | — |
+| renorm `kept`: `QEinsum` of a mask with a computed batch-1 (1, n, k) table | ❌ "Batch dim mismatch for the inputs and output" | — |
+| renorm `kept` as `QEinsumDense` with the frozen table as kernel (S7 `kept_export_form`, equal to the leaf) | ✅ | ✅ verified (linux³) |
+| every other HGQ2 leaf kind of the org model (`QEinsumDense` E/F projections, the 8 `QEinsum` equations, `QSoftmax`, rsqrt `QUnaryFunctionLUT`) | ✅ | ✅ verified (linux³)⁴ |
 
 ¹ `hls_model.compile()` (C simulation) cannot build on macOS: hls4ml's bundled
 `ap_types` headers are incompatible with Apple's libc++ (`reference to 'complex' is
@@ -26,9 +30,20 @@ random inputs.
 ("bit-exactness may be compromised") — benign for the gated constructs above per
 the csim verdicts.
 
-Conversion must run under `torch.no_grad()` on the torch backend (the converter
-materializes LUT tables by evaluating activations and calling `.numpy()`);
-`hepattn.keras.export.convert_to_hls` handles this.
+³ Native model under JAX (S7, `docs/hgq/port_log/S7_csim.py`), on falcon (Ubuntu 24.04, g++ 13.3.0), 2026-10-20: one
+model per HGQ2 leaf kind of the org QAT model converted from a hybrid Lightning checkpoint (19 kinds, the kept and
+silu / sigmoid kinds in export form), the toy MLP and attention core, and the classification head in its LUT form:
+22 of 22 bit-exact (16 random events each); control rows: the inline sigmoid as trained differs, and one input
+perturbed by 3 LSB changes 6 outputs. Keras on Linux equals keras on macOS on every row
+(`docs/hgq/port_log/S7_evidence/csim.json`).
+
+⁴ A leaf without an input quantizer of its own (`QSoftmax`) is gated behind a fixed (8, 12) input quantizer: in the
+full graph the previous layer's result type sets its input precision; fed a float input directly, hls4ml reads it at
+its default precision and C simulation differs (measured: 16856 of 18432 outputs, max 2.9e-3, before the fix).
+
+Under the torch backend the conversion must run under `torch.no_grad()` (the converter materializes LUT tables by
+evaluating activations and calling `.numpy()`); `hepattn.keras.export.convert_to_hls` handles this. Under JAX no
+wrapper is needed (`hepattn.keras_native.export.convert_to_hls`).
 
 ## What this means for deploying the CLIC model
 
@@ -36,7 +51,8 @@ The training model uses inline silu activations (mirroring the torch model
 one-to-one for parity). A deployment-oriented model/config should:
 
 1. express nonlinear activations as explicit `QUnaryFunctionLUT` layers with
-   homogeneous tables (a `LayerFactory` option — natural follow-up work), and
+   homogeneous tables (a `LayerFactory` option — natural follow-up work; the S7
+   `activation_export_form` does this after training, which is approximate), and
 2. export per-query heads either at full pointwise rank with relu/linear, or
    per-token (rank-2) when LUT activations are involved.
 
