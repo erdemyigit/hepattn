@@ -391,3 +391,8 @@ def test_scheduler_ramp_is_the_shared_ramp():
         written = module.model.keras_layers()[0]._beta.value  # noqa: SLF001  (our own stub)
         assert written == ramp_beta(step, 1e-12, 5e-10, 100)
     assert ramp_beta(37, 1e-12, 5e-10, 100) == pytest.approx(1e-12 + 0.37 * (5e-10 - 1e-12), rel=1e-12, abs=0)
+    # the ramp law itself, with literal values (the loop above only ties BetaScheduler to ramp_beta): start, end, then flat
+    expected = {0: 1e-12, 100: 5e-10, 250: 5e-10}
+    for step, beta in expected.items():
+        sched.on_train_batch_start(SimpleNamespace(global_step=step), module, None, 0)
+        assert module.model.keras_layers()[0]._beta.value == pytest.approx(beta, rel=1e-12, abs=0), step  # noqa: SLF001

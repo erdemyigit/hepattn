@@ -133,7 +133,9 @@ class TrainStep:
     def __init__(self, model, optimizer, loss_fn: LossFn, *, matmul_precision: str | None = "highest", donate: bool = True, grad_norm: bool = False):
         if not model.built:
             raise ValueError("build the model eagerly (one call on a real batch) before creating the jitted steps")
-        if not optimizer.built or len(optimizer._trainable_variables) != len(model.trainable_variables):  # noqa: SLF001
+        tracked = optimizer._trainable_variables if optimizer.built else []  # noqa: SLF001
+        # identity, not count: slots and weight-decay flags are per variable, so another model's optimizer is wrong
+        if len(tracked) != len(model.trainable_variables) or any(a is not b for a, b in zip(tracked, model.trainable_variables, strict=True)):
             raise ValueError("the optimizer must be built for model.trainable_variables (optim.build_optimizer)")
         self.model = model
         self.optimizer = optimizer
