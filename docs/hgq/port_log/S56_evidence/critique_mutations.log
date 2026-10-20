@@ -1,0 +1,54 @@
+X0_jax: baseline: 32 passed, 117 deselected, 40 warnings in 603.93s (0:10:03)
+X0_loop: baseline: 6 passed, 26 deselected, 14 warnings in 260.20s (0:04:20)
+X0_torch: baseline: 8 passed, 52 warnings in 62.60s (0:01:02)
+X1_quantizer_grads_zeroed: KILLED: 1 failed, 20 deselected, 14 warnings in 168.47s (0:02:48)
+    FAILED tests/keras_native/test_train_step.py::test_training_port_loss_falls_and_quantizers_move
+X2_register_tokens_detached: KILLED: 1 failed, 20 deselected, 14 warnings in 163.24s (0:02:43)
+    FAILED tests/keras_native/test_train_step.py::test_every_trainable_variable_gets_a_finite_nonzero_gradient
+X3_penalty_scaled: KILLED: 1 failed, 20 deselected, 14 warnings in 192.36s (0:03:12)
+    FAILED tests/keras_native/test_train_step.py::test_penalty_check_against_an_eager_reference
+X4_readout_biased: KILLED: 1 failed, 4 deselected, 14 warnings in 40.78s
+    FAILED tests/keras_native/test_ebops.py::test_readout_equals_the_torch_backend_value
+X5_set_beta_tuple: KILLED: 1 failed, 20 deselected, 14 warnings in 287.41s (0:04:47)
+    FAILED tests/keras_native/test_train_step.py::test_beta_change_keeps_the_executable_and_scales_the_penalty
+X6_periodic_shifted: KILLED: 1 failed, 31 deselected, 14 warnings in 115.33s (0:01:55)
+    FAILED tests/keras_native/test_loop.py::test_periodic_ebops_follows_the_optimizer_step
+X7_pid_half_damping: KILLED: 2 failed, 8 passed, 12 deselected in 0.16s
+    FAILED tests/keras_native/test_beta_control.py::test_controller_equals_hgq2_beta_pid[0.5-below_target]
+    FAILED tests/keras_native/test_beta_control.py::test_controller_equals_hgq2_beta_pid[0.5-decaying]
+X8_onecycle_no_floor: KILLED: 1 failed, 1 passed, 11 deselected, 14 warnings in 3.67s
+    FAILED tests/keras_native/test_optim.py::test_onecycle_equals_torch_at_20_steps[4]
+X9_no_accumulation: KILLED: 1 failed, 12 deselected, 14 warnings in 36.61s
+    FAILED tests/keras_native/test_optim.py::test_accumulation_averages_k_micro_batches_like_one_k_times_batch
+X10_wd_decays_integer_bits: KILLED: 2 failed, 11 deselected, 14 warnings in 58.30s
+    FAILED tests/keras_native/test_optim.py::test_weight_decay_excludes_exactly_the_quantizer_paths[AdamW]
+    FAILED tests/keras_native/test_optim.py::test_weight_decay_excludes_exactly_the_quantizer_paths[Lion]
+X11_resume_drops_ebops_reading: KILLED: 3 failed, 1 passed, 28 deselected, 14 warnings in 218.94s (0:03:38)
+    FAILED tests/keras_native/test_loop.py::test_resume_continues_bit_for_bit[step-000000003.npz-position0]
+    FAILED tests/keras_native/test_loop.py::test_resume_continues_bit_for_bit[step-000000004.npz-position1]
+    FAILED tests/keras_native/test_loop.py::test_resume_continues_bit_for_bit[epoch-000-step-000000004.npz-position2]
+X12_tail_for_every_batch: KILLED: 1 failed, 31 deselected, 14 warnings in 105.96s (0:01:45)
+    FAILED tests/keras_native/test_loop.py::test_trace_counts_over_the_run - Asse...
+X13_h5_half_precision: KILLED: 1 failed, 6 deselected, 14 warnings in 16.87s
+    FAILED tests/keras_native/test_predict_writer.py::test_h5_layout_and_values_equal_the_torch_writer
+X14_mean_per_batch: KILLED: 3 failed, 21 deselected, 22 warnings in 4.40s
+    FAILED tests/keras_native/test_metrics.py::test_epoch_reduction_over_unequal_batches_equals_lightning[False]
+    FAILED tests/keras_native/test_metrics.py::test_epoch_reduction_over_unequal_batches_equals_lightning[True]
+    FAILED tests/keras_native/test_metrics.py::test_weighted_mean_is_lightnings_epoch_reduction
+X15_clip_dropped: KILLED: 6 failed, 51 deselected, 14 warnings in 3.49s
+    FAILED tests/keras_native/test_config.py::test_loader_reads_every_form[org_raw]
+    FAILED tests/keras_native/test_config.py::test_loader_reads_every_form[org_normalised]
+    FAILED tests/keras_native/test_config.py::test_loader_reads_every_form[pflow_hgq_raw]
+    FAILED tests/keras_native/test_config.py::test_loader_reads_every_form[pflow_hgq_normalised]
+    FAILED tests/keras_native/test_config.py::test_loader_reads_every_form[polaris_generated]
+    FAILED tests/keras_native/test_config.py::test_loader_reads_every_form[polaris_normalised]
+X18_ebops_switch_ignored: KILLED: 2 failed, 24 deselected, 32 warnings in 276.75s (0:04:36)
+    FAILED tests/keras_native/test_ebops.py::test_periodic_ebops_reproduces_the_hybrid_test
+    FAILED tests/keras_native/test_train_step.py::test_periodic_ebops_skipped_step_has_no_penalty
+X16_hybrid_double_count: KILLED: 4 failed, 1 passed, 52 warnings in 50.61s
+    FAILED tests/keras/test_quant_losses_dedupe.py::test_generated_org_model_counts_each_layer_once
+    FAILED tests/keras/test_quant_losses_dedupe.py::test_quant_losses_equals_the_golden_per_layer_terms[high-mf_org]
+    FAILED tests/keras/test_quant_losses_dedupe.py::test_quant_losses_equals_the_golden_per_layer_terms[prod-mf_torch]
+    FAILED tests/keras/test_quant_losses_dedupe.py::test_quant_losses_equals_the_golden_per_layer_terms[prod-mf_org]
+X17_init_beta_off: KILLED: 1 failed, 2 passed in 0.39s
+    FAILED tests/polaris/test_beta_setpoints.py::test_pid_defaults_and_their_rules
