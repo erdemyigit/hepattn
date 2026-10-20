@@ -1,0 +1,327 @@
+"""S6b gates of the training driver (``keras_native.loop``) on the tiny generated Polaris config and CLIC dummy events.
+
+Run A trains 3 epochs uninterrupted (32 events, batch 4, accumulation 2: 4 optimizer steps per epoch, 12 in all; BetaPID
+with a 1-epoch warm-up; PeriodicEBOPs every 2 steps; a step checkpoint after every optimizer step, all kept). Then:
+
+- resume (plan S6 gate, CPU): a fresh ``Trainer`` restored from a checkpoint of A continues to A's final state bit for
+  bit, from inside an epoch, from the last step of an epoch (end hooks pending), from an epoch checkpoint, and after
+  the PID engaged; controls: skipping one micro-batch, or dropping the PID state, changes the final state;
+- trace counts over the whole run (plan S6 gate: <= 2 train, <= 1 eval / predict): train 2, val 1 (eval + predict),
+  tail 1, bits 1; control: a batch of another shape adds a val trace;
+- val/loss: the task loss, event-weighted, with the short batch's loss on its real events; controls: the padded loss
+  differs, and task + regularizers (S5's reading of the hybrid) differs;
+- PeriodicEBOPs at the optimizer step, BetaPID per epoch on the latest read-out, the BetaScheduler ramp per step;
+- the checkpoint policy and the resume-checkpoint protection; one optimizer reader for every config form; refusals.
+"""
+
+import dataclasses
+import math
+import operator
+import shutil
+from itertools import starmap
+
+import jax
+import keras
+import numpy as np
+import pytest
+
+from hepattn.experiments.clic.main_jax import ClicSource
+from hepattn.keras_native import loop
+from hepattn.keras_native.beta_control import BetaPIDController, ramp_beta
+from hepattn.keras_native.config import load_config
+from hepattn.keras_native.optim import optimizer_from_config
+
+from .golden.mf_cases import CONFIGS
+from .s6b_utils import REPO, differing, npz_arrays, replace_quant, sources, tiny_config, trainer
+
+STEPS_PER_EPOCH, EPOCHS = 4, 3
+FINAL = "step-000000012.npz"
+
+
+@pytest.fixture(scope="module")
+def cache(tmp_path_factory):
+    return loop.enable_compilation_cache(tmp_path_factory.mktemp("jax_cache"))
+
+
+@pytest.fixture(scope="module")
+def run_a(tmp_path_factory, cache):  # noqa: ARG001  (the cache makes the later trainers' compiles hits)
+    rc = tiny_config(ckpt_every_n_steps=1, ckpt_save_top_k=-1)
+    train, val = sources(rc)
+    run_dir = tmp_path_factory.mktemp("run_a")
+    t = trainer(rc, run_dir, train)
+    summary = t.fit(train, val)
+    return {"rc": rc, "train": train, "val": val, "dir": run_dir, "trainer": t, "summary": summary, "counts": t.compile_counts()}
+
+
+def state_arrays(t) -> dict:
+    """The trainer's current state keyed as in a checkpoint file."""
+    keys = loop.ckpt.state_keys(t.steps.model, t.steps.optimizer)
+    return {f"{g}/{k}": v for g, values in zip(loop.ckpt.GROUPS, loop.host_state(t.state), strict=True) for k, v in zip(keys[g], values, strict=True)}
+
+
+def same_values(a: dict, b: dict) -> bool:
+    return a.keys() == b.keys() and all(a[k] == b[k] or (math.isnan(a[k]) and math.isnan(b[k])) for k in a)
+
+
+def resume(run_a, tmp_path, checkpoint: str, *, tamper=None, rc=None):
+    rc = rc or run_a["rc"]
+    t = trainer(rc, tmp_path, run_a["train"])
+    t.restore(run_a["dir"] / "ckpts" / checkpoint)
+    if tamper is not None:
+        tamper(t)
+    t.fit(run_a["train"], run_a["val"])
+    return t
+
+
+def test_run_a_is_non_vacuous(run_a):
+    """Every state group changes over the run, the loss falls, the quantizers move and beta changes after the warm-up."""
+    t, ckpts = run_a["trainer"], run_a["dir"] / "ckpts"
+    assert (t.global_step, t.micro_step, t.epoch, t.batch) == (12, 24, 3, 0)
+    first, last = npz_arrays(ckpts / "step-000000001.npz"), npz_arrays(ckpts / FINAL)
+    changed = differing(first, last)
+    assert {k.split("/", 1)[0] for k in changed} == {"tv", "ntv", "ov"}
+    assert any(k.startswith("tv/") and k.rsplit("/", 1)[-1] in {"b", "f", "i"} for k in changed)
+    rows = loop.read_csv(run_a["dir"] / "steps.csv")
+    assert len(rows) == 12
+    losses = [r["train/loss"] for r in rows]
+    assert np.mean(losses[-4:]) < np.mean(losses[:4])
+    epochs = loop.read_csv(run_a["dir"] / "metrics.csv")
+    assert epochs[-1]["val/loss"] < epochs[0]["val/loss"]
+    assert epochs[2]["train/quant_beta"] != epochs[0]["train/quant_beta"]
+
+
+@pytest.mark.parametrize(
+    ("checkpoint", "position"),
+    [
+        ("step-000000003.npz", (0, 6)),  # inside epoch 0
+        ("step-000000004.npz", (0, 8)),  # last step of epoch 0: validation and epoch checkpoint still due
+        ("epoch-000-step-000000004.npz", (1, 0)),  # after epoch 0's end hooks
+        ("step-000000006.npz", (1, 4)),  # after the PID's first epoch step
+    ],
+)
+def test_resume_continues_bit_for_bit(run_a, tmp_path, checkpoint, position):
+    meta = loop.ckpt.read_meta(run_a["dir"] / "ckpts" / checkpoint)
+    assert (meta["data_position"]["epoch"], meta["data_position"]["batch"]) == position
+    t = resume(run_a, tmp_path, checkpoint)
+    assert differing(npz_arrays(tmp_path / "ckpts" / FINAL), npz_arrays(run_a["dir"] / "ckpts" / FINAL)) == []
+    assert differing(state_arrays(t), npz_arrays(run_a["dir"] / "ckpts" / FINAL)) == []
+    a_rows = {r["step"]: r for r in loop.read_csv(run_a["dir"] / "steps.csv")}
+    for row in loop.read_csv(tmp_path / "steps.csv"):
+        assert row["train/loss"] == a_rows[row["step"]]["train/loss"]
+        assert row["train/ebops"] == a_rows[row["step"]]["train/ebops"]
+    a_val = loop.read_csv(run_a["dir"] / "metrics.csv")
+    b_val = loop.read_csv(tmp_path / "metrics.csv")
+    assert [r["val/loss"] for r in b_val] == [r["val/loss"] for r in a_val[len(a_val) - len(b_val) :]]
+    assert t.beta == run_a["trainer"].beta
+    assert t.last_ebops == run_a["trainer"].last_ebops
+
+
+def _skip_one_batch(t):
+    t.batch += 1  # the data position of a lossy checkpoint
+
+
+def _drop_pid_state(t):
+    t.pid = BetaPIDController(**t.rc.quant.beta_pid)
+
+
+@pytest.mark.parametrize("tamper", [_skip_one_batch, _drop_pid_state])
+def test_control_a_lost_piece_of_resume_state_changes_the_run(run_a, tmp_path, tamper):
+    t = resume(run_a, tmp_path, "step-000000006.npz", tamper=tamper)
+    assert differing(state_arrays(t), npz_arrays(run_a["dir"] / "ckpts" / FINAL)) != []
+
+
+def test_trace_counts_over_the_run(run_a):
+    """Three epochs (more than the gate's one): 2 train programs (EBOPs on / off), 1 val (= eval + predict), 1 tail."""
+    assert run_a["counts"] == {"train": 2, "eval": 0, "predict": 0, "val": 1, "tail": 1, "bits": 1}
+    # control: a val batch of another shape is a new trace, so the counter sees retraces
+    t = run_a["trainer"]
+    batch = next(iter(run_a["val"].epoch(0)))
+    short = ({k: v[:3] for k, v in batch.inputs.items()}, {k: v[:3] for k, v in batch.targets.items()})
+    jax.block_until_ready(t._val(t.state, *short)["task"])  # noqa: SLF001
+    assert t.compile_counts()["val"] == 2
+
+
+MEASURED_VAL_REL = 3.52e-8  # measured: the 2-ulp tail difference (test below), weighted 2 of 10 events
+
+
+def test_val_loss_is_the_event_weighted_task_loss_on_real_events(run_a):
+    t = run_a["trainer"]
+    batches = list(run_a["val"].epoch(0))
+    assert [b.num_real for b in batches] == [4, 4, 2]
+    weighted, reg, events = 0.0, 0.0, 0
+    for batch in batches:
+        n = batch.num_real
+        inputs, targets = ({k: v[:n] for k, v in tree.items()} for tree in (batch.inputs, batch.targets))
+        res = t._val(t.state, inputs, targets)  # noqa: SLF001  (the unpadded batch: another trace)
+        weighted += float(res["task"]) * n
+        reg += float(res["regularization"]) * n
+        events += n
+    val = t.validate(run_a["val"])
+    assert same_values(val, t.last_val)  # the stored epoch-end values are of the final state
+    print(f"val/loss {val['val/loss']!r} vs unpadded {weighted / events!r}: rel {abs(val['val/loss'] / (weighted / events) - 1):.3e}")
+    assert val["val/loss"] == pytest.approx(weighted / events, rel=2 * MEASURED_VAL_REL)
+    assert val["val/quant_ebops_loss"] == pytest.approx(reg / events, rel=1e-7)
+    # controls: the padded batch's own loss is not the real events' loss; task + regularizers is not val/loss
+    padded = t._val(t.state, batches[-1].inputs, batches[-1].targets)  # noqa: SLF001
+    tail = t._val(t.state, *({k: v[:2] for k, v in tree.items()} for tree in (batches[-1].inputs, batches[-1].targets)))  # noqa: SLF001
+    assert float(padded["task"]) != float(tail["task"])
+    assert val["val/quant_ebops_loss"] > 0  # so task + regularizers (S5's reading of the hybrid's val/loss) is not val/loss
+
+
+def ulps(a, b) -> float:
+    """|a - b| in float32 spacings of b."""
+    return abs(float(a) - float(b)) / float(np.spacing(np.float32(abs(float(b)))))
+
+
+# Measured (CPU, this config): the loss of the real events from the padded forward differs from the unpadded batch's
+# by 2 ulps (task total) and at most MEASURED_TERM_ULPS in a term: two compiled programs of other shapes, so other
+# reduction orders. Tolerances are 2x measured. The padded batch's own loss is off by > 1e4 ulps (the control).
+MEASURED_TASK_ULPS, MEASURED_TERM_ULPS = 2.0, 2.0
+
+
+def test_tail_loss_from_the_padded_forward_equals_the_unpadded_batch(run_a):
+    t = run_a["trainer"]
+    batch = list(run_a["val"].epoch(0))[-1]
+    res = t._val(t.state, batch.inputs, batch.targets)  # noqa: SLF001
+    outputs = jax.tree_util.tree_map(operator.itemgetter(slice(2)), res["outputs"])
+    task, losses = t._tail(outputs, {k: v[:2] for k, v in batch.targets.items()})  # noqa: SLF001
+    direct = t._val(t.state, *({k: v[:2] for k, v in tree.items()} for tree in (batch.inputs, batch.targets)))  # noqa: SLF001
+    term_ulps = list(starmap(ulps, zip(jax.tree_util.tree_leaves(losses), jax.tree_util.tree_leaves(direct["losses"]), strict=True)))
+    print(
+        f"tail vs unpadded: task {ulps(task, direct['task'])} ulps, terms max {max(term_ulps)} ulps; padded {ulps(res['task'], direct['task'])} ulps"
+    )
+    assert ulps(task, direct["task"]) <= 2 * MEASURED_TASK_ULPS
+    assert max(term_ulps) <= 2 * MEASURED_TERM_ULPS
+    assert ulps(res["task"], direct["task"]) > 1e4
+
+
+def test_periodic_ebops_follows_the_optimizer_step(run_a):
+    """``every_n_steps`` 2 with accumulation 2: optimizer steps 0, 2, 4, ... carry the term (all their micro-batches).
+    A micro-step counter would log 0 on every row (the logged micro-batch is the second of its step).
+    """
+    rows = loop.read_csv(run_a["dir"] / "steps.csv")
+    assert [r["train/ebops_active"] for r in rows] == [float((r["step"] - 1) % 2 == 0) for r in rows]
+    on = [r["train/quant_ebops_loss"] for r in rows if r["train/ebops_active"]]
+    off = [r["train/quant_ebops_loss"] for r in rows if not r["train/ebops_active"]]
+    assert min(on) > 5 * max(off) > 0  # off: the beta-free regularizer terms only
+    for r in rows:
+        assert r["train/total_loss"] == pytest.approx(r["train/loss"] + r["train/quant_ebops_loss"], rel=1e-6)
+
+
+def test_beta_pid_steps_each_epoch_on_the_latest_readout(run_a):
+    rc, rows = run_a["rc"], loop.read_csv(run_a["dir"] / "steps.csv")
+    epochs = loop.read_csv(run_a["dir"] / "metrics.csv")
+    pid = BetaPIDController(**rc.quant.beta_pid)
+    for e, row in enumerate(epochs):
+        reading = 0.0 if e == 0 else next(r["train/ebops"] for r in rows if r["step"] == STEPS_PER_EPOCH * e)
+        if e == 0:
+            assert math.isnan(row["train/pid_ebops"])
+        else:
+            assert row["train/pid_ebops"] == reading
+        assert row["train/quant_beta"] == pid.on_epoch_start(e, reading)
+        assert all(r["train/quant_beta"] == row["train/quant_beta"] for r in rows if r["epoch"] == e)
+    # control: without the read-out (the hybrid's uint32 _ebops is saturated on JAX) the PID would hold init_beta
+    assert epochs[2]["train/quant_beta"] != rc.quant.beta_pid["init_beta"]
+
+
+def test_beta_scheduler_ramps_at_the_optimizer_step(run_a, tmp_path):
+    ramp = {"beta_start": 1e-10, "beta_end": 1e-9, "warmup_steps": 5}
+    rc = replace_quant(run_a["rc"], beta_pid=None, beta_scheduler=ramp)
+    t = trainer(rc, tmp_path, run_a["train"], max_epochs=2)
+    t.fit(run_a["train"], run_a["val"])
+    rows = loop.read_csv(tmp_path / "steps.csv")
+    logged = [r["train/quant_beta"] for r in rows]
+    assert logged == [ramp_beta(int(r["step"]) - 1, **ramp) for r in rows]
+    assert logged != [ramp_beta(int(r["step"]), **ramp) for r in rows]  # control: the step after
+    assert np.float32(t.steps.read_beta(t.state)) == np.float32(logged[-1])
+
+
+def test_checkpoint_policy(run_a):
+    ckpts = run_a["dir"] / "ckpts"
+    assert sorted(p.name for p in ckpts.glob("step-*.npz")) == [f"step-{s:09d}.npz" for s in range(1, 13)]
+    assert sorted(p.name for p in ckpts.glob("epoch-*.npz")) == [f"epoch-{e:03d}-step-{4 * (e + 1):09d}.npz" for e in range(3)]
+    epochs = loop.read_csv(run_a["dir"] / "metrics.csv")
+    best = int(np.argmin([r["val/loss"] for r in epochs]))
+    assert loop.json.loads((ckpts / "best.json").read_text())["file"] == f"epoch-{best:03d}-step-{4 * (best + 1):09d}.npz"
+    assert loop.json.loads((ckpts / "last.json").read_text())["file"] == FINAL
+    meta = loop.ckpt.read_meta(ckpts / FINAL)
+    assert meta["config_hash"] == run_a["rc"].model_hash
+    assert meta["beta_controller"]["seeded"] is True
+
+
+def test_resume_checkpoint_survives_pruning(run_a, tmp_path):
+    """save_top_k 1 keeps the newest step file only, but never the file the run resumed from (S56 open issue 6)."""
+    rc = tiny_config(ckpt_every_n_steps=1, ckpt_save_top_k=1)
+    (tmp_path / "ckpts").mkdir()
+    for suffix in (".npz", ".json"):
+        shutil.copy(run_a["dir"] / "ckpts" / f"step-000000010{suffix}", tmp_path / "ckpts")
+    t = trainer(rc, tmp_path, run_a["train"])
+    t.restore(tmp_path / "ckpts" / "step-000000010.npz")
+    t.fit(run_a["train"], run_a["val"])
+    assert sorted(p.name for p in (tmp_path / "ckpts").glob("step-*.npz")) == ["step-000000010.npz", FINAL]
+    assert differing(npz_arrays(tmp_path / "ckpts" / FINAL), npz_arrays(run_a["dir"] / "ckpts" / FINAL)) == []
+
+
+def test_stepping_past_total_steps_raises(run_a):
+    """Torch OneCycleLR raises at step total_steps + 1; the native schedule would hold silently (S56 open issue 5)."""
+    t = run_a["trainer"]
+    assert t.global_step == t.total_steps
+    with pytest.raises(RuntimeError, match="exceeds total_steps"):
+        t._train_micro(next(iter(run_a["train"].epoch(0))))  # noqa: SLF001
+    assert t.micro_step == 24  # nothing ran
+
+
+def test_restore_refuses_another_schedule_or_model(run_a, tmp_path):
+    rc = run_a["rc"]
+    t = trainer(rc, tmp_path, run_a["train"], max_epochs=4)  # 16 total steps: another LR schedule
+    with pytest.raises(ValueError, match="total_steps"):
+        t.restore(run_a["dir"] / "ckpts" / "step-000000006.npz")
+    t.total_steps = 12  # control: the same lengths load
+    t.restore(run_a["dir"] / "ckpts" / "step-000000006.npz")
+    assert t.global_step == 6
+
+
+def test_non_fp32_precision_is_refused(run_a):
+    rc = dataclasses.replace(run_a["rc"], trainer={**run_a["rc"].trainer, "precision": "bf16-mixed"})
+    batch = next(iter(run_a["train"].epoch(0)))
+    with pytest.raises(ValueError, match="fp32 only"):
+        loop.Trainer(rc, loop.LoopSettings.from_run_config(rc, "unused"), sample=batch, train_batches=8)
+
+
+FORMS = {
+    "tiny generated": [REPO / "tests/keras_native/s6b_fixtures/tiny_polaris.yaml"],
+    "org raw": [CONFIGS / "base.yaml", CONFIGS / "linformer.yaml"],
+    "pflow_hgq": [CONFIGS / "pflow_hgq.yaml"],
+    "org saved": [REPO / "tests/keras_native/s6_fixtures/org_normalised.yaml"],
+    "pflow_hgq saved": [REPO / "tests/keras_native/s6_fixtures/pflow_hgq_normalised.yaml"],
+    "polaris saved": [REPO / "tests/keras_native/s6_fixtures/polaris_normalised.yaml"],
+}
+
+
+def _small_model():
+    model = keras.Sequential([keras.layers.Input((3,)), keras.layers.Dense(2, name="hid")])
+    model(np.zeros((1, 3), np.float32))
+    return model
+
+
+def unnamed(config: dict) -> dict:
+    return {k: v for k, v in config.items() if k != "name"}  # keras numbers auto names per instance (adam_w_10, ...)
+
+
+@pytest.mark.parametrize("form", list(FORMS))
+def test_one_optimizer_reader_for_every_form(form):
+    """The driver builds from ``RunConfig.optimizer``; S5's ``optimizer_from_config`` reads the same YAML keys."""
+    rc = load_config(FORMS[form])
+    model = _small_model()
+    native = unnamed(loop.build_run_optimizer(rc, model, 400).get_config())
+    s5 = unnamed(optimizer_from_config(rc.model_section, rc.raw.get("trainer") or {}, model, 400).get_config())
+    assert native == s5
+    # control: a different epsilon (keras' default 1e-7) or accumulation is seen
+    other = dataclasses.replace(rc, optimizer=dataclasses.replace(rc.optimizer, accumulate_grad_batches=rc.optimizer.accumulate_grad_batches + 1))
+    assert unnamed(loop.build_run_optimizer(other, model, 400).get_config()) != s5
+
+
+def test_clic_source_counts_full_train_batches_and_padded_val_batches(run_a):
+    train, val = run_a["train"], run_a["val"]
+    assert (train.num_batches, val.num_batches, val.num_events) == (8, 3, 10)
+    assert isinstance(train, ClicSource)
