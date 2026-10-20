@@ -396,20 +396,37 @@ class CheckpointPolicy:
 class CheckpointManager:
     """Writes checkpoints under ``directory`` by a ``CheckpointPolicy``.
 
-    ``keep_last_k`` is Lightning's ``save_top_k`` without a monitor (``model_checkpoint.py:92-93``): the newest ``k``
-    step checkpoints are kept; -1 keeps every one; 0 writes none (with ``write_last``, ``maybe_save_step`` writes
-    ``last-<step>.npz`` instead, as Lightning writes ``last.ckpt`` with ``save_top_k=0, save_last=True``).
-    ``write_last`` records the callback's ``save_last``: the driver calls ``save_last`` at each train epoch end
-    (after that epoch's validation) and at the train end when it is set. ``from_callback`` builds the manager of one ``config.CheckpointCallback``.
+    ``keep_last_k`` is Lightning's ``save_top_k`` without a monitor (``model_checkpoint.py:92-93``) for -1, 0 and 1:
+    -1 keeps every step checkpoint, 1 the newest, 0 writes none (with ``write_last``, ``maybe_save_step`` writes
+    ``last-<step>.npz`` instead, as Lightning writes ``last.ckpt`` with ``save_top_k=0, save_last=True``). ``k > 1``
+    (the newest ``k``) is a native extension: Lightning rejects ``save_top_k > 1`` without a monitor
+    (``model_checkpoint.py:469-474``), and ``config.load_config`` rejects such a config, so only direct construction
+    gives it. ``write_last`` records the callback's ``save_last``: the driver calls ``save_last`` at each train epoch
+    end (after that epoch's validation) and at the train end when it is set. ``from_callback`` builds the manager of
+    one ``config.CheckpointCallback``.
+
+    Pruning (``keep_last_k`` >= 1, stale ``last-*``) considers every matching file in ``directory``, not only the
+    files this manager wrote, so ``directory`` must belong to one run (the driver's per-run ``CKPT_DIR``; Lightning
+    removes only the paths it tracked). ``resume_path``, the checkpoint the run resumed from, is never removed, as
+    Lightning never removes ``trainer.ckpt_path`` (``_should_remove_checkpoint``, ``model_checkpoint.py:782-800``).
 
     Raises:
         ValueError: For ``keep_last_k`` other than an int >= -1.
     """
 
-    def __init__(self, directory: str | Path, policy: CheckpointPolicy | None = None, keep_last_k: int = 1, *, write_last: bool = False) -> None:
+    def __init__(
+        self,
+        directory: str | Path,
+        policy: CheckpointPolicy | None = None,
+        keep_last_k: int = 1,
+        *,
+        write_last: bool = False,
+        resume_path: str | Path | None = None,
+    ) -> None:
         if isinstance(keep_last_k, bool) or not isinstance(keep_last_k, int) or keep_last_k < -1:
             raise ValueError(f"keep_last_k must be an int >= -1 (-1 keeps every step checkpoint), got {keep_last_k!r}")
         self.directory = Path(directory)
+        self.resume_path = Path(resume_path).resolve() if resume_path is not None else None
         self.policy = policy or CheckpointPolicy()
         self.keep_last_k = keep_last_k
         self.write_last = write_last
@@ -418,7 +435,7 @@ class CheckpointManager:
             self.policy.best_value = best.get("value")
 
     @classmethod
-    def from_callback(cls, directory: str | Path, callback) -> "CheckpointManager":
+    def from_callback(cls, directory: str | Path, callback, *, resume_path: str | Path | None = None) -> "CheckpointManager":
         """The manager that does what one ``config.CheckpointCallback`` does.
 
         Step trigger (``every_n_train_steps``): ``maybe_save_step``, ``keep_last_k = save_top_k``. Epoch trigger:
@@ -438,7 +455,7 @@ class CheckpointManager:
             if keep != -1:
                 raise ValueError(f"epoch checkpoints: only save_top_k=-1 (hepattn Checkpoint) is implemented, got {keep}")
             policy = CheckpointPolicy(every_n_steps=None, monitor=callback.monitor, mode=callback.mode, every_n_epochs=callback.every_n_epochs)
-        return cls(directory, policy, keep_last_k=keep, write_last=callback.save_last)
+        return cls(directory, policy, keep_last_k=keep, write_last=callback.save_last, resume_path=resume_path)
 
     def _pointer(self, name: str) -> dict | None:
         path = self.directory / f"{name}.json"
@@ -449,6 +466,8 @@ class CheckpointManager:
             f.write(json.dumps({"file": target.name, **extra}, sort_keys=True, default=_json_default))
 
     def _remove(self, path: Path) -> None:
+        if self.resume_path is not None and path.resolve() == self.resume_path:
+            return
         for p in (sidecar_path(path), path):  # sidecar first: a half-removed checkpoint reads as incomplete
             with contextlib.suppress(FileNotFoundError):
                 p.unlink()

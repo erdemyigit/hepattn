@@ -541,7 +541,7 @@ def save_steps(manager, steps, run) -> list:
         (0, False, []),  # none
         (0, True, ["last-000004000.npz"]),  # Lightning save_top_k=0, save_last=True: only last.ckpt
         (1, False, ["step-000004000.npz"]),
-        (3, False, ["step-000002000.npz", "step-000003000.npz", "step-000004000.npz"]),
+        (3, False, ["step-000002000.npz", "step-000003000.npz", "step-000004000.npz"]),  # native extension (docstring)
     ],
 )
 def test_keep_last_k_is_lightnings_save_top_k(tmp_path, keep_last_k, write_last, expected):
@@ -555,6 +555,28 @@ def test_keep_last_k_is_lightnings_save_top_k(tmp_path, keep_last_k, write_last,
         assert all((path is None) != write_last for path in written)
     for path in tmp_path.glob("*.npz"):
         C.load_checkpoint(path, run[0], run[1])
+
+
+@pytest.mark.parametrize("protect", [True, False])
+@pytest.mark.parametrize("kind", ["step", "last"])
+def test_pruning_never_removes_the_resume_checkpoint(tmp_path, kind, protect):
+    """A resumed run's manager keeps the file it resumed from, step or last (Lightning: ``_should_remove_checkpoint``).
+
+    Control (``protect=False``): without ``resume_path`` the same saves remove it (step: ``keep_last_k`` pruning;
+    last: the stale ``last-*`` cleanup).
+    """
+    run = tiny_run()
+    policy = C.CheckpointPolicy(every_n_steps=1000)
+    first = C.CheckpointManager(tmp_path, policy, keep_last_k=1, write_last=True)
+    save_steps(first, (1000,), run)
+    target = first.last() if kind == "step" else first.save_last(1500, *run, {})
+    assert target.name == ("step-000001000.npz" if kind == "step" else "last-000001500.npz")
+    manager = C.CheckpointManager(tmp_path, policy, keep_last_k=1, write_last=True, resume_path=target if protect else None)
+    save_steps(manager, (2000, 3000), run)
+    manager.save_last(3500, *run, {})
+    files = sorted(p.name for p in tmp_path.glob("*.npz"))
+    assert target.exists() == C.sidecar_path(target).exists() == protect, files
+    assert {"step-000003000.npz", "last-000003500.npz"} <= set(files) and "step-000002000.npz" not in files  # others pruned
 
 
 @pytest.mark.parametrize("bad", [-2, 1.5, True, "1"])
