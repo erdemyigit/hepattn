@@ -17,6 +17,7 @@ Gates:
 - policy / manager: every N steps, last, best on ``val/loss``, retention, a second save at one step under a new name.
 """
 
+import dataclasses
 import json
 import stat
 import zipfile
@@ -27,6 +28,7 @@ import numpy as np
 import pytest
 
 from hepattn.keras_native import checkpoint as C
+from hepattn.keras_native.config import CheckpointCallback
 from hepattn.keras_native.objective import clic_specs, matched_loss
 
 from .golden.cases import QUANT_SPECS
@@ -525,3 +527,90 @@ def test_manager_save_last_follows_validation_ends(tmp_path):
     assert manager.last() == newer
     assert not last.exists()  # the stale last-* file goes once last points elsewhere
     assert sorted(p.name for p in tmp_path.glob("*.npz")) == ["step-000002000.npz"]
+
+
+def save_steps(manager, steps, run) -> list:
+    model, optimizer, state = run
+    return [manager.maybe_save_step(step, model, optimizer, state, {}) for step in steps]
+
+
+@pytest.mark.parametrize(
+    ("keep_last_k", "write_last", "expected"),
+    [
+        (-1, False, ["step-000001000.npz", "step-000002000.npz", "step-000003000.npz", "step-000004000.npz"]),  # all
+        (0, False, []),  # none
+        (0, True, ["last-000004000.npz"]),  # Lightning save_top_k=0, save_last=True: only last.ckpt
+        (1, False, ["step-000004000.npz"]),
+        (3, False, ["step-000002000.npz", "step-000003000.npz", "step-000004000.npz"]),
+    ],
+)
+def test_keep_last_k_is_lightnings_save_top_k(tmp_path, keep_last_k, write_last, expected):
+    """``save_top_k`` without a monitor (lightning ``model_checkpoint.py:92-93``): -1 keeps all, 0 saves none."""
+    run = tiny_run()
+    manager = C.CheckpointManager(tmp_path, C.CheckpointPolicy(every_n_steps=1000), keep_last_k=keep_last_k, write_last=write_last)
+    written = save_steps(manager, (1000, 2000, 3000, 4000), run)
+    assert sorted(p.name for p in tmp_path.glob("*.npz")) == expected
+    assert (manager.last() is None) == (expected == [])
+    if keep_last_k == 0:
+        assert all((path is None) != write_last for path in written)
+    for path in tmp_path.glob("*.npz"):
+        C.load_checkpoint(path, run[0], run[1])
+
+
+@pytest.mark.parametrize("bad", [-2, 1.5, True, "1"])
+def test_keep_last_k_is_validated(tmp_path, bad):
+    C.CheckpointManager(tmp_path, keep_last_k=-1)  # control
+    with pytest.raises(ValueError, match="keep_last_k"):
+        C.CheckpointManager(tmp_path, keep_last_k=bad)
+
+
+def callback(**changes):
+    polaris_step = {
+        "monitor": None,
+        "mode": "min",
+        "save_top_k": 1,
+        "save_last": True,
+        "every_n_train_steps": 1000,
+        "every_n_epochs": 0,
+        "dirpath": "/ckpts",
+    }
+    return CheckpointCallback(**{**polaris_step, **changes})
+
+
+def test_manager_from_the_polaris_step_callback(tmp_path):
+    run = tiny_run()
+    manager = C.CheckpointManager.from_callback(tmp_path, callback())
+    assert (manager.keep_last_k, manager.write_last, manager.policy.every_n_steps, manager.policy.monitor) == (1, True, 1000, None)
+    save_steps(manager, (999, 1000, 2000), run)
+    assert sorted(p.name for p in tmp_path.glob("*.npz")) == ["step-000002000.npz"]
+    keep_all = C.CheckpointManager.from_callback(tmp_path / "all", callback(save_top_k=-1))
+    save_steps(keep_all, (1000, 2000), run)
+    assert len(list((tmp_path / "all").glob("step-*.npz"))) == 2
+
+
+def test_manager_from_the_hepattn_epoch_callback(tmp_path):
+    """Hepattn ``Checkpoint``: every epoch kept; with ``every_n_epochs=2``, epochs 1, 3, ... (0-based) as Lightning."""
+    model, optimizer, state = tiny_run()
+    epoch = callback(monitor="val/loss", save_top_k=-1, save_last=False, every_n_train_steps=0, every_n_epochs=1, dirpath=None)
+    manager = C.CheckpointManager.from_callback(tmp_path, epoch)
+    assert (manager.keep_last_k, manager.write_last, manager.policy.every_n_steps) == (-1, False, None)
+    assert manager.maybe_save_step(1000, model, optimizer, state, {}) is None  # no step trigger
+    saved = [manager.maybe_save_epoch(e, e, {"val/loss": 1.0}, model, optimizer, state, {}) for e in range(3)]
+    assert all(saved)
+    every2 = C.CheckpointManager.from_callback(tmp_path / "two", dataclasses.replace(epoch, every_n_epochs=2))
+    due = [every2.maybe_save_epoch(e, e, {"val/loss": 1.0}, model, optimizer, state, {}) is not None for e in range(4)]
+    assert due == [False, True, False, True]
+    with pytest.raises(KeyError, match="val/loss"):  # Lightning raises for a missing monitor once validation has run
+        manager.save_epoch(5, 5, {"train/loss": 1.0}, model, optimizer, state, {})
+    with pytest.raises(KeyError, match="val/loss"):
+        manager.maybe_save_best(5, {"train/loss": 1.0}, model, optimizer, state, {})
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{"monitor": "val/loss", "save_top_k": 2}, {"every_n_train_steps": 0, "every_n_epochs": 1, "save_top_k": 1}],
+)
+def test_manager_from_a_callback_it_does_not_implement_raises(tmp_path, changes):
+    C.CheckpointManager.from_callback(tmp_path, callback(monitor="val/loss", save_top_k=-1))  # control
+    with pytest.raises(ValueError, match=r"not implemented|only save_top_k=-1"):
+        C.CheckpointManager.from_callback(tmp_path, callback(**changes))

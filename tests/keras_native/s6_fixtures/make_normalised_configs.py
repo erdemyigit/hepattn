@@ -6,7 +6,11 @@ writes them next to itself:
 
 - ``org_normalised.yaml``: ``main.py fit --config base.yaml --config linformer.yaml`` (org torch model);
 - ``polaris_normalised.yaml``: ``main_hgq.py fit --config <polaris/03_make_config.py output>`` (the hybrid run config);
-- ``pflow_hgq_normalised.yaml``: ``main_hgq.py fit`` (its default config, ``pflow_hgq.yaml``).
+- ``pflow_hgq_normalised.yaml``: ``main_hgq.py fit`` (its default config, ``pflow_hgq.yaml``);
+- ``org_eval_normalised.yaml``: ``main.py fit --config base.yaml --config linformer.yaml --config eval.yaml``;
+- ``org_partial_normalised.yaml``: the same with ``overlay_partial_dicts.yaml`` (next to this script) as the third file.
+
+The last two pin how LightningCLI merges several ``--config`` files (``config.merge_configs``).
 
 The generated Polaris config holds absolute paths of this checkout; they are replaced by ``/polaris/home/hepattn``
 so the fixture is machine-independent and looks like a config saved on another host.
@@ -37,7 +41,11 @@ def print_config(module: str, configs: list[str]) -> str:
 
 
 def main() -> None:
-    (HERE / "org_normalised.yaml").write_text(print_config("hepattn.experiments.clic.main", ["configs/base.yaml", "configs/linformer.yaml"]))
+    org = ["configs/base.yaml", "configs/linformer.yaml"]
+    (HERE / "org_normalised.yaml").write_text(print_config("hepattn.experiments.clic.main", org))
+    (HERE / "org_eval_normalised.yaml").write_text(print_config("hepattn.experiments.clic.main", [*org, "configs/eval.yaml"]))
+    partial = print_config("hepattn.experiments.clic.main", [*org, str(HERE / "overlay_partial_dicts.yaml")])
+    (HERE / "org_partial_normalised.yaml").write_text(partial)
     with tempfile.TemporaryDirectory() as tmp:
         generated = Path(tmp) / "polaris_hgq.yaml"
         env = {
@@ -50,7 +58,8 @@ def main() -> None:
         text = print_config("hepattn.experiments.clic.main_hgq", [str(generated)])
     (HERE / "polaris_normalised.yaml").write_text(text.replace(str(REPO), FAKE_REPO))
     (HERE / "pflow_hgq_normalised.yaml").write_text(print_config("hepattn.experiments.clic.main_hgq", []))
-    for name in ("org_normalised.yaml", "polaris_normalised.yaml", "pflow_hgq_normalised.yaml"):
+    names = ("org_normalised.yaml", "org_eval_normalised.yaml", "org_partial_normalised.yaml", "polaris_normalised.yaml", "pflow_hgq_normalised.yaml")
+    for name in names:
         assert str(REPO) not in (HERE / name).read_text(), name
         print("wrote", HERE / name)
 

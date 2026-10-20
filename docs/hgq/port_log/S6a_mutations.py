@@ -22,6 +22,8 @@ CK_NEW = [T + "test_checkpoint.py", "-k", "another_optimizer or stored_shape or 
 DATA_WORKERS = [T + "test_data.py", "-k", "fork or new_batch"]
 CFG_RUN = [T + "test_config.py", "-k", "every_form or run_sections or unsupported_run or case_insens or overridden"]
 NATIVE_DATA = "src/hepattn/experiments/clic/native_data.py"
+MERGE = [T + "test_config.py", "-k", "overlay or merge or replaced_whole or lrs_config"]
+CK_KEEP = [T + "test_checkpoint.py", "-k", "keep_last_k or from_the or from_a_callback"]
 
 MUTATIONS = [
     # config.py
@@ -30,7 +32,7 @@ MUTATIONS = [
     (
         "M3",
         N + "config.py",
-        "out[key] = deep_merge(out[key], value) if isinstance(value, dict) and isinstance(out.get(key), dict) else copy.deepcopy(value)",
+        "out[key] = _merge_value(base[key], value, key, parent) if key in base else copy.deepcopy(value)",
         "out[key] = copy.deepcopy(value)",
         T + "test_config.py",
     ),
@@ -278,6 +280,60 @@ MUTATIONS = [
         "        if self.policy.is_better(metrics):\n            self._set_pointer",
         "        if True:\n            self._set_pointer",
         CK_NEW,
+    ),
+    # fix round 3 (reviewer's major config / checkpoint issues and minors N1, D3)
+    ("M80", N + "config.py", '    if "class_path" in node and stray:', "    if False:", MERGE),
+    (
+        "M81",
+        N + "config.py",
+        "        return copy.deepcopy(overlay)  # scalars, lists, None and dict-typed arguments are replaced whole",
+        "        return _merge_args(base, overlay, parent) if both_dicts else copy.deepcopy(overlay)",
+        MERGE,
+    ),
+    ("M82", N + "config.py", '_DICT_TYPED = {"KerasMaskFormer": {"encoder", "decoder"}}', "_DICT_TYPED = {}", MERGE),
+    ("M83", N + "config.py", "or (key in _CLASS_OF_KEY and key not in", "or (False and key not in", MERGE),
+    ("M84", N + "config.py", "    if base_path and path and _short(base_path) != _short(path):", "    if False:", MERGE),
+    (
+        "M85",
+        N + "config.py",
+        "        if isinstance(old, dict) and isinstance(value, dict) and not ("
+        "_is_class_entry(old, key, None) or _is_class_entry(value, key, None)):",
+        "        if False:",
+        MERGE,
+    ),
+    ("M86", N + "checkpoint.py", "        if self.keep_last_k > 0:\n", "        if self.keep_last_k != 0:\n", CK_KEEP),
+    ("M87", N + "checkpoint.py", "        if self.keep_last_k == 0:\n", "        if False:\n", CK_KEEP),
+    ("M88", N + "checkpoint.py", " or keep_last_k < -1:", " or keep_last_k < -100:", CK_KEEP),
+    (
+        "M89",
+        N + "checkpoint.py",
+        "return cls(directory, policy, keep_last_k=keep, write_last=callback.save_last)",
+        "return cls(directory, policy, keep_last_k=1, write_last=callback.save_last)",
+        CK_KEEP,
+    ),
+    ("M90", N + "checkpoint.py", "(epoch + 1) % self.every_n_epochs == 0", "epoch % self.every_n_epochs == 0", CK_KEEP),
+    ("M91", N + "checkpoint.py", "        if self.policy.monitor is not None and self.policy.monitor not in metrics:", "        if False:", CK_KEEP),
+    ("M92", N + "checkpoint.py", "write_last=callback.save_last)", "write_last=False)", CK_KEEP),
+    (
+        "M93",
+        N + "metrics.py",
+        "_mean(abs_err / np.abs(target) + np.float32(1e-8))",
+        "_mean(abs_err / (np.abs(target) + np.float32(1e-8)))",
+        [T + "test_metrics.py", "-k", "abs_norm"],
+    ),
+    (
+        "M94",
+        N + "data.py",
+        "host = {key: tree.pop(key) for tree",
+        "host = {key: tree[key] for tree",
+        [T + "test_data.py", "-k", "drop_last_and or padded_with"],
+    ),
+    (
+        "M95",
+        N + "metrics.py",
+        "        if event_valid is not None:\n            keep",
+        "        if False:\n            keep",
+        [T + "test_metrics.py", "-k", "event_valid"],
     ),
 ]
 

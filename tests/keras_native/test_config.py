@@ -38,8 +38,8 @@ from hepattn.keras_native.config import (
     ConfigError,
     OptimizerConfig,
     config_hash,
-    deep_merge,
     load_config,
+    merge_configs,
     model_description,
     normalise_model_section,
 )
@@ -468,8 +468,148 @@ def test_model_hash_follows_the_scale_dict_content_not_its_path(polaris_generate
     assert load_config(write(tmp_path / "c.yaml", cfg)).model_hash != base  # control: other content
 
 
-def test_deep_merge_replaces_lists_and_merges_dicts():
-    base = {"a": {"x": 1, "y": [1, 2]}, "b": 1}
-    over = {"a": {"y": [3]}, "c": 2}
-    assert deep_merge(base, over) == {"a": {"x": 1, "y": [3]}, "b": 1, "c": 2}
-    assert base == {"a": {"x": 1, "y": [1, 2]}, "b": 1}
+def naive_merge(base: dict, overlay: dict) -> dict:
+    """Control: every dict merged key by key (the loader before fix round 3, and ``polaris/03_make_config.py``)."""
+    out = copy.deepcopy(base)
+    for key, value in overlay.items():
+        out[key] = naive_merge(out[key], value) if isinstance(value, dict) and isinstance(out.get(key), dict) else copy.deepcopy(value)
+    return out
+
+
+OVERLAYS = {"eval": CONFIGS / "eval.yaml", "partial": FIXTURES / "overlay_partial_dicts.yaml"}
+
+
+def quiet_load(paths) -> object:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return load_config(paths)
+
+
+def encoder_and_decoder(rc) -> tuple[dict, dict]:
+    init = rc.model_section["model"]["init_args"]
+    return init["encoder"]["init_args"], init["decoder"]
+
+
+@pytest.mark.parametrize("overlay", sorted(OVERLAYS))
+def test_overlays_merge_as_lightningcli(overlay, tmp_path):
+    """Base + linformer + an overlay == what LightningCLI parses from the same three files (``--print_config``).
+
+    ``eval.yaml`` writes ``model: model: encoder: attn_type: torch`` without ``init_args`` (keys next to the class
+    path are init args); the partial overlay gives dict-typed arguments (``attn_kwargs``, ``decoder_layer_config``)
+    that LightningCLI replaces whole. Control: a key-by-key merge of every dict gives another model for both.
+    """
+    raw = quiet_load([*ORG, OVERLAYS[overlay]])
+    printed = quiet_load(FIXTURES / f"org_{overlay}_normalised.yaml")
+    assert model_description(raw.model_section) == model_description(printed.model_section)
+    assert raw.model_hash == printed.model_hash != quiet_load(ORG).model_hash
+    encoder, decoder = encoder_and_decoder(raw)
+    assert encoder["attn_type"] == "torch"
+    if overlay == "eval":
+        assert raw.checkpoint == CheckpointConfig(epoch=None, step=None)  # eval.yaml's callback list replaces base's
+        assert raw.data.dataset_kwargs["is_inference"] is True
+        assert raw.data.num_val == 5000  # a data key the overlay does not give is kept
+    else:
+        assert encoder["attn_kwargs"] == {"num_heads": 8}
+        assert decoder["num_decoder_layers"] == 2
+        assert decoder["mask_attention"] is True  # a decoder key the overlay does not give is kept
+        assert decoder["decoder_layer_config"] == {"dim": 256, "attn_kwargs": {"num_heads": 8}}
+        assert raw.data.num_val == 10
+    # control 1: a key-by-key merge leaves the overlay's keys next to model.model's init_args, which the loader rejects
+    # (it ignored them before fix round 3: the eval model was the linformer one, hash equal to base + linformer)
+    org = naive_merge(*(yaml.safe_load(p.read_text()) for p in ORG))
+    naive = naive_merge(org, yaml.safe_load(OVERLAYS[overlay].read_text()))
+    assert set(naive["model"]["model"]) == {"class_path", "init_args", "encoder"} | ({"decoder"} if overlay == "partial" else set())
+    with pytest.raises(ConfigError, match="init_args and also"):
+        quiet_load(write(tmp_path / "naive.yaml", naive))
+
+
+def explicit_partial_overlay() -> dict:
+    """``overlay_partial_dicts.yaml`` written with ``init_args`` (no short form): the same LightningCLI meaning."""
+    short = yaml.safe_load(OVERLAYS["partial"].read_text())
+    return {
+        "model": {
+            "model": {"init_args": {"encoder": {"init_args": short["model"]["model"]["encoder"]}, "decoder": short["model"]["model"]["decoder"]}}
+        },
+        "data": short["data"],
+    }
+
+
+def test_dict_typed_arguments_are_replaced_whole(tmp_path):
+    """The explicit form of the partial overlay gives the printed model; control: merging its dicts gives another."""
+    printed = quiet_load(FIXTURES / "org_partial_normalised.yaml")
+    assert quiet_load([*ORG, write(tmp_path / "explicit.yaml", explicit_partial_overlay())]).model_hash == printed.model_hash
+    org = naive_merge(*(yaml.safe_load(p.read_text()) for p in ORG))
+    naive = quiet_load(write(tmp_path / "naive.yaml", naive_merge(org, explicit_partial_overlay())))
+    encoder, decoder = encoder_and_decoder(naive)
+    assert encoder["attn_kwargs"] == {"num_heads": 8, "linformer_seq_len": 168, "linformer_k": 64}  # merged, not replaced
+    assert decoder["decoder_layer_config"]["norm"] == "FastLayerNorm"
+    assert naive.model_hash != printed.model_hash
+
+
+def test_overlay_with_replaced_dicts_builds_the_printed_model(batch):
+    raw = quiet_load([*ORG, OVERLAYS["partial"]])
+    printed = quiet_load(FIXTURES / "org_partial_normalised.yaml")
+    n = assert_same_model(built("partial_raw", raw.model_section, batch), built("partial_printed", printed.model_section, batch), batch)
+    assert n < VARIABLE_COUNTS["org_raw"]  # 2 decoder layers instead of 4
+
+
+def test_merge_rules():
+    base = {
+        "name": "a",
+        "model": {
+            "lrs_config": {"initial": 1.0, "weight_decay": 0.1},
+            "model": {"class_path": "m.MaskFormer", "init_args": {"dim": 8, "decoder": {"n": 1, "cfg": {"x": 1, "y": 2}}, "l": [1, 2]}},
+        },
+    }
+    over = {"model": {"lrs_config": {"initial": 2.0}, "model": {"decoder": {"cfg": {"y": 3}}, "l": [3]}}, "seed": 1}
+    merged = merge_configs(base, over)
+    assert merged == {
+        "name": "a",
+        "seed": 1,
+        "model": {
+            "lrs_config": {"initial": 2.0},  # dict-typed: replaced whole
+            "model": {"class_path": "m.MaskFormer", "init_args": {"dim": 8, "decoder": {"n": 1, "cfg": {"y": 3}}, "l": [3]}},
+        },
+    }
+    assert base["model"]["model"]["init_args"]["decoder"]["cfg"] == {"x": 1, "y": 2}  # inputs are not changed
+    # the same class under another import path merges; init_args given explicitly merge too
+    same = merge_configs(base, {"model": {"model": {"class_path": "hepattn.models.MaskFormer", "init_args": {"dim": 4}}}})
+    assert same["model"]["model"]["init_args"]["decoder"] == {"n": 1, "cfg": {"x": 1, "y": 2}}
+    assert same["model"]["model"]["class_path"] == "hepattn.models.MaskFormer"
+    # the hybrid KerasMaskFormer takes encoder / decoder as dicts: replaced whole, as jsonargparse does for dict args
+    keras = {"model": {"model": {"class_path": "h.KerasMaskFormer", "init_args": {"encoder": {"a": 1, "b": 2}}}}}
+    replaced = merge_configs(keras, {"model": {"model": {"encoder": {"b": 3}}}})
+    assert replaced["model"]["model"]["init_args"]["encoder"] == {"b": 3}
+    # keys next to class_path are init args, in one file and in an overlay
+    assert merge_configs({}, {"model": {"model": {"class_path": "m.X", "dim": 4}}}) == {
+        "model": {"model": {"class_path": "m.X", "init_args": {"dim": 4}}}
+    }
+    short = merge_configs(base, {"model": {"model": {"class_path": "m.MaskFormer", "dim": 4}}})["model"]["model"]
+    assert short == {"class_path": "m.MaskFormer", "init_args": {**base["model"]["model"]["init_args"], "dim": 4}}
+    # a null replaces a class entry
+    assert merge_configs(base, {"model": {"model": {"decoder": None}}})["model"]["model"]["init_args"]["decoder"] is None
+
+
+@pytest.mark.parametrize(
+    ("overlay", "message"),
+    [
+        ({"model": {"model": {"class_path": "m.Other", "init_args": {}}}}, "changes class_path"),
+        ({"model": {"model": {"class_path": "m.MaskFormer", "init_args": {"dim": 4}, "x": 1}}}, "init_args and also"),
+        ({"model": {"model": {"init_args": {"dim": 4}, "x": 1}}}, "init_args and also"),
+    ],
+)
+def test_merge_rejects_what_jsonargparse_rejects_or_needs_the_class_for(overlay, message):
+    base = {"model": {"model": {"class_path": "m.MaskFormer", "init_args": {"dim": 8}}}}
+    merge_configs(base, {"model": {"model": {"init_args": {"dim": 4}}}})  # control: a plain override merges
+    with pytest.raises(ConfigError, match=message):
+        merge_configs(base, overlay)
+
+
+def test_partial_lrs_config_is_replaced_whole(tmp_path):
+    """Jsonargparse replaces the dict-typed ``lrs_config``: an overlay with one key loses weight_decay (torch: KeyError)."""
+    quiet_load([
+        *ORG,
+        write(tmp_path / "ok.yaml", {"model": {"lrs_config": {**yaml.safe_load(ORG[0].read_text())["model"]["lrs_config"], "max": 1e-4}}}),
+    ])
+    with pytest.raises(ConfigError, match="weight_decay"):
+        quiet_load([*ORG, write(tmp_path / "lrs.yaml", {"model": {"lrs_config": {"max": 1e-4}}})])

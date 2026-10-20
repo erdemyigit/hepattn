@@ -94,15 +94,30 @@ fixtures generated in the hybrid env `hepattn/.venv` (lightning 2.5.2).
    `hepattn.callbacks.Checkpoint` (`src/hepattn/callbacks/checkpoint.py:10,15`) passes `save_top_k=-1` (Lightning
    2.5.2 `model_checkpoint.py:93`: all are saved) and its `setup` sets `save_last = False` and, for fit,
    `dirpath = <log_dir>/ckpts`; with no trigger set Lightning uses `every_n_epochs=1` (`__init_triggers`,
-   lines 494-507), saving at each validation end. `CheckpointConfig` now has two `CheckpointCallback`s with the
+   lines 494-507), saving at each train epoch end, after that epoch's validation (fix round 3: Lightning saves in
+   `on_train_epoch_end` because every CLIC config leaves `val_check_interval` at 1.0, `_should_save_on_train_epoch_end`,
+   `model_checkpoint.py:324-339,429-447`; `on_validation_end` then skips the save. The two are the same while each epoch
+   ends with a validation; an epoch stopped by `max_steps` runs no validation and Lightning saves it with the last
+   logged `val/loss`). `CheckpointConfig` now has two `CheckpointCallback`s with the
    effective values: `epoch` (hepattn `Checkpoint`: monitor `val/loss`, min, top-k -1, save_last False, every epoch,
    dirpath None) and `step` (Polaris `ModelCheckpoint`: every 1000 steps, top-k 1 without a monitor, save_last True,
    `CKPT_DIR`). `CheckpointManager.save_epoch` keeps every epoch checkpoint (`epoch-<E>-step-<N>.npz`) and moves the
    `best` pointer without deleting (a NaN epoch is saved, never best; NaN is stored as `"nan"` so the metadata check
-   passes). `save_last` writes `last-<N>.npz` at a validation end unless `last` already holds that step (Lightning's
+   passes). `save_last` writes `last-<N>.npz` at an epoch end unless `last` already holds that step (Lightning's
    `_should_skip_saving_checkpoint`), and stale `last-*` files are removed. `maybe_save_best` (top-1 with a monitor)
    stays for other configs and never removes an epoch checkpoint. The loader rejects `train_time_interval`,
    `save_on_train_epoch_end`, both triggers at once and top-k > 1 without a monitor (Lightning rejects the last two).
+   Fix round 3: (a) `keep_last_k` is Lightning's `save_top_k` without a monitor (`model_checkpoint.py:92-93`): -1 keeps
+   every step checkpoint (it kept only the newest before: the documented wiring `keep_last_k = save_top_k` would have
+   deleted them), 0 writes no step file (`last-<N>.npz` only with `write_last`, as `save_top_k=0, save_last=True`),
+   other values below -1 raise; `CheckpointManager.from_callback(dir, rc.checkpoint.step|epoch)` builds the manager
+   (step trigger: `maybe_save_step`; epoch trigger: `maybe_save_epoch` with `every_n_epochs`, `(epoch + 1) % n == 0`
+   as `model_checkpoint.py:328`) and raises for top-k by a monitor, which it does not implement. (b) A monitor missing
+   from the metrics raises `KeyError` in `save_epoch` / `maybe_save_best` (Lightning raises once validation has run,
+   `model_checkpoint.py:378-386`, and only warns before the first validation: the driver must not call `save_epoch`
+   before one). (c) Deviation kept: Lightning ranks a NaN monitor value as +inf (min mode) and keeps it in
+   `best_k_models`, so a run whose validations so far are all NaN has a NaN epoch as `best_model_path`; the native
+   `best` pointer is then unset (a NaN is never best). From the first finite value on they agree (strict `<`).
 11. **Checkpoint file mode** (fix round 2). `mkstemp` creates 0o600 and the rename keeps it; files are now chmod-ed to
    `0o666 & ~umask` before the rename, as a plain `open(..., "w")`, so collaborators can read checkpoints in the shared
    project area.
@@ -111,6 +126,26 @@ fixtures generated in the hybrid env `hepattn/.venv` (lightning 2.5.2).
    `ConfigError` (torch raises `KeyError`; the loader used to default to 0.0); `OptimizerConfig.epsilon = 1e-8` is
    torch `AdamW`'s default, which the S6b builder must pass to keras `AdamW` (default 1e-7,
    `keras/src/optimizers/adamw.py:59`). Lion: lion_pytorch betas (0.9, 0.99) are the keras Lion defaults.
+
+13. **Config merge = LightningCLI** (fix round 3). The first loader merged every dict key by key (as
+   `polaris/03_make_config.py:129-137` does). jsonargparse 4.40.1 (hybrid env) differs in two ways, measured with
+   probes and with LightningCLI `--print_config`: (a) keys next to a `class_path` are init args (eval.yaml's
+   `model: model: encoder: attn_type: torch`); the old loader kept them as a stray key and ignored it, so
+   base + linformer + eval loaded the linformer model (hash `b4f17323e5bc`, the base + linformer hash; LightningCLI:
+   `attn_type: torch`, hash `3723db9efa12`); (b) a dict-typed argument (`lrs_config`, `attn_kwargs`,
+   `decoder_layer_config`, `data.inputs`, the hybrid `KerasMaskFormer`'s `encoder` / `decoder`) is replaced whole,
+   while a class-typed one (a `class_path` entry, or the torch `MaskFormer`'s plain-dict `decoder`) merges its init
+   args. Also measured: `init_args` next to other keys is rejected, a `class_path` change keeps only the init args the
+   new class accepts (needs the class: the loader raises), `null` replaces. `merge_configs` implements this; the
+   class-typed plain-dict keys come from `_CLASS_OF_KEY` (encoder, decoder, posenc, net, ...) minus `_DICT_TYPED`
+   (`KerasMaskFormer`: encoder, decoder). Pinned by two new LightningCLI fixtures (`org_eval_normalised.yaml`,
+   `org_partial_normalised.yaml` from `overlay_partial_dicts.yaml`). Old loader on the two overlays: both hashed
+   `b4f17323e5bc` (overlay ignored); new: equal to the printed configs (`3723db9efa12`, `a6bfe6adb660`). The
+   base + linformer hash and every other fixture hash are unchanged (linformer.yaml repeats its dicts whole).
+14. **`ClicMetrics.update(..., event_valid=...)`** (fix round 3) drops the padding events of a padded val / test
+   batch, as `PredictionWriter.write_batch` does. Without it, padding events (null class everywhere) change 3 of 31
+   values on `fixed_case(4)` + 2 padding events (micro accuracy 0.636 -> 0.781). The per-layer default
+   (`pool_layers=False`, decision 5) is kept: see open issues (user to confirm).
 
 ## Gates
 
@@ -151,6 +186,36 @@ New gate evidence (fix round 2):
   weight_decay, both triggers, top-k 3 without a monitor, `save_on_train_epoch_end`);
 - metrics: `ulps` at a zero reference uses the smallest subnormal as the spacing (`test_ulps_of_an_exact_zero_reference_is_strict`).
 
+Fix round 3 2026-10-19 (`7e3ef89`..`8fd64bc`): the 7 S6a test files + `test_import_hygiene.py` at `8fd64bc` gave
+159 passed, 4 skipped (requiresdata) in 352 s (hepattn resolved to this worktree's `src`); `prek run` passes on every
+changed file. Mutants M80-M95 and the retargeted M3 killed 17/17, and M12, M13, M14, M21, M55, M64, M75-M79 re-run
+11/11 (28/28 in one run on the committed tree; the runner's `git diff --quiet` held). Reviewer issues and evidence:
+- **major, config merge** (decision 13): `test_overlays_merge_as_lightningcli[eval|partial]` (raw base + linformer +
+  overlay == the LightningCLI-printed config: same `model_description` and hash, which differs from base + linformer;
+  pinned values: eval `attn_type` torch, no checkpoint callbacks, `is_inference`; partial `attn_kwargs` {num_heads: 8},
+  2 decoder layers, base's `mask_attention` kept, `num_val` 10). Control: the key-by-key merge leaves the overlay's keys
+  next to `model.model`'s `init_args`, which the loader now rejects. `test_dict_typed_arguments_are_replaced_whole`
+  (the explicit-`init_args` form of the overlay gives the printed hash; control: merging its dicts keeps
+  `linformer_k` / `norm` and gives another hash). `test_overlay_with_replaced_dicts_builds_the_printed_model`
+  (bit-identical forward). `test_merge_rules`, `test_merge_rejects_...` x3, `test_partial_lrs_config_is_replaced_whole`
+  (control: the full `lrs_config` loads).
+- **major, step-checkpoint retention** (decision 10 (a)): `test_keep_last_k_is_lightnings_save_top_k` x5 (-1: all 4
+  files; 0: none; 0 + `write_last`: `last-000004000.npz` only; 1; 3), every kept file loads;
+  `test_keep_last_k_is_validated` x4 (control: -1 is accepted); `test_manager_from_the_polaris_step_callback`,
+  `test_manager_from_the_hepattn_epoch_callback` (every_n_epochs 2 saves after epochs 1, 3; missing monitor raises),
+  `test_manager_from_a_callback_it_does_not_implement_raises` x2 (control: top-k -1 with a monitor builds).
+  Reproduced the reviewer's probe on the old code by reading: `steps[: max(0, len(steps) - keep_last_k)]` with -1
+  slices every older file.
+- **minors**: abs_norm_res epsilon placement (`test_abs_norm_res_adds_the_epsilon_after_the_division`: |t| 1e-5..3e-5
+  at three particles per field; measured <= 4 ulps over 10 seeds, tolerance 8; the other placement is > 800 ulps away);
+  `event_number` not in the device targets / inputs; `ClicMetrics.update(event_valid=...)` (decision 14;
+  `test_event_valid_drops_padding_events`, control: without it 3 of 31 values change); `MaskInference` tolerance now
+  measured (2 ulps worst over 20 seeds x 3 events, tolerance 4, 5 seeds x 3 events tested; was `rel=1e-6`);
+  NaN / missing monitor (decision 10 (b), (c), deviation 7); "validation end" wording corrected to the train epoch end
+  (decision 10, `config.CheckpointCallback`, `checkpoint` docstrings); the `_cache_size` gate row reworded; spawn guard
+  in the `native_data` docstring and open issues. The reviewer's last minor (stale implementer report) needs no repo
+  change.
+
 Re-verified 2026-10-16 in a new session at `a2bab07`: the 7 S6a test files + `test_import_hygiene.py` gave 92 passed,
 4 skipped (requiresdata) in 360 s; `prek run` on all 18 changed files passes; `S6a_mutations.py --only
 M1,M3,M13,M14,M19,M22,M24,M25` killed 8/8, and the tree was clean afterwards.
@@ -169,7 +234,7 @@ M1,M3,M13,M14,M19,M22,M24,M25` killed 8/8, and the tree was clean afterwards.
 | Prediction h5 == `PflowPredictionWriter` | pass | `test_h5_layout_and_values_equal_the_torch_writer`: same groups, field names, dtypes, shapes, chunks, compression, attributes; values equal (inverse transforms exact, measured 0.0); `load_convert_h5` gives equal arrays. `predict` == torch task `predict` (mask probabilities within 2x the measured 1.19e-7, 0 threshold flips). Controls: a renamed field (`pred_e` -> `pred_E`) changes the layout; a changed class changes exactly `object_class/pflow_class`; padding events are not written. |
 | Data adapter | pass | `test_data.py` (10, fix round: `test_float64_is_cast_to_float32_on_the_host`): train drop_last (10 events / batch 4 -> 2), static int32 / float32 / bool device arrays; val padded (`event_valid` [T, T, F, F], invalid-event values, real events unchanged, `event_number` int64 [8, 9, -1, -1]); one val epoch compiles the jitted eval forward + `predict` once. Controls: the torch batch has int64 and a short last batch; `pad_to_batch=False` raises on it; the unpadded short batch compiles a second executable; an int64 above int32 raises; a new shape raises. |
 | Real CLIC batches (requiresdata) | **deferred to Polaris/falcon** | `test_data_real.py`: no target at padded nodes, prefix-contiguous `particle_valid` with class 5 exactly at invalid particles, static batches; records the equal-phi rate (RETARGET risk 6). Not runnable here (no ROOT files). Dry run on dummy events: the padded-node check fails on raw dummy events (targets at padded nodes) and passes after cleaning; the prefix check fails with a residual first (3 of 10 events). |
-| S6 gate: train `_cache_size() <= 2` over an epoch | **S6b** | Needs the train loop. Eval + predict part done (above). |
+| S6 gate: train `_cache_size() <= 2` over an epoch | **S6b** | Needs the train loop. Only the forward + `predict` part is done (`test_one_val_epoch_compiles_eval_and_predict_once`); the eval executable with `matched_loss` (pure_callback matching, padded-event weighting) is not compiled or counted here: S6b. |
 
 ## Mutations
 
@@ -279,6 +344,29 @@ the new `_checkpoint_callback` / `_optimizer` code (their old snippets no longer
 
 Checkpoint mutants take 200-270 s each (the train-step compile); the others 6-25 s.
 
+Fix round 3: 16 more mutants (M80-M95; the reviewer's N1 = M93 and D3 = M94, and the new code); M3 retargeted to
+`_merge_args` (its old `deep_merge` snippet is gone). Selections: `MERGE`, `CK_KEEP` in the runner.
+
+| Mutant | Change | Killed by |
+|---|---|---|
+| M3 | `_merge_args` replaces every value (overlay drops base keys) | `test_loader_reads_every_form[org_raw]` |
+| M80 | keys next to `class_path` not folded into `init_args` | `test_overlays_merge_as_lightningcli[eval]` (the naive-merge control must be rejected) |
+| M81 | dict-typed arguments merged key by key | `test_overlays_merge_as_lightningcli[partial]` |
+| M82 | `KerasMaskFormer` encoder / decoder merged as classes | `test_merge_rules` |
+| M83 | plain-dict class-typed keys (raw decoder) replaced whole | `test_overlays_merge_as_lightningcli[eval]` |
+| M84 | `class_path` change accepted | `test_merge_rejects_what_jsonargparse_rejects_or_needs_the_class_for[...changes class_path]` |
+| M85 | top-level sections replaced whole | `test_overlays_merge_as_lightningcli[eval]` |
+| M86 | `keep_last_k=-1` prunes | `test_keep_last_k_is_lightnings_save_top_k[-1-False-...]` |
+| M87 | `keep_last_k=0` writes a step file | `test_keep_last_k_is_lightnings_save_top_k[0-False-...]` |
+| M88 | `keep_last_k` not validated | `test_keep_last_k_is_validated[-2]` |
+| M89 | `from_callback` keeps 1 whatever `save_top_k` | `test_manager_from_the_polaris_step_callback` |
+| M90 | `epoch_due` without the `+ 1` | `test_manager_from_the_hepattn_epoch_callback` |
+| M91 | missing monitor not rejected | same |
+| M92 | `from_callback` drops `save_last` | `test_manager_from_the_polaris_step_callback` |
+| M93 | `abs_err / (|t| + 1e-8)` (reviewer N1) | `test_abs_norm_res_adds_the_epsilon_after_the_division` |
+| M94 | `event_number` copied to the device, not popped (reviewer D3) | `test_train_batches_drop_last_and_are_static_int32` |
+| M95 | `event_valid` ignored | `test_event_valid_drops_padding_events` |
+
 ## Deviations
 
 1. New files outside the listed ones: `src/hepattn/experiments/clic/native_data.py` (the torch half of the adapter, as
@@ -290,6 +378,11 @@ Checkpoint mutants take 200-270 s each (the train-step compile); the others 6-25
 5. The `on_test_end` ROOT file of the torch writer is not written (only the h5); `load_convert_h5` reads the native h5.
 6. Fix round 2: `CheckpointConfig` changed shape (two `CheckpointCallback`s instead of flat fields); no S6b code used it yet.
    The checkpoint policy follows the hybrid callbacks, not the plan 3.9 text (decision 10).
+7. Fix round 3: a run whose validations so far all give NaN has no native `best` pointer; Lightning's
+   `best_model_path` names a NaN epoch then (decision 10 (c)).
+8. Fix round 3: `merge_configs` raises for an overlay that changes a `class_path` (jsonargparse keeps the init args
+   the new class accepts; the loader has no torch classes to ask), and the loader rejects a class entry with
+   `init_args` next to other keys (jsonargparse rejects it too).
 
 ## Open issues
 
@@ -304,11 +397,30 @@ Checkpoint mutants take 200-270 s each (the train-step compile); the others 6-25
   for the raw, generated and saved forms, on any host, and for another LR / optimizer / matcher / data setting; a
   checkpoint written before the fix round has an old-style hash and needs `expect_config_hash=None`); resume data position at an optimizer-step
   boundary with accumulation (`SplitBatches.epoch(epoch, start_batch)`).
-- **S6b, checkpoint wiring** (fix round 2, decision 10): one `CheckpointManager` per `CheckpointCallback`. For
-  `checkpoint.epoch`: `save_epoch(epoch, step, {"val/loss": ...})` at every validation end, in the run's `ckpts`
-  directory (the hepattn callback ignores a YAML `dirpath`). For `checkpoint.step`: `maybe_save_step` every
-  `every_n_train_steps` with `keep_last_k = save_top_k`, and, when `save_last` is true, `save_last(step, ...)` at every
-  validation end and at the train end (else `last` can be up to `every_n_steps - 1` steps old), in `dirpath`.
+- **S6b, checkpoint wiring** (decision 10; fix round 3 replaces the hand mapping `keep_last_k = save_top_k`, which
+  deleted step checkpoints for -1): one `CheckpointManager.from_callback(directory, callback)` per non-None
+  `rc.checkpoint.epoch` / `rc.checkpoint.step`. Epoch manager: `maybe_save_epoch(epoch, step, {"val/loss": ...})` at
+  each train epoch end, after that epoch's validation, in the run's `ckpts` directory (the hepattn callback ignores a
+  YAML `dirpath`). An epoch cut short by `max_steps` runs no validation; Lightning still saves it in
+  `on_train_epoch_end` with the last logged `val/loss` (and only warns if no validation has run yet): the driver
+  must pass the last val metrics then, or skip that save and record the deviation. Step manager: `maybe_save_step`
+  after each optimizer step, and, when `manager.write_last`, `save_last(step, ...)` at each epoch end and at the
+  train end (else `last` can be up to `every_n_steps - 1` steps old), in `callback.dirpath`.
+- **S6b, driver entry point under spawn** (decision 9): spawned DataLoader workers re-import the driver's main
+  module, so keep the driver under `if __name__ == "__main__":` and run no JAX computation at import (otherwise each
+  of the 8 workers can start a JAX GPU backend and preallocate 75% of the GPU memory); optionally set
+  `JAX_PLATFORMS=cpu` in the worker environment. Measured: importing `native_data`, `checkpoint`, `metrics` and
+  `predict_writer` leaves `jax._src.xla_bridge._backends` empty.
+- **S6b:** pass `event_valid=batch.event_valid` to `ClicMetrics.update` and `PredictionWriter.write_batch` for padded
+  val / test batches (decision 14).
+- **User to confirm, `ClicMetrics` default** (decision 5; reviewer minor): the default is per-layer values
+  (`pool_layers=False`); the Lightning module pools every layer into one metric object, so its logged
+  `val/final_*` values differ. G4 comparisons with hybrid logs must use `pool_layers=True`. Alternative: make
+  `pool_layers=True` the default so native logs equal hybrid logs unless asked otherwise.
+- **Not owned, `polaris/03_make_config.py`:** its `merge` merges every dict key by key (decision 13). For org's
+  base + linformer this gives the LightningCLI result (linformer.yaml repeats its dicts whole, as its comment says);
+  an overlay with a partial dict-typed argument or eval.yaml's short form would not. `tests/keras_native/test_pr8_layers.py`
+  and `golden/mf_cases.py` keep their own copy of the old merge, used only on base + linformer (same result).
 - **Plan owner:** plan 3.9 says "best on val/loss"; the hybrid keeps every epoch checkpoint (`save_top_k=-1`) and its
   `Checkpoint` never writes `last` (decision 10). Correct the plan text.
 - **S6b, optimizer builder:** `keras.optimizers.AdamW(epsilon=rc.optimizer.epsilon)` (1e-8, torch's default; keras'

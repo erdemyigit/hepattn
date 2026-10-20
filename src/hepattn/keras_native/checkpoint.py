@@ -23,11 +23,14 @@ Export: ``export_weights`` assigns a state into the variables and calls ``Model.
 keyed by the layer tracking structure, not by paths); a freshly built model loads it with ``load_weights``.
 
 Policy: the two Lightning callbacks of the CLIC configs (``config.CheckpointConfig``). ``CheckpointManager`` writes
-- ``epoch-<epoch>-step-<step>.npz`` at every validation end (``save_epoch``; hepattn ``Checkpoint``, ``save_top_k=-1``:
-  never deleted), with ``best`` pointing at the one with the best finite ``val/loss``;
+- ``epoch-<epoch>-step-<step>.npz`` at each train epoch end, after that epoch's validation (``maybe_save_epoch``;
+  hepattn ``Checkpoint``, ``save_top_k=-1``: never deleted), with ``best`` pointing at the one with the best finite
+  ``val/loss``. Lightning saves in ``on_train_epoch_end`` when ``val_check_interval`` is 1.0 (every CLIC config), so
+  an epoch cut short by ``max_steps`` is saved there too, with the last logged ``val/loss`` (S6a.md decision 10);
 - ``step-<step>.npz`` every ``every_n_steps`` (``maybe_save_step``; Polaris ``ModelCheckpoint``, the newest
-  ``keep_last_k``), and ``last-<step>.npz`` at a validation end or the train end (``save_last``; Lightning rewrites
-  ``last.ckpt`` there when ``save_last``), with ``last`` pointing at the newest of the two;
+  ``keep_last_k`` = ``save_top_k``; -1 keeps all), and ``last-<step>.npz`` at an epoch end or the train end
+  (``save_last``; Lightning rewrites ``last.ckpt`` there when ``save_last``), with ``last`` pointing at the newest of
+  the two. ``CheckpointManager.from_callback`` maps a ``config.CheckpointCallback`` onto these;
 - ``best-step-<step>.npz`` (``maybe_save_best``): only the best one is kept (``save_top_k=1`` with a monitor; no CLIC
   config uses it).
 The pointer files ``last.json`` and ``best.json`` are each replaced atomically after the checkpoint they name is
@@ -350,22 +353,33 @@ def export_weights(model: keras.Model, state: Sequence, path: str | Path) -> Pat
 
 @dataclass
 class CheckpointPolicy:
-    """When to save: every ``every_n_steps`` optimizer steps, and on a new best ``monitor`` value (``mode`` min/max)."""
+    """When to save: every ``every_n_steps`` optimizer steps, every ``every_n_epochs`` validated epochs, and on a new
+    best ``monitor`` value (``mode`` min/max).
+    """
 
     every_n_steps: int | None = 1000
     monitor: str | None = "val/loss"
     mode: str = "min"
     best_value: float | None = None
+    every_n_epochs: int | None = 1
 
     def __post_init__(self):
         if self.mode not in {"min", "max"}:
             raise ValueError(f"mode must be 'min' or 'max', got {self.mode!r}")
         if self.every_n_steps is not None and self.every_n_steps < 1:
             raise ValueError(f"every_n_steps must be >= 1, got {self.every_n_steps}")
+        if self.every_n_epochs is not None and self.every_n_epochs < 1:
+            raise ValueError(f"every_n_epochs must be >= 1, got {self.every_n_epochs}")
 
     def step_due(self, step: int) -> bool:
         """True at steps ``every_n_steps``, ``2 * every_n_steps``, ... (Lightning ``every_n_train_steps``)."""
         return self.every_n_steps is not None and step > 0 and step % self.every_n_steps == 0
+
+    def epoch_due(self, epoch: int) -> bool:
+        """True after epochs ``every_n_epochs - 1``, ``2 * every_n_epochs - 1``, ... (0-based, as Lightning's
+        ``(current_epoch + 1) % every_n_epochs == 0``, ``model_checkpoint.py:328``).
+        """
+        return self.every_n_epochs is not None and (epoch + 1) % self.every_n_epochs == 0
 
     def is_better(self, metrics: dict) -> bool:
         """True if ``metrics[monitor]`` is finite and improves on the best so far (NaN never improves)."""
@@ -380,15 +394,51 @@ class CheckpointPolicy:
 
 
 class CheckpointManager:
-    """Writes checkpoints under ``directory`` by a ``CheckpointPolicy``; keeps ``keep_last_k`` step checkpoints."""
+    """Writes checkpoints under ``directory`` by a ``CheckpointPolicy``.
 
-    def __init__(self, directory: str | Path, policy: CheckpointPolicy | None = None, keep_last_k: int = 1) -> None:
+    ``keep_last_k`` is Lightning's ``save_top_k`` without a monitor (``model_checkpoint.py:92-93``): the newest ``k``
+    step checkpoints are kept; -1 keeps every one; 0 writes none (with ``write_last``, ``maybe_save_step`` writes
+    ``last-<step>.npz`` instead, as Lightning writes ``last.ckpt`` with ``save_top_k=0, save_last=True``).
+    ``write_last`` records the callback's ``save_last``: the driver calls ``save_last`` at each train epoch end
+    (after that epoch's validation) and at the train end when it is set. ``from_callback`` builds the manager of one ``config.CheckpointCallback``.
+
+    Raises:
+        ValueError: For ``keep_last_k`` other than an int >= -1.
+    """
+
+    def __init__(self, directory: str | Path, policy: CheckpointPolicy | None = None, keep_last_k: int = 1, *, write_last: bool = False) -> None:
+        if isinstance(keep_last_k, bool) or not isinstance(keep_last_k, int) or keep_last_k < -1:
+            raise ValueError(f"keep_last_k must be an int >= -1 (-1 keeps every step checkpoint), got {keep_last_k!r}")
         self.directory = Path(directory)
         self.policy = policy or CheckpointPolicy()
         self.keep_last_k = keep_last_k
+        self.write_last = write_last
         best = self._pointer("best")
         if best is not None:
             self.policy.best_value = best.get("value")
+
+    @classmethod
+    def from_callback(cls, directory: str | Path, callback) -> "CheckpointManager":
+        """The manager that does what one ``config.CheckpointCallback`` does.
+
+        Step trigger (``every_n_train_steps``): ``maybe_save_step``, ``keep_last_k = save_top_k``. Epoch trigger:
+        ``maybe_save_epoch`` at each train epoch end; every epoch checkpoint is kept (hepattn ``Checkpoint``,
+        ``save_top_k=-1``).
+
+        Raises:
+            ValueError: For what the manager does not implement: top-k by a monitor (``save_top_k`` > 0 with a
+                monitor on a step trigger, or other than -1 on an epoch trigger).
+        """
+        keep = callback.save_top_k
+        if callback.every_n_train_steps:
+            if callback.monitor is not None and keep > 0:
+                raise ValueError(f"step checkpoints: save_top_k={keep} by monitor {callback.monitor!r} is not implemented")
+            policy = CheckpointPolicy(every_n_steps=callback.every_n_train_steps, monitor=callback.monitor, mode=callback.mode, every_n_epochs=None)
+        else:
+            if keep != -1:
+                raise ValueError(f"epoch checkpoints: only save_top_k=-1 (hepattn Checkpoint) is implemented, got {keep}")
+            policy = CheckpointPolicy(every_n_steps=None, monitor=callback.monitor, mode=callback.mode, every_n_epochs=callback.every_n_epochs)
+        return cls(directory, policy, keep_last_k=keep, write_last=callback.save_last)
 
     def _pointer(self, name: str) -> dict | None:
         path = self.directory / f"{name}.json"
@@ -428,22 +478,37 @@ class CheckpointManager:
             if _LAST_FILE.fullmatch(old.name) and old != path:
                 self._remove(old)
 
-    def save(self, step: int, model, optimizer, state, meta: dict) -> Path:
-        """Write ``step-<step>.npz`` (a new name if it exists), point ``last`` at it, prune old step checkpoints."""
+    def save(self, step: int, model, optimizer, state, meta: dict) -> Path | None:
+        """Write ``step-<step>.npz`` (a new name if it exists), point ``last`` at it, keep the newest ``keep_last_k``.
+
+        With ``keep_last_k`` 0: no step file; ``save_last`` if ``write_last``, else nothing (returns None).
+        """
+        if self.keep_last_k == 0:
+            return self.save_last(step, model, optimizer, state, meta) if self.write_last else None
         path = save_checkpoint(self._new_path("step", step), model, optimizer, state, {**meta, "step": step})
         self._point_last(path, step)
-        protected = {p["file"] for p in (self._pointer("best"),) if p}
-        steps = self._step_files()
-        for old in steps[: max(0, len(steps) - self.keep_last_k)]:
-            if old.name not in protected and old != path:
-                self._remove(old)
+        if self.keep_last_k > 0:
+            protected = {p["file"] for p in (self._pointer("best"),) if p}
+            steps = self._step_files()
+            for old in steps[: max(0, len(steps) - self.keep_last_k)]:
+                if old.name not in protected and old != path:
+                    self._remove(old)
         return path
 
     def maybe_save_step(self, step: int, model, optimizer, state, meta: dict) -> Path | None:
         return self.save(step, model, optimizer, state, meta) if self.policy.step_due(step) else None
 
+    def _monitored(self, metrics: dict) -> None:
+        """Check that the monitor is in ``metrics``; Lightning raises once validation has run (``model_checkpoint.py:378-386``).
+
+        Raises:
+            KeyError: If the monitor is not in ``metrics``.
+        """
+        if self.policy.monitor is not None and self.policy.monitor not in metrics:
+            raise KeyError(f"monitor {self.policy.monitor!r} is not in the metrics {sorted(metrics)}")
+
     def save_last(self, step: int, model, optimizer, state, meta: dict) -> Path:
-        """``last`` at a validation end or the train end: a no-op if ``last`` already holds ``step``.
+        """``last`` at a train epoch end or the train end: a no-op if ``last`` already holds ``step``.
 
         Lightning writes ``last.ckpt`` there when ``save_last`` is set (and skips a step it already saved); call this
         when ``CheckpointCallback.save_last`` is true, else ``last`` is up to ``every_n_steps - 1`` steps old.
@@ -458,9 +523,12 @@ class CheckpointManager:
     def save_epoch(self, epoch: int, step: int, metrics: dict, model, optimizer, state, meta: dict) -> Path:
         """Write ``epoch-<epoch>-step-<step>.npz`` (kept for good); point ``best`` at it if ``metrics[monitor]`` improves.
 
-        As hepattn ``Checkpoint`` (``save_top_k=-1``): every validation end is saved, a NaN or missing monitor value
-        included (it is never the best).
+        As hepattn ``Checkpoint`` (``save_top_k=-1``): every epoch is saved, a NaN monitor value included. A NaN is
+        never the best; Lightning ranks it as +inf (min mode), so its ``best_model_path`` names a NaN epoch until a
+        finite one comes (S6a.md decision 10). A monitor missing from ``metrics`` raises
+        ``KeyError`` (``_monitored``).
         """
+        self._monitored(metrics)
         value = metrics.get(self.policy.monitor) if self.policy.monitor else None
         if value is not None:  # NaN as a string: a NaN read back from JSON never equals the sidecar's
             value = float(value) if math.isfinite(float(value)) else str(float(value))
@@ -473,8 +541,16 @@ class CheckpointManager:
             self.policy.best_value = value
         return path
 
+    def maybe_save_epoch(self, epoch: int, step: int, metrics: dict, model, optimizer, state, meta: dict) -> Path | None:
+        """``save_epoch`` after the epochs ``policy.epoch_due`` names; None otherwise."""
+        return self.save_epoch(epoch, step, metrics, model, optimizer, state, meta) if self.policy.epoch_due(epoch) else None
+
     def maybe_save_best(self, step: int, metrics: dict, model, optimizer, state, meta: dict) -> Path | None:
-        """Write ``best-step-<step>.npz`` if ``metrics[monitor]`` improves; remove the previous ``best-step`` file."""
+        """Write ``best-step-<step>.npz`` if ``metrics[monitor]`` improves; remove the previous ``best-step`` file.
+
+        A monitor missing from ``metrics`` raises ``KeyError`` (``_monitored``).
+        """
+        self._monitored(metrics)
         if not self.policy.is_better(metrics):
             return None
         value = float(metrics[self.policy.monitor])

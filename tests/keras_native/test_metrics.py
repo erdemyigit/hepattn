@@ -19,6 +19,7 @@ from torch import nn
 from hepattn.experiments.clic.lightning_module import MPflow
 from hepattn.experiments.clic.metrics import MaskInference
 from hepattn.keras_native import metrics as M
+from hepattn.keras_native.data import pad_events
 
 from .golden.mf_cases import instantiate, org_init_args
 
@@ -116,15 +117,24 @@ def test_binary_recall_precision_equal_torchmetrics(ours_cls, ref_cls):
     assert empty.compute() == float(ref_empty(torch.zeros(4, dtype=torch.bool), torch.zeros(4, dtype=torch.bool))) == 0.0
 
 
-def test_mask_inference_equals_torch():
+# float32 means over the kept particles in another order than torch: measured up to 2 ulps (20 seeds x 3 events)
+MASK_ULPS = 4
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_mask_inference_equals_torch(seed):
+    preds, targets = fixed_case(seed)
+    for event in range(B):
+        pred, tgt = preds["mask"]["pflow_node_valid"][event], targets["particle_node_valid"][event]
+        tp, tt_ = torch.from_numpy(pred), torch.from_numpy(tgt)
+        keep = tgt.sum(-1) > 0
+        assert M.mask_exact_match(pred, tgt) == float(MaskInference.exact_match(tp, tt_))
+        assert ulps(M.mask_eff(pred[keep], tgt[keep]), float(MaskInference.eff(tp[keep], tt_[keep]))) <= MASK_ULPS
+        keep = pred.sum(-1) > 0
+        assert ulps(M.mask_pur(pred[keep], tgt[keep]), float(MaskInference.pur(tp[keep], tt_[keep]))) <= MASK_ULPS
     preds, targets = fixed_case(1)
     pred, tgt = preds["mask"]["pflow_node_valid"][0], targets["particle_node_valid"][0]
     tp, tt_ = torch.from_numpy(pred), torch.from_numpy(tgt)
-    keep = tgt.sum(-1) > 0
-    assert M.mask_exact_match(pred, tgt) == float(MaskInference.exact_match(tp, tt_))
-    assert M.mask_eff(pred[keep], tgt[keep]) == pytest.approx(float(MaskInference.eff(tp[keep], tt_[keep])), rel=1e-6)
-    keep = pred.sum(-1) > 0
-    assert M.mask_pur(pred[keep], tgt[keep]) == pytest.approx(float(MaskInference.pur(tp[keep], tt_[keep])), rel=1e-6)
     assert math.isnan(M.mask_exact_match(pred[:0], tgt[:0])) and math.isnan(float(MaskInference.exact_match(tp[:0], tt_[:0])))
     assert math.isnan(M.mask_eff(pred[:0], tgt[:0])) and math.isnan(float(MaskInference.eff(tp[:0], tt_[:0])))
 
@@ -222,6 +232,56 @@ def test_control_one_perturbed_prediction_changes_the_value(perturb, key, mpflow
     ours.update({"final": preds}, targets)
     assert ulps(ours.compute()[key], ref[key]) > 100 * max(tolerance(key), 1)
     assert_equal_metrics(ours.compute(), torch_logged(mpflow, {"final": preds}, targets))
+
+
+def with_tiny_targets(seed: int) -> tuple[dict, dict]:
+    """``fixed_case`` with |target| 1e-5 .. 3e-5 at three valid particles of every field (eta / sinphi near 0)."""
+    preds, targets = fixed_case(seed)
+    for field in FIELDS:
+        targets[f"particle_{field}"][0, :3] = np.array([1e-5, -2e-5, 3e-5], np.float32)
+    return preds, targets
+
+
+# measured up to 4 ulps on these cases (10 seeds); 2x
+TINY_TARGET_ULPS = 8
+
+
+def test_abs_norm_res_adds_the_epsilon_after_the_division(mpflow):
+    """torch: ``abs_err / |t| + 1e-8``. At |t| ~ 1e-5 the other placement, ``abs_err / (|t| + 1e-8)``, is ~1e-3
+    relative away; on ``fixed_case`` alone (smallest |t| 0.0069) the two differ by <= 6 ulps, inside the tolerance.
+    """
+    preds, targets = with_tiny_targets(2)
+    ref = torch_logged(mpflow, {"final": preds}, targets)
+    ours = M.ClicMetrics("val")
+    ours.update({"final": preds}, targets)
+    keys = [k for k in ref if k.endswith("abs_norm_res")]
+    assert len(keys) == 10
+    for key in keys:
+        assert ulps(ours.compute()[key], ref[key]) <= TINY_TARGET_ULPS, key
+    # control: the other placement, computed here, is far outside the tolerance
+    valid = targets["particle_valid"]
+    for field in ("eta", "sinphi"):
+        abs_err = np.abs(preds["regression"][f"pflow_{field}"][valid] - targets[f"particle_{field}"][valid])
+        other = float(np.mean(abs_err / (np.abs(targets[f"particle_{field}"][valid]) + np.float32(1e-8))))
+        key = f"val/final_regression_{field}_abs_norm_res"
+        assert ulps(other, ref[key]) > 100 * TINY_TARGET_ULPS
+
+
+def test_event_valid_drops_padding_events():
+    """A val batch padded with invalid events (``data.pad_events``) gives the unpadded values with ``event_valid``."""
+    preds, targets = fixed_case(4)
+    padded_targets = pad_events(targets, B + 2)
+    padded_preds = {task: pad_events(values, B + 2, target_object="pflow") for task, values in preds.items()}
+    padded_preds["classification"]["pflow_class"][B:] = 5  # a padding event's queries predict the null class
+    event_valid = np.arange(B + 2) < B
+    plain, masked, unmasked = M.ClicMetrics("val"), M.ClicMetrics("val"), M.ClicMetrics("val")
+    plain.update({"final": preds}, targets)
+    masked.update({"final": padded_preds}, padded_targets, event_valid=event_valid)
+    unmasked.update({"final": padded_preds}, padded_targets)  # control: the padding events count
+    expected = plain.compute()
+    assert masked.compute() == pytest.approx(expected, nan_ok=True, rel=0, abs=0)
+    differ = [k for k, v in unmasked.compute().items() if v != pytest.approx(expected[k], nan_ok=True, rel=0, abs=0)]
+    assert "val/final_obj_class_accuracy_micro" in differ
 
 
 def test_lightning_module_pools_layers_and_native_does_not(mpflow):
