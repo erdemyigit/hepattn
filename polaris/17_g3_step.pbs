@@ -1,0 +1,67 @@
+#!/bin/bash -l
+#PBS -N hgq_g3
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=01:00:00
+# NOTE: -q and -l walltime= below are FALLBACKS for a bare qsub.
+# submit.sh overrides both from polaris/env.sh (QUEUE_*/WALLTIME_*).
+#PBS -q debug
+#PBS -j oe
+#PBS -o logs/17_g3_step.log
+#
+# Submit with:  bash polaris/submit.sh 17_g3_step.pbs
+#
+# Gate G3 (docs/hgq/KERAS_JAX_PLAN.md section 4, S5): the full native train step (matching + losses + optimizer)
+# against the hybrid's in-run step (13_step_time.pbs pattern), both fp32 on one A100 with the generated config's
+# accumulation 4 and PeriodicEBOPs every 8, at batches 32 and 16 (each job its own process: an OOM is recorded).
+# JAX jobs first: jax-prod (production step, EBOPs share, matching callback time), jax-g1 (TrainStep None+donate /
+# None+no donation / Keras train_on_batch: the G1 gap; profiled if the donating step is slower), jax-precision
+# ("highest" vs "default"/TF32: outputs, prediction flips, loss trajectories, step time), jax-match (matching share,
+# gate <= 15%); then the hybrid. Pass: hybrid / jax-prod median >= 1.8 at batch 32.
+# Results: logs/g3_<jobid>.json, written after every job (polaris/17_g3_step.py verdict()).
+#
+# ONE-TIME SETUP on a login node (compute nodes may not reach PyPI). .venv-jax is the env of 14_backend_spike.pbs;
+# this adds what the keras_native suite needs (the S1 set of docs/hgq/KERAS_NATIVE.md) with the CUDA 12 jax and a
+# CPU-only torch (used only by CLICDataset here; a CUDA torch would load a second set of CUDA libraries into the JAX
+# process). The resolution was checked with `uv pip compile --python-platform x86_64-manylinux_2_28 --python-version
+# 3.12` (torch 2.10.0+cpu, jax-cuda12-plugin 0.11.2, nvidia-cudnn-cu12 9.27):
+#   cd "$HEPATTN_DIR"   # see polaris/repo_dir.sh
+#   [ -x .venv-jax/bin/python ] || uv venv --python 3.12.0 .venv-jax
+#   uv pip install --python .venv-jax/bin/python \
+#     --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match \
+#     "keras==3.15.0" "hgq2==0.1.9" "quantizers==1.2.2" "numpy==2.3.5" "jax[cuda12]==0.11.2" psutil \
+#     "torch==2.10.0" "lightning==2.5.2" "pyyaml==6.0.3" "uproot==5.7.1" "awkward==2.9.0" "atlas-ftag-tools==0.2.18" \
+#     "einops==0.8.2" "lapx==0.9.4" "scipy==1.18.1" "torchmetrics==1.8.2" "pytorch-lightning==2.6.1" \
+#     "lion-pytorch==0.2.3" "torchjd==0.7.0" "jsonargparse[signatures]==4.40.1" "matplotlib==3.10.8"
+#   # masked-linformer dce2e15 (imported by the org torch attention; --no-deps keeps torch 2.10.0+cpu), as docs/hgq/KERAS_NATIVE.md:
+#   uv pip install --python .venv-jax/bin/python --no-deps \
+#     "masked-linformer @ https://github.com/compressed-maskformer-reco/masked-linformer/archive/dce2e151e9d25cefd85454b3dffd5c83ec217097.tar.gz"
+# The torch arms use the existing $REPO/.venv (01_setup_env.sh). $REPO must hold the retargeted code (branch keras-jax
+# at the R5 merge or later: keras_native/masked_linformer.py); both envs import hepattn from $REPO/src through PYTHONPATH.
+# The hybrid arm uses the existing $REPO/.venv (01_setup_env.sh), as 13_step_time.pbs.
+set -uo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+source polaris/env.sh
+export PYTHONNOUSERSITE=1 TORCHDYNAMO_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# report real JAX device memory instead of the default 75% preallocation (as 15_g2_forward.pbs)
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+# persistent compilation cache shared by the keras_native jobs (~2 min per program on an A100 otherwise)
+export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-$WORK_ROOT/jax_cache}"
+
+source polaris/repo_dir.sh
+REPO="$HEPATTN_DIR"; cd "$REPO"
+mkdir -p logs
+
+[ -x "$REPO/.venv-jax/bin/python" ] || { echo "ERROR: $REPO/.venv-jax missing; see ONE-TIME SETUP in this file"; exit 1; }
+[ -f "$REPO/src/hepattn/keras_native/loop.py" ] || { echo "ERROR: $REPO has no keras_native driver (check out keras-jax at S6b or later)"; exit 1; }
+nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv | head -2
+"$REPO/.venv-jax/bin/python" -c "import jax, torch; print('jax', jax.__version__, jax.devices(), '| torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+
+G3_DATA_FILE="${G3_DATA_FILE-$DATA_ROOT/val_clic_fix.root}"
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$REPO/src" "$REPO/.venv-jax/bin/python" polaris/17_g3_step.py --sweep \
+  --jax-python "$REPO/.venv-jax/bin/python" --torch-python "$REPO/.venv/bin/python" \
+  --data-file "$G3_DATA_FILE" --data-dir "$DATA_ROOT" --profile-dir "logs/g3_profile_${PBS_JOBID:-local}" \
+  --jobs "${G3_JOBS:-jax-prod:32,jax-prod:16,jax-g1:32,jax-precision:32,jax-match:32,hybrid:32,hybrid:16}" \
+  --out "logs/g3_${PBS_JOBID:-local}.json" ${G3_ARGS:-}
+echo "G3-EXIT-$?"

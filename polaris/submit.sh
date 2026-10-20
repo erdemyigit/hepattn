@@ -49,6 +49,10 @@ case "$BASE" in
   14_backend_spike.pbs) DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
   # 7 subprocess runs at production shape (3 JAX compiles + 4 torch arms with host matching)
   15_g2_forward.pbs)    DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
+  # 2 driver runs (train + resume) at production shape, each compiling 3 programs (cache hits on the resume)
+  16_jax_smoke.pbs)     DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
+  # 5 JAX jobs (~9 programs) + 2 hybrid Lightning runs at production shape
+  17_g3_step.pbs)       DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
   *)            DEF_QUEUE="${QUEUE_DEBUG:-debug}";      DEF_WALL="${WALLTIME_SMOKE:-00:20:00}" ;;
 esac
 QUEUE="${QUEUE:-$DEF_QUEUE}"
