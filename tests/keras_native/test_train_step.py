@@ -269,9 +269,10 @@ def test_accumulation_makes_one_host_call_per_micro_batch_and_one_update_per_k(f
     assert steps.compile_counts()["train"] == 1
 
 
-def small_model_and_loss():
+def small_model_and_loss(names: tuple[str, str] = (None, None)):
     inputs = keras.Input((4,))
-    model = keras.Model(inputs, keras.layers.Dense(3)(keras.layers.Dense(8, activation="relu")(inputs)))
+    hidden = keras.layers.Dense(8, activation="relu", name=names[0])(inputs)
+    model = keras.Model(inputs, keras.layers.Dense(3, name=names[1])(hidden))
 
     def loss_fn(outputs, targets):
         loss = jnp.mean(jnp.square(outputs - targets))
@@ -305,10 +306,15 @@ def test_state_donation_and_model_variables(donate):
 
 
 def test_steps_refuse_an_optimizer_built_for_another_model():
-    """The guard compares the optimizer's variables with the model's by identity, not by count."""
-    model, loss_fn = small_model_and_loss()
-    other, _ = small_model_and_loss()
-    assert len(other.trainable_variables) == len(model.trainable_variables)  # control: a count check cannot tell them apart
+    """The guard compares the optimizer's variables with the model's by identity, not by count, shape or path.
+
+    Explicit layer names (as the org model has) give both models the same variable paths, so a path guard would accept
+    the other model's optimizer (review mutant R7 survived the auto-named version of this test).
+    """
+    model, loss_fn = small_model_and_loss(names=("hid", "out"))
+    other, _ = small_model_and_loss(names=("hid", "out"))
+    # controls: count, shapes and paths are all equal, so only identity tells the two models apart
+    assert [(v.path, v.shape) for v in other.trainable_variables] == [(v.path, v.shape) for v in model.trainable_variables]
     opt_other = build_optimizer(other, optimizer="AdamW", lrs_config=LRS, total_steps=100)
     with pytest.raises(ValueError, match=r"built for model\.trainable_variables"):
         TrainStep(model, opt_other, loss_fn)
