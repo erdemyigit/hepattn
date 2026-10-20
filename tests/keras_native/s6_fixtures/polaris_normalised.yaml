@@ -67,14 +67,14 @@ trainer:
       enable_version_counter: true
   - class_path: hepattn.keras.callbacks.BetaPID
     init_args:
-      target_ebops: 1000000000000000.0
-      init_beta: 2.08e-09
+      target_ebops: 150000000000.0
+      init_beta: 6.96e-10
       p: 1.0
       i: 0.5
       d: 0.0
       warmup_epochs: 2
-      max_beta: 8.0e-07
-      min_beta: 0.0
+      max_beta: 2.64e-07
+      min_beta: 1.84e-12
       damp_beta_on_target: 0.0
   - class_path: hepattn.keras.callbacks.EBOPsMonitor
   - class_path: hepattn.keras.callbacks.BitwidthMonitor

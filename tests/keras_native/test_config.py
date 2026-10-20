@@ -92,7 +92,9 @@ DATA_AND_CADENCE = {"org": (512, 16, -1, 5000, -1, None), "pflow_hgq": (128, 16,
 # BetaPID of the generated config: INIT_BETA and MAX_BETA times HGQ_EBOPS_EVERY (8)
 BETA_PID = {
     "pflow_hgq": {"target_ebops": 1e15, "init_beta": 2.6e-10, "max_beta": 1e-7},
-    "polaris": {"target_ebops": 1e15, "init_beta": 2.08e-9, "max_beta": 8e-7},
+    # polaris/03_make_config.py after S5 (provisional, docs/hgq/BETA_SETPOINTS.md): 1.5e11 and 8.7e-11, 3.3e-8, 2.3e-13
+    # times HGQ_EBOPS_EVERY = 8 (the betas are scaled for PeriodicEBOPs)
+    "polaris": {"target_ebops": 1.5e11, "init_beta": 6.96e-10, "max_beta": 2.64e-7, "min_beta": 1.84e-12},
 }
 
 
