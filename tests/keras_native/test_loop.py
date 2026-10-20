@@ -11,13 +11,18 @@ with a 1-epoch warm-up; PeriodicEBOPs every 2 steps; a step checkpoint after eve
 - val/loss: the task loss, event-weighted, with the short batch's loss on its real events; controls: the padded loss
   differs, and task + regularizers (S5's reading of the hybrid) differs;
 - PeriodicEBOPs at the optimizer step, BetaPID per epoch on the latest read-out, the BetaScheduler ramp per step;
-- the checkpoint policy and the resume-checkpoint protection; one optimizer reader for every config form; refusals.
+- the checkpoint policy and the resume-checkpoint protection; one optimizer reader for every config form; refusals;
+- the val metrics drop the padding events and are pooled over layers (as the hybrid logs them);
+- a second run (log every 3 steps, validation every 2 epochs): the logged steps, the logged LR, the bitwidth counts
+  over trainable and non-trainable variables, the validation interval, "highest" in the val / tail programs;
+- a resume into the same run directory drops the CSV rows after the checkpoint and the stale checkpoint temporaries.
 """
 
 import dataclasses
 import math
 import operator
 import shutil
+from collections import defaultdict
 from itertools import starmap
 
 import jax
@@ -29,6 +34,7 @@ from hepattn.experiments.clic.main_jax import ClicSource
 from hepattn.keras_native import loop
 from hepattn.keras_native.beta_control import BetaPIDController, ramp_beta
 from hepattn.keras_native.config import load_config
+from hepattn.keras_native.metrics import ClicMetrics
 from hepattn.keras_native.optim import optimizer_from_config
 
 from .golden.mf_cases import CONFIGS
@@ -61,6 +67,10 @@ def state_arrays(t) -> dict:
 
 def same_values(a: dict, b: dict) -> bool:
     return a.keys() == b.keys() and all(a[k] == b[k] or (math.isnan(a[k]) and math.isnan(b[k])) for k in a)
+
+
+def untimed(row: dict) -> dict:
+    return {k: v for k, v in row.items() if not k.startswith("time/")}
 
 
 def resume(run_a, tmp_path, checkpoint: str, *, tamper=None, rc=None):
@@ -107,11 +117,13 @@ def test_resume_continues_bit_for_bit(run_a, tmp_path, checkpoint, position):
     assert differing(state_arrays(t), npz_arrays(run_a["dir"] / "ckpts" / FINAL)) == []
     a_rows = {r["step"]: r for r in loop.read_csv(run_a["dir"] / "steps.csv")}
     for row in loop.read_csv(tmp_path / "steps.csv"):
-        assert row["train/loss"] == a_rows[row["step"]]["train/loss"]
-        assert row["train/ebops"] == a_rows[row["step"]]["train/ebops"]
+        assert same_values(untimed(row), untimed(a_rows[row["step"]]))
     a_val = loop.read_csv(run_a["dir"] / "metrics.csv")
     b_val = loop.read_csv(tmp_path / "metrics.csv")
-    assert [r["val/loss"] for r in b_val] == [r["val/loss"] for r in a_val[len(a_val) - len(b_val) :]]
+    assert len(b_val) == EPOCHS - position[0]
+    # every column (BetaPID diagnostics and the last train row from the checkpoint metadata included), not only val/loss
+    for b, a in zip(b_val, a_val[len(a_val) - len(b_val) :], strict=True):
+        assert same_values(untimed(b), untimed(a))
     assert t.beta == run_a["trainer"].beta
     assert t.last_ebops == run_a["trainer"].last_ebops
 
@@ -279,6 +291,11 @@ def test_restore_refuses_another_schedule_or_model(run_a, tmp_path):
     t.total_steps = 12  # control: the same lengths load
     t.restore(run_a["dir"] / "ckpts" / "step-000000006.npz")
     assert t.global_step == 6
+    # another seed would continue with another data order (EpochSampler(seed + epoch))
+    other = trainer(rc, tmp_path / "seed", run_a["train"], seed=43)
+    with pytest.raises(ValueError, match="seed 42 differs from this run's 43"):
+        other.restore(run_a["dir"] / "ckpts" / "step-000000006.npz")
+    other.restore(run_a["dir"] / "ckpts" / "step-000000006.npz", check_seed=False)  # the test command's path
 
 
 def test_non_fp32_precision_is_refused(run_a):
@@ -325,3 +342,119 @@ def test_clic_source_counts_full_train_batches_and_padded_val_batches(run_a):
     train, val = run_a["train"], run_a["val"]
     assert (train.num_batches, val.num_batches, val.num_events) == (8, 3, 10)
     assert isinstance(train, ClicSource)
+
+
+def test_val_metrics_drop_the_padding_events_and_pool_the_layers(run_a):
+    """``validate``'s metrics equal ``ClicMetrics`` (pooled, as the hybrid logs) on the real events only.
+
+    The last val batch holds 2 real events and 2 padding events. Controls: counting the padding events, or per-layer
+    values, give other values (so the comparison sees the ``event_valid`` and ``pool_layers`` wiring).
+    """
+    t = run_a["trainer"]
+    batches = list(run_a["val"].epoch(0))
+    assert [b.num_real for b in batches] == [4, 4, 2]
+    real, padded, per_layer = ClicMetrics("val", pool_layers=True), ClicMetrics("val", pool_layers=True), ClicMetrics("val")
+    for b in batches:
+        res = t._val(t.state, b.inputs, b.targets)  # noqa: SLF001  (the same program validate runs)
+        n = b.num_real
+        real.update(jax.tree_util.tree_map(lambda x, n=n: np.asarray(x)[:n], res["preds"]), {k: np.asarray(v)[:n] for k, v in b.targets.items()})
+        padded.update(res["preds"], b.targets)
+        per_layer.update(res["preds"], b.targets, event_valid=b.event_valid)
+    expected, with_padding, unpooled = real.compute(), padded.compute(), per_layer.compute()
+    val = t.validate(run_a["val"])
+    assert len(expected) > 20
+    assert same_values({k: val[k] for k in expected}, expected)  # measured: bitwise (same predictions, padding masked)
+    # pooled (the torchmetrics counters; the per-batch means stay per layer): one value per counter for every layer
+    groups = defaultdict(list)
+    for name, key in real.reported.items():
+        groups[key].append(expected[name])
+    assert len(groups) >= 4 and all(len(values) >= 2 for values in groups.values()), groups
+    for key, values in groups.items():
+        assert all(v == values[0] or (math.isnan(v) and math.isnan(values[0])) for v in values), key
+    # controls
+    differ = [k for k in expected if not (expected[k] == with_padding[k] or (math.isnan(expected[k]) and math.isnan(with_padding[k])))]
+    print(f"{len(differ)} of {len(expected)} val metrics change when the padding events count")
+    assert len(differ) > 5
+    assert any(expected[k] != unpooled[k] for k in expected if not math.isnan(expected[k]))
+    metrics_csv = loop.read_csv(run_a["dir"] / "metrics.csv")
+    assert set(expected) <= set(metrics_csv[-1])
+
+
+def test_log_cadence_lr_bits_val_interval_and_precision(run_a, tmp_path):
+    """Log every 3 optimizer steps (across the epoch boundary: 4 steps per epoch) and validate every 2nd epoch.
+
+    Checks the logged steps (Lightning: ``global_step % n == 0``), ``train/lr`` = the schedule at that step's update
+    (``(step - 1) * k`` micro-batches), ``bits_*_n`` = trainable + non-trainable quantizer variables, one validation
+    row (epoch 1), and "highest" on every dot of the val and tail programs.
+    """
+    rc = run_a["rc"]
+    t = trainer(rc, tmp_path, run_a["train"], max_epochs=2, log_every_n_steps=3, check_val_every_n_epoch=2)
+    with pytest.warns(UserWarning, match="epoch 0: no validation has run"):
+        t.fit(run_a["train"], run_a["val"])
+    rows = loop.read_csv(tmp_path / "steps.csv")
+    assert [r["step"] for r in rows] == [3.0, 6.0]
+    for r in rows:
+        assert r["train/lr"] == float(t.schedule((int(r["step"]) - 1) * t.k))
+        assert r["train/lr"] != float(t.schedule(int(r["step"]) * t.k))  # control: the next update's LR
+    epochs = loop.read_csv(tmp_path / "metrics.csv")
+    assert [r["epoch"] for r in epochs] == [1.0]
+    assert epochs[0]["train/loss"] == rows[-1]["train/loss"]  # the epoch row carries the last logged train row
+    model = t.steps.model
+    for suffix in loop.BIT_SUFFIXES:
+        trainable = sum(v.path.rsplit("/", 1)[-1] == suffix for v in model.trainable_variables)
+        frozen = sum(v.path.rsplit("/", 1)[-1] == suffix for v in model.non_trainable_variables)
+        assert rows[-1][f"train/bits_{suffix}_n"] == trainable + frozen == epochs[0][f"val/bits_{suffix}_n"]
+    assert sum(v.path.rsplit("/", 1)[-1] in loop.BIT_SUFFIXES for v in model.non_trainable_variables) > 0  # else vacuous
+    batch = list(run_a["val"].epoch(0))[-1]
+    val_text = t._val.lower(t.state, batch.inputs, batch.targets).as_text()  # noqa: SLF001
+    res = t._val(t.state, batch.inputs, batch.targets)  # noqa: SLF001
+    outputs = jax.tree_util.tree_map(operator.itemgetter(slice(2)), res["outputs"])
+    tail_text = t._tail.lower(outputs, {k: v[:2] for k, v in batch.targets.items()}).as_text()  # noqa: SLF001
+    for name, text in (("val", val_text), ("tail", tail_text)):
+        dots = [ln for ln in text.splitlines() if "dot_general" in ln]
+        loose = [ln.strip()[:160] for ln in dots if "precision = [HIGHEST, HIGHEST]" not in ln]
+        assert not loose, (name, len(dots), loose[:3])
+        assert len(dots) > (20 if name == "val" else 0), (name, len(dots))
+
+
+def test_resume_in_the_same_run_directory(run_a, tmp_path):
+    """A walltime kill leaves CSV rows after the last checkpoint and a checkpoint temporary; a resume in the same
+    directory drops both, and its logs equal the uninterrupted run's. Control: before the resume the copy holds the
+    rows of steps 7-12, which the resume writes again.
+    """
+    run = tmp_path / "run"
+    shutil.copytree(run_a["dir"], run)
+    stale = run / "ckpts" / ".step-000000008.npz.abc123.tmp"
+    stale.write_bytes(b"partial")
+    assert len(loop.read_csv(run / "steps.csv")) == 12
+    t = trainer(run_a["rc"], run, run_a["train"])
+    t.restore(run / "ckpts" / "step-000000006.npz")
+    t.fit(run_a["train"], run_a["val"])
+    assert not stale.exists()
+    a_steps, b_steps = loop.read_csv(run_a["dir"] / "steps.csv"), loop.read_csv(run / "steps.csv")
+    assert [r["step"] for r in b_steps] == [float(s) for s in range(1, 13)]
+    assert all(same_values(untimed(b), untimed(a)) for a, b in zip(a_steps, b_steps, strict=True))
+    a_val, b_val = loop.read_csv(run_a["dir"] / "metrics.csv"), loop.read_csv(run / "metrics.csv")
+    assert [r["epoch"] for r in b_val] == [0.0, 1.0, 2.0]
+    assert all(same_values(untimed(b), untimed(a)) for a, b in zip(a_val, b_val, strict=True))
+    assert differing(state_arrays(t), npz_arrays(run_a["dir"] / "ckpts" / FINAL)) == []
+
+
+def test_csv_log_grows_its_header(tmp_path):
+    """A row with new keys rewrites the file with the new columns appended.
+
+    Earlier rows keep their values and get empty cells in the new columns. (The hybrid MetricsCsvWriter fixes the
+    header at the first row and drops later keys.)
+    """
+    log = loop.CsvLog(tmp_path / "m.csv")
+    log.append({"epoch": 0.0, "step": 4.0, "val/loss": 2.0})
+    log.append({"epoch": 1.0, "step": 8.0, "val/loss": 1.5, "train/loss": 3.0})
+    rows = loop.read_csv(tmp_path / "m.csv")
+    assert list(rows[0]) == ["epoch", "step", "val/loss", "train/loss"]
+    assert rows[1]["train/loss"] == 3.0
+    assert math.isnan(rows[0]["train/loss"])
+    again = loop.CsvLog(tmp_path / "m.csv")  # a resumed process reads the header back
+    again.append({"epoch": 2.0, "step": 12.0, "val/loss": 1.0, "train/loss": 2.5})
+    assert [r["val/loss"] for r in loop.read_csv(tmp_path / "m.csv")] == [2.0, 1.5, 1.0]
+    assert again.keep(lambda r: r["epoch"] < 1) == 2
+    assert [r["epoch"] for r in loop.read_csv(tmp_path / "m.csv")] == [0.0]

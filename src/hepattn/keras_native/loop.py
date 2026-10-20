@@ -37,8 +37,10 @@ Logged values (names as the hybrid logs them):
 
 Checkpoints (``checkpoint.CheckpointManager.from_callback`` per configured callback, all in ``<run_dir>/ckpts``): the
 state ``(tv, ntv, ov)`` and the metadata of ``Trainer.meta`` (counters, data position = next micro-batch, beta, the PID
-state, the last EBOPs read-out, the last val metrics, the model hash). They are written only at optimizer-step
-boundaries, so no accumulation is in flight. ``Trainer.restore`` + ``fit`` continue bit for bit on CPU.
+state, the last EBOPs read-out, the last val metrics, the last train row and BetaPID values for the next
+``metrics.csv`` row, seed, model hash). They are written only at optimizer-step boundaries, so no accumulation is in
+flight. ``Trainer.restore`` + ``fit`` continue bit for bit on CPU; in the same run directory the CSV rows after the
+checkpoint and stale checkpoint temporaries are dropped first.
 
 Deviations from Lightning (docs/hgq/port_log/S6b.md): an epoch uses ``(batches // k) * k`` micro-batches (Lightning
 steps once more on a partial accumulation) and ``total_steps`` is ``batches // k * epochs`` (Lightning: ceil); no
@@ -158,26 +160,55 @@ class CompileEvents:
 
 
 class CsvLog:
-    """Append rows to a CSV; the header is the first row's keys (or the existing file's, on resume), as
-    ``hepattn.keras.callbacks.MetricsCsvWriter`` (columns ``epoch``, ``step``, then the other keys sorted).
+    """Append rows to a CSV in the ``hepattn.keras.callbacks.MetricsCsvWriter`` layout (columns ``epoch``, ``step``,
+    then the other keys sorted; an existing file's header is kept on resume).
+
+    Unlike ``MetricsCsvWriter`` (header fixed by the first row), a row with new keys rewrites the file with those
+    columns appended (sorted), so a first row without the train values (no step logged before the first validation)
+    does not drop them for the whole run.
     """
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.header: list[str] | None = None
 
+    def _rows(self) -> list[dict[str, str]]:
+        with self.path.open(newline="") as f:
+            return list(csv.DictReader(f))
+
+    def _rewrite(self, header: list[str], rows: list[dict]) -> None:
+        tmp = self.path.with_name(f".{self.path.name}.tmp")
+        with tmp.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows({k: r.get(k, "") for k in header} for r in rows)
+        tmp.replace(self.path)
+        self.header = header
+
     def append(self, row: dict[str, float]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.header is None and self.path.exists() and self.path.stat().st_size > 0:
+            with self.path.open(newline="") as f:
+                self.header = next(csv.reader(f))
+        new = sorted(k for k in row if k not in {"epoch", "step"} and k not in (self.header or ()))
         if self.header is None:
-            if self.path.exists() and self.path.stat().st_size > 0:
-                with self.path.open(newline="") as f:
-                    self.header = next(csv.reader(f))
-            else:
-                self.header = ["epoch", "step", *sorted(k for k in row if k not in {"epoch", "step"})]
-                with self.path.open("w", newline="") as f:
-                    csv.writer(f).writerow(self.header)
+            self._rewrite(["epoch", "step", *new], [])
+        elif new:
+            self._rewrite([*self.header, *new], self._rows())
         with self.path.open("a", newline="") as f:
             csv.DictWriter(f, fieldnames=self.header, extrasaction="ignore").writerow({k: row.get(k, "") for k in self.header})
+
+    def keep(self, predicate) -> int:
+        """Drop the rows for which ``predicate(row)`` (values as floats, ``read_csv``) is false. Returns the rows dropped."""
+        if not (self.path.exists() and self.path.stat().st_size > 0):
+            return 0
+        rows = self._rows()
+        kept = [r for r in rows if predicate({k: float(v) if v else math.nan for k, v in r.items()})]
+        if len(kept) < len(rows):
+            with self.path.open(newline="") as f:
+                header = next(csv.reader(f))
+            self._rewrite(header, kept)
+        return len(rows) - len(kept)
 
 
 def read_csv(path: str | Path) -> list[dict[str, float]]:
@@ -306,6 +337,10 @@ class Trainer:
 
     # ------------------------------------------------------------------------------------------- jitted helpers
 
+    @property
+    def seed(self) -> int:
+        return self.s.seed
+
     def _precision(self):
         return self.steps._precision()  # noqa: SLF001  (the same context as the train / eval steps)
 
@@ -409,21 +444,29 @@ class Trainer:
             "total_steps": self.total_steps,
             "micro_per_epoch": self.micro_per_epoch,
             "seed": self.s.seed,
+            # the values Lightning's callback_metrics would still hold for the next MetricsCsvWriter row
+            "epoch_logs": self.epoch_logs,
+            "train_logs": self.train_logs,
         }
 
-    def restore(self, path: str | Path) -> dict:
+    def restore(self, path: str | Path, *, check_seed: bool = True) -> dict:
         """Load a checkpoint of this run configuration and continue from its data position.
+
+        Args:
+            path: The checkpoint.
+            check_seed: Refuse a checkpoint written with another seed (the train order is ``EpochSampler(seed +
+                epoch)``); the ``test`` command, which does not train, passes False.
 
         Raises:
             CheckpointError: For another model config (hash), a missing or corrupted file, or a beta in the state other
                 than the metadata's.
-            ValueError: If the epoch length or the total optimizer steps differ from the checkpoint's (the LR schedule and
-                the data position would not continue).
+            ValueError: If the epoch length, the total optimizer steps or the seed differ from the checkpoint's (the LR
+                schedule or the data order would not continue).
         """
         path = Path(path)
         model, optimizer = self.steps.model, self.steps.optimizer
         (tv, ntv, ov), meta = ckpt.load_checkpoint(path, model, optimizer, expect_config_hash=self.rc.model_hash)
-        for key in ("micro_per_epoch", "total_steps"):
+        for key in ("micro_per_epoch", "total_steps", *(("seed",) if check_seed else ())):
             if meta.get(key) != getattr(self, key):
                 raise ValueError(f"{path}: {key} {meta.get(key)} differs from this run's {getattr(self, key)}")
         self.state = TrainState(*([jnp.asarray(x) for x in group] for group in (tv, ntv, ov)))
@@ -439,11 +482,16 @@ class Trainer:
             self.pid.load_state_dict(meta["beta_controller"])
         self._reading, self._ebops_value = None, meta["last_ebops"]
         self.last_val = meta.get("val_metrics")
+        self.epoch_logs = dict(meta.get("epoch_logs") or {})
+        self.train_logs = dict(meta.get("train_logs") or {})
         self.resumed_from = path.resolve()
         return meta
 
     def _managers(self) -> list:
         directory = self.run_dir / "ckpts"
+        # temporaries of a write that a kill interrupted (checkpoint._atomic removes its own only on an exception)
+        for stale in directory.glob(".*.tmp"):
+            stale.unlink(missing_ok=True)
         cfg = self.rc.checkpoint
         self.epoch_manager = ckpt.CheckpointManager.from_callback(directory, cfg.epoch, resume_path=self.resumed_from) if cfg.epoch else None
         self.step_manager = ckpt.CheckpointManager.from_callback(directory, cfg.step, resume_path=self.resumed_from) if cfg.step else None
@@ -463,6 +511,9 @@ class Trainer:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self._managers()
         steps_csv, epochs_csv = CsvLog(self.run_dir / "steps.csv"), CsvLog(self.run_dir / "metrics.csv")
+        if self.resumed_from is not None:  # same run directory: drop the rows written after the checkpoint
+            steps_csv.keep(lambda r: r["step"] <= self.global_step)
+            epochs_csv.keep(lambda r: r["epoch"] < self.epoch)  # epoch self.epoch's end hooks have not run
         self._t_log, self._micro_since_log = time.perf_counter(), 0
         # data position (epoch, batch) = the next micro-batch; (e, micro_per_epoch) = epoch e trained, its end hooks due
         while self.epoch < self.s.max_epochs:
@@ -482,8 +533,8 @@ class Trainer:
                     self.global_step += 1
                     if self.global_step % self.s.log_every_n_steps == 0:
                         steps_csv.append(self._log_step(batch, epoch))
-                    if self.step_manager is not None:
-                        self.step_manager.maybe_save_step(self.global_step, *self._save_args(), self.meta())
+                    if self.step_manager is not None and self.step_manager.policy.step_due(self.global_step):
+                        self.step_manager.save(self.global_step, *self._save_args(), self.meta())  # meta() syncs
                     if self.global_step >= self.total_steps:
                         break
             ended = self.batch >= self.micro_per_epoch
@@ -532,10 +583,12 @@ class Trainer:
         jax.block_until_ready(out.loss)
         now = time.perf_counter()
         row: dict[str, float] = {"epoch": float(epoch), "step": float(self.global_step)}
-        row.update({k: float(v) for k, v in _flat_losses(out.losses, "train").items()})
-        row["train/loss"] = float(out.task_loss)
-        row["train/quant_ebops_loss"] = float(out.penalty) + float(out.regularization)
-        row["train/total_loss"] = float(out.loss)
+        host = jax.device_get({"losses": _flat_losses(out.losses, "train"), "parts": (out.task_loss, out.penalty, out.regularization, out.loss)})
+        row.update({k: float(v) for k, v in host["losses"].items()})
+        task, penalty, regularization, total = (float(v) for v in host["parts"])
+        row["train/loss"] = task
+        row["train/quant_ebops_loss"] = penalty + regularization
+        row["train/total_loss"] = total
         row["train/ebops_active"] = float(ebops_on)
         row["train/quant_beta"] = math.nan if self.beta is None else self.beta
         ebops = self.last_ebops
@@ -570,7 +623,7 @@ class Trainer:
                 outputs = jax.tree_util.tree_map(lambda x, n=n: x[:n], res["outputs"])
                 targets = {k: v[:n] for k, v in batch.targets.items()}
                 task, losses = self._tail(outputs, targets)
-            terms = {"val/loss": task, "val/quant_ebops_loss": res["regularization"], **_flat_losses(losses, "val")}
+            terms = jax.device_get({"val/loss": task, "val/quant_ebops_loss": res["regularization"], **_flat_losses(losses, "val")})
             for key, value in terms.items():
                 sums[key] += float(value) * n
             events += n
