@@ -20,6 +20,9 @@ Setup and test commands: [KERAS_NATIVE.md](../KERAS_NATIVE.md).
 | R4b hybrid masked-Linformer core (gate H0), beta/EBOPs on nested leaves | [R4b.md](R4b.md) | `rt/integration` / `hepattn-keras-jax` |
 | R5 goldens, full-model gates, Helen's Linformer deleted, hls4ml smoke, G2 script on the org model | [R5.md](R5.md) (`R5_hls_smoke.py`) | `rt/integration` / `hepattn-keras-jax` |
 | Completeness critique of R0-R5 (end-to-end checks against org torch, mutants across stages, 2 fixes) | [R-critique.md](R-critique.md) (`retarget/critique/`) | `keras-jax` / `hepattn-keras-jax` |
+| S5 train step, optimizer, EBOPs / beta, BetaPID, hybrid `quant_losses` fix, beta setpoints | [S5.md](S5.md) (`S5_*.py`, `S5_evidence/`) | `s5/train` / `hepattn-s5` |
+| S6a config loader, checkpoint, data adapter, metrics, prediction writer | [S6a.md](S6a.md) (`S6a_mutations.py`) | `s6/io` / `hepattn-s6` |
+| Merge of S5 and S6a, cross-lane resume test (`TrainStep` state through a checkpoint) | [S56-merge.md](S56-merge.md) (`S56_merge_mutations.py`) | `keras-jax` / `hepattn-keras-jax` |
 
 ## Gates carried to a later stage
 

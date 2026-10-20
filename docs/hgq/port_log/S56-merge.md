@@ -1,0 +1,136 @@
+# Merge log: S5 (review 3) and S6a (fix round 3) into `keras-jax`
+
+Date 2026-10-20, macOS arm64 (M2 Pro), CPU only. Merge driver. Nothing was pushed (`origin/keras-jax` stays at `826bc0a`);
+no Polaris job; the `hepattn` main working tree was not touched. hepattn resolves to `hepattn-keras-jax/src` in both
+envs (`.venv-jax`, `hepattn/.venv`).
+
+## What was merged
+
+Starting point `05122de` (merges `0f76770` of s5/train and `6bbd365` of s6/io, plus `05122de`, S5's patch for the 4
+hybrid tests that asserted the `quant_losses()` double count).
+
+| Commit | Content |
+|---|---|
+| `5876f42` | merge of `s5/train` at `21e29f7`: `b28dfb0` (optimizer guard compares identities, driver-flow beta retrace check), `964afda` (`learning_rate()` vs torch with `end != initial`, literal ramp values), `b4cf4cb` (M36-M39), `c7152db` (S5 log, review 3), `21e29f7` (pause note) |
+| `a8b804f` | merge of `s6/io` at `d579d30`: `7e3ef89` (LightningCLI overlay merge), `c9e7ae0` (step-checkpoint retention = Lightning `save_top_k`), `a74d66b` (`ClicMetrics.update(event_valid)`), `b4200b6` (spawned workers re-import the main module), `8fd64bc` (M80-M95), `d579d30` (S6a log, round 3) |
+| `fc920b1` | fix: the S6a config tests pinned the pre-S5 Polaris BetaPID setpoints (below) |
+| `8d36490` | new cross-lane test `tests/keras_native/test_resume_cross_lane.py` |
+| `86e14f3` | `checkpoint.py` docstring names Keras' counter `iteration` (was `iterations`) |
+| (next commit) | these logs, `S56_merge_mutations.py`, S5.md resume note, port_log README rows |
+
+Both merges were textually conflict-free (as the trial merges said).
+
+## What the merge broke, and the fix
+
+The full native suite at `a8b804f` had 2 failures, both S6a tests that S5's `polaris/03_make_config.py` change made stale:
+
+```
+FAILED tests/keras_native/test_config.py::test_loader_reads_every_form[polaris_generated]
+FAILED tests/keras_native/test_config.py::test_raw_and_saved_forms_give_the_same_run_sections[polaris_generated-polaris_normalised]
+2 failed, 740 passed, 4 skipped, 4786 warnings in 1381.83s (0:23:01)
+```
+
+The first pinned `BETA_PID["polaris"]` = target 1e15, init 2.08e-9, max 8e-7, min 0 (the old setpoints x 8); the
+generated config now holds S5's provisional values x `HGQ_EBOPS_EVERY` = 8: target 1.5e11, init 6.96e-10, max 2.64e-7,
+min 1.84e-12 (`BETA_SETPOINTS.md`). The second compared the freshly generated config with the saved fixture
+`s6_fixtures/polaris_normalised.yaml`, which S6a had generated from the old `03_make_config.py`.
+
+Fix (`fc920b1`): pin the new values (with `min_beta`, now > 0) and regenerate the fixtures with
+`s6_fixtures/make_normalised_configs.py` (hybrid env). The regenerated fixtures differ from the committed ones in exactly
+the 4 BetaPID lines of `polaris_normalised.yaml`; the other four fixtures are byte-identical. `test_config.py`: 49
+passed. Control: the failing run above (old pins against the new generator).
+
+## Cross-lane test: `TrainStep` state through a checkpoint into a fresh model
+
+No test combined S5's `TrainStep` with S6a's checkpoint (`test_checkpoint.py` uses its own hand-written jitted step and
+the default Keras optimizer). `tests/keras_native/test_resume_cross_lane.py`:
+
+- Setup: org model (`build_mf("org", QUANT_SPECS["high"])`), `set_beta(1e-9)` with the EBOPs term on, `build_optimizer`
+  AdamW with the OneCycle schedule (`skip_scheduler: False`, so the LR reads the counter), `clip_norm` 0.1 and
+  accumulation k = 2; 2 CLIC dummy batches (`real_like`).
+- Uninterrupted: `s0 -> s1 -> s2` with `TrainStep.train_step` (donated state, host copies kept). The checkpoint is `s1`,
+  taken mid-accumulation, with `BetaPIDController.state_dict()` in the metadata.
+- Resumed: an independently built model + optimizer + `TrainStep` (its own compile, other auto-generated layer names),
+  `load_checkpoint`, one step on batch 1.
+
+| Test | What it shows | Measured |
+|---|---|---|
+| `test_the_checkpoint_sits_inside_an_accumulation_and_the_next_step_updates` | non-vacuous: `s0 -> s1` leaves `tv` unchanged and fills the accumulators (one per trainable variable); `s1 -> s2` changes `tv`, `ntv` and `ov`; beta 1e-9 in `ntv` | pass |
+| `test_resumed_step_in_a_fresh_model_equals_the_uninterrupted_step` | loaded state = `s1` bitwise; the resumed step = `s2` bitwise (every array, dtype, NaN-aware) | pass, 0 differing arrays |
+| `test_control_one_perturbed_leaf_breaks_the_resume[weight]` | one kernel element moved by 1 ulp before the step | comparison fails (as required) |
+| `test_control_one_perturbed_leaf_breaks_the_resume[accumulator]` | one nonzero accumulator x 1.5 | comparison fails |
+| `test_beta_controller_resumes_from_the_checkpoint_metadata` | the PID restored from the JSON metadata gives the next beta exactly (d = 0.2, so `prev_error` matters); a fresh PID gives another beta | pass |
+
+Cost: 4 min on CPU (140 s for the first model's build + compile, 91 s for the second `TrainStep`'s compile). Two
+independently built and compiled org models give the same step bit for bit on CPU.
+
+Mutations ([S56_merge_mutations.py](S56_merge_mutations.py), each in a fresh copy of `src` + `tests` under the session
+scratchpad; the worktree was never mutated). Verbatim summaries:
+
+```
+XL0_none
+  5 passed, 14 warnings in 236.75s (0:03:56)
+XL1_accumulators_zeroed
+  FAILED tests/keras_native/test_resume_cross_lane.py::test_resumed_step_in_a_fresh_model_equals_the_uninterrupted_step
+  FAILED tests/keras_native/test_resume_cross_lane.py::test_control_one_perturbed_leaf_breaks_the_resume[accumulator]
+  2 failed, 3 passed, 14 warnings in 222.58s (0:03:42)
+XL2_beta_zeroed
+  FAILED tests/keras_native/test_resume_cross_lane.py::test_resumed_step_in_a_fresh_model_equals_the_uninterrupted_step
+  1 failed, 4 passed, 14 warnings in 230.32s (0:03:50)
+XL3_iterations_plus_one
+  FAILED tests/keras_native/test_resume_cross_lane.py::test_resumed_step_in_a_fresh_model_equals_the_uninterrupted_step
+  1 failed, 4 passed, 14 warnings in 210.92s (0:03:30)
+XL4_pid_prev_error_dropped
+  FAILED tests/keras_native/test_resume_cross_lane.py::test_beta_controller_resumes_from_the_checkpoint_metadata
+  1 failed, 4 passed, 14 warnings in 207.90s (0:03:27)
+```
+
+4 / 4 killed. XL1-XL3 change what `load_checkpoint` returns (accumulators zeroed, every `ntv` key ending in `beta`
+zeroed, the optimizer counter + 1); XL4 drops `prev_error` from `BetaPIDController.load_state_dict`. XL3 first ran with
+the key `iterations` and survived: a no-op, because Keras names the counter `iteration` (checked:
+`[v.name for v in AdamW(...).variables]` starts with `'iteration'`); re-run with `iteration`, killed (above). The same
+wrong name was in the `checkpoint.py` docstring; corrected. The XL0 run is with the final test (PID `d` = 0.2); the first
+run of the test (d = 0) also passed (5 passed, 244 s).
+
+## Test runs
+
+| Suite | Env | HEAD | Result |
+|---|---|---|---|
+| `pytest tests/keras_native` (full native suite) | `.venv-jax`, `KERAS_BACKEND=jax` | `a8b804f` (merges only) | 2 failed, 740 passed, 4 skipped (23 min); the 2 failures above. Collected 746: the new test file did not exist yet |
+| `tests/keras_native/test_config.py` | `.venv-jax` | `fc920b1` content | 49 passed (84 s) |
+| `tests/keras_native/test_resume_cross_lane.py` | `.venv-jax` | `8d36490` content | 5 passed (237 s, XL0) |
+| `pytest tests/keras_native` (full, 751 collected) | `.venv-jax` | `8d36490` | **747 passed, 4 skipped, 0 failed** (22 min 24 s). The later `checkpoint.py` change is docstring-only |
+| `pytest -m 'not gpu and not requiresdata' tests/keras tests/polaris` | `hepattn/.venv`, `KERAS_BACKEND=torch` | `a8b804f` | **316 passed, 2 skipped, 6 deselected, 0 failed** (530 s): the 4 tests of S5 open issue 1 pass; no hybrid file changed after `a8b804f` |
+| `pytest -m 'not gpu and not requiresdata' tests/models tests/loss` | `hepattn/.venv` | `a8b804f` | 519 passed, 173 skipped, 5 deselected (24 s) (R0-R5 quote 522 passed for `models + polaris + loss`; `tests/polaris` is in the hybrid row here) |
+| `pytest -m 'not gpu and not requiresdata' tests/matching` + `R0_matching_gate.py --max-failures 106` | `hepattn/.venv` | `a8b804f` | 106 failed, 66 passed, 14 skipped, 17 deselected, 2 xfailed; gate `ran=172 failures=106 lap1015_attr=106 other=0`, exit 0 (same as R5) |
+| `prek run --files` on every changed file | | | all hooks pass |
+
+## Deviations
+
+1. S5's merge requirement (open issue 1: the hybrid double-count patch must land in the same merge as `7f3747c`) was not
+   met by the earlier merge: the patch is `05122de`, after `0f76770` and `6bbd365`, so those two commits carry 4 red
+   hybrid tests. Recorded in S5.md open issue 1; nothing to rewrite (unpushed history could be squashed, but the
+   instruction was to merge, not rewrite).
+2. The first full native suite ran on the merge HEAD; the test file and the config fix came after it. The final full run at
+   `8d36490` is in the table.
+
+## Hand-offs resolved by the merge
+
+- S6a open issue "S6b, optimizer builder: AdamW epsilon 1e-8": S5's `build_optimizer` uses `adam_epsilon=1e-8` by
+  default. `optimizer_from_config` does not read `OptimizerConfig.epsilon` (no YAML key carries it; both are 1e-8).
+- S5 open issue 4 (the native driver must checkpoint the PID state): `save_checkpoint` metadata key `beta_controller`
+  carries `BetaPIDController.state_dict()`; the round trip is now tested (XL4 kills a lossy `load_state_dict`).
+- S6a open issue "S5: `min_beta` 0.0": the generated Polaris config now has `min_beta` 1.84e-12 > 0. A raw config without
+  `min_beta` still loads 0.0 (hybrid default), and `ebops_readout` raises for beta <= 0: S6b must refuse or clamp.
+
+## Open issues (for S6b)
+
+1. Two readers of the same YAML keys: `config.load_config` -> `RunConfig.optimizer` (S6a) and
+   `optim.optimizer_from_config(model_section, trainer_section, ...)` (S5). The driver should build the optimizer from
+   one of them; until then nothing checks that they agree (a test over the 6 config forms would).
+2. The resume gate here uses dummy events and one optimizer configuration (AdamW, k = 2, OneCycle). Lion and k = 1 are
+   covered only by `test_checkpoint.py`-style key tests, not by a `TrainStep` resume. The data position (`EpochSampler`
+   start batch at an optimizer-step boundary) is S6b's, not tested here.
+3. Bitwise resume is shown on CPU only; on an A100 XLA may pick other algorithms per compile (S6b / G3 should re-check
+   resume equality there, with a tolerance if needed).
+4. All open issues of S5.md and S6a.md that name S6b, G3 or S8 stay open (G1 is NOT resolved; G3 has no script yet).
