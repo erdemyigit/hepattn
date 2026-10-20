@@ -17,7 +17,7 @@ measured in docs/hgq/port_log/S6a.md). The key of a model variable is its path w
 from every segment, plus ``#<n>`` when that leaves several variables with the same name (``n`` counts them in
 ``model.variables`` order, which is the construction order and so the same for every build of one config). An
 optimizer slot variable (keras names it ``<reference path with '/' -> '_'>_<slot>``) is keyed by the key of its
-reference variable and the slot name; other optimizer variables (``iterations``, ...) by their own name.
+reference variable and the slot name; other optimizer variables (``iteration``, ...) by their own name.
 
 Export: ``export_weights`` assigns a state into the variables and calls ``Model.save_weights`` (``.weights.h5``,
 keyed by the layer tracking structure, not by paths); a freshly built model loads it with ``load_weights``.
