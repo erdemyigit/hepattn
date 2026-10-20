@@ -1,6 +1,7 @@
 # Overlay on base.yaml + linformer.yaml that tells LightningCLI's merge from a key-by-key dict merge
-# (test_config.py::test_overlays_merge_as_lightningcli). Keys sit next to the class entries' class_path, in the short
-# form eval.yaml uses; attn_kwargs and decoder_layer_config are dict-typed, so LightningCLI replaces them whole.
+# (test_config.py::test_overlays_merge_as_lightningcli). Init args are given as plain dicts (no class_path, no
+# init_args) at classes base.yaml gave, as eval.yaml does; attn_kwargs and decoder_layer_config are dict-typed, so
+# LightningCLI replaces them whole.
 model:
   model:
     encoder:

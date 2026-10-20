@@ -3,9 +3,11 @@
 Four forms are read (plan section 3.7; ``docs/hgq/port_log/S6a.md``):
 
 1. the raw CLIC YAMLs, several merged in order as LightningCLI merges several ``--config`` files (org: ``base.yaml``,
-   then ``linformer.yaml``; ``merge_configs``: sections and class init args merge key by key, keys next to a
-   ``class_path`` are init args, and lists, scalars and dict-typed arguments such as ``attn_kwargs`` are replaced
-   whole; ``polaris/03_make_config.py`` merges every dict key by key, which gives the same result for org's overlay);
+   then ``linformer.yaml``; ``merge_configs``: sections and class init args merge key by key (an overlay may give a
+   class's init args as a plain dict once an earlier file gave its ``class_path``), lists, scalars and dict-typed
+   arguments such as ``attn_kwargs`` are replaced whole, and forms LightningCLI rejects or merges in a way the loader
+   does not reproduce raise ``ConfigError``; ``polaris/03_make_config.py`` merges every dict key by key, which gives the
+   same result for org's overlay);
 2. ``pflow_hgq.yaml`` (Helen's hybrid config);
 3. the generated ``polaris_hgq.yaml`` (``polaris/03_make_config.py``; encoder as a plain dict, ``quant`` block);
 4. a jsonargparse-normalised run config (the ``config.yaml`` that ``SaveConfig`` writes, or ``--print_config``):
@@ -189,44 +191,76 @@ _NOT_MODEL = {"matcher"}
 # YAML merge as LightningCLI (jsonargparse 4.40.1, measured; docs/hgq/port_log/S6a.md decision 13). A class entry is
 # a dict with class_path / init_args, or a plain dict at a class-typed parameter (the torch MaskFormer's raw decoder).
 _CLASS_ENTRY_KEYS = {"class_path", "init_args", "dict_kwargs"}
-# plain-dict parameters that are dict-typed (replaced whole) although their key is in _CLASS_OF_KEY
-_DICT_TYPED = {"KerasMaskFormer": {"encoder", "decoder"}}
+# plain-dict parameters that are dict-typed (replaced whole) although their key is in _CLASS_OF_KEY, by owning class
+# (the torch signature's type): hybrid KerasMaskFormer encoder / decoder: dict; torch MaskFormerDecoder posenc:
+# dict[str, float] | None (alpha / base, src/hepattn/models/decoder.py:32), unlike InputNet's FourierPositionEncoder
+_DICT_TYPED = {"KerasMaskFormer": {"encoder", "decoder"}, "MaskFormerDecoder": {"posenc"}}
 
 
-def _fold(node: Any) -> Any:
-    """Keys next to ``class_path`` moved into ``init_args`` (jsonargparse's short form), recursively.
+def _class_of(key: str | None, parent: str | None) -> str | None:
+    """The class of a plain dict given at ``parent``'s parameter ``key`` (None: not class-typed)."""
+    return None if key in _DICT_TYPED.get(parent or "", ()) else _CLASS_OF_KEY.get(key or "")
+
+
+def _check_entries(node: Any) -> None:
+    """Raise for a ``class_path`` dict with keys other than ``init_args`` / ``dict_kwargs``, anywhere in ``node``.
+
+    jsonargparse 4.40.1 rejects this form ("Key 'class_path' is not expected") in one file and in an overlay, at the
+    top-level class, a nested one and a callbacks item (LightningCLI probes, s6_fixtures/lightningcli_probes.yaml).
 
     Raises:
-        ConfigError: If a class entry has both ``init_args`` and such keys (jsonargparse rejects it).
+        ConfigError: For such an entry.
     """
     if isinstance(node, list):
-        return [_fold(item) for item in node]
-    if not isinstance(node, dict):
-        return node
-    node = {k: _fold(v) for k, v in node.items()}
-    stray = {k: v for k, v in node.items() if k not in _CLASS_ENTRY_KEYS}
-    if "class_path" in node and stray:
-        if "init_args" in node:
-            raise ConfigError(f"class entry {node['class_path']!r} has init_args and also {sorted(stray)} next to them")
-        node = {**{k: v for k, v in node.items() if k in _CLASS_ENTRY_KEYS}, "init_args": stray}
-    return node
+        for item in node:
+            _check_entries(item)
+    elif isinstance(node, dict):
+        stray = sorted(k for k in node if k not in _CLASS_ENTRY_KEYS)
+        if "class_path" in node and stray:
+            raise ConfigError(
+                f"class entry {node['class_path']!r} has {stray} next to class_path; LightningCLI rejects this: give them under init_args"
+            )
+        for value in node.values():
+            _check_entries(value)
 
 
 def _is_class_entry(node: Any, key: str | None, parent: str | None) -> bool:
     if not isinstance(node, dict):
         return False
-    return bool(_CLASS_ENTRY_KEYS & set(node)) or (key in _CLASS_OF_KEY and key not in _DICT_TYPED.get(parent or "", ()))
+    return bool(_CLASS_ENTRY_KEYS & set(node)) or _class_of(key, parent) is not None
 
 
 def _split_entry(node: dict) -> tuple[str | None, dict, Any]:
     if not _CLASS_ENTRY_KEYS & set(node):
         return None, dict(node), None
-    if set(node) - _CLASS_ENTRY_KEYS:  # left after _fold only without a class_path
+    if set(node) - _CLASS_ENTRY_KEYS:  # left after _check_entries only without a class_path
         raise ConfigError(f"class entry {node} has init_args and also other keys next to them")
     return node.get("class_path"), dict(node.get("init_args") or {}), node.get("dict_kwargs")
 
 
+def _check_list_overlay(base: Any, overlay: Any, key: str) -> None:
+    """Raise when ``overlay`` replaces a list of class entries and gives an item without a ``class_path``.
+
+    LightningCLI merges such an item into the base item at its index for some parameter types (measured for
+    ``torch.nn.ModuleList.modules``: class_path and the init args the overlay leaves out are kept) and rejects it for
+    others (``list[Base]``); the loader replaces lists whole, so it would build another model without an error.
+
+    Raises:
+        ConfigError: For such an overlay.
+    """
+    if not (isinstance(base, list) and isinstance(overlay, list)):
+        return
+    if any(isinstance(item, dict) and "class_path" in item for item in base):
+        bare = [i for i, item in enumerate(overlay) if isinstance(item, dict) and "class_path" not in item]
+        if bare:
+            raise ConfigError(
+                f"{key}: overlay list items {bare} have no class_path; LightningCLI merges them into the earlier items, "
+                "which the loader does not reproduce: give each item's class_path and all its init_args"
+            )
+
+
 def _merge_value(base: Any, overlay: Any, key: str, parent: str | None) -> Any:
+    _check_list_overlay(base, overlay, key)
     both_dicts = isinstance(base, dict) and isinstance(overlay, dict)
     if not both_dicts or not (_is_class_entry(base, key, parent) or _is_class_entry(overlay, key, parent)):
         return copy.deepcopy(overlay)  # scalars, lists, None and dict-typed arguments are replaced whole
@@ -235,7 +269,7 @@ def _merge_value(base: Any, overlay: Any, key: str, parent: str | None) -> Any:
     if base_path and path and _short(base_path) != _short(path):
         raise ConfigError(f"{key}: an overlay that changes class_path {base_path!r} -> {path!r} is not supported")
     path = path or base_path
-    merged = _merge_args(base_args, args, _short(path) if path else _CLASS_OF_KEY.get(key))
+    merged = _merge_args(base_args, args, _short(path) if path else _class_of(key, parent))
     if path is None:
         return merged
     out = {"class_path": path, "init_args": merged}
@@ -255,14 +289,20 @@ def merge_configs(base: dict, overlay: dict) -> dict:
     """``overlay`` over ``base`` as LightningCLI merges two ``--config`` files. Returns a copy.
 
     Top-level sections (``model``, ``data``, ``trainer``) are argument groups and merge key by key. Inside them, a
-    class entry merges its init args key by key (keys next to ``class_path`` count as init args); every other value
-    is replaced whole: scalars, lists, None, and dict-typed arguments such as ``lrs_config``, ``attn_kwargs``,
-    ``decoder_layer_config`` and the hybrid ``KerasMaskFormer``'s ``encoder`` / ``decoder``.
+    class entry merges its init args key by key; an overlay may give them as a plain dict without ``class_path`` /
+    ``init_args`` (eval.yaml's ``model: model: encoder: attn_type: torch``) once an earlier file gave the class. Every
+    other value is replaced whole: scalars, lists, None, and dict-typed arguments such as ``lrs_config``,
+    ``attn_kwargs``, ``decoder_layer_config``, the torch decoder's ``posenc`` and the hybrid ``KerasMaskFormer``'s
+    ``encoder`` / ``decoder``.
 
-    ``ConfigError`` (raised by the helpers) for an overlay that changes a ``class_path`` (jsonargparse keeps only the
-    init args the new class accepts, which needs the class) or a class entry with both ``init_args`` and other keys.
+    ``ConfigError`` (raised by the helpers) where LightningCLI rejects the form or does something the loader does not
+    reproduce: keys next to a ``class_path`` (jsonargparse 4.40.1 rejects them; give them under ``init_args``),
+    ``init_args`` next to other keys, an overlay that changes a ``class_path`` (jsonargparse keeps only the init args
+    the new class accepts, which needs the class), and an overlay list of class entries with an item that has no
+    ``class_path`` (LightningCLI merges it into the earlier item for ``ModuleList``).
     """
-    base, overlay = _fold(base), _fold(overlay)
+    _check_entries(base)
+    _check_entries(overlay)
     out = copy.deepcopy(base)
     for key, value in overlay.items():
         old = base.get(key)
@@ -286,7 +326,7 @@ def _file_digest(path: str) -> str:
     return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def _canonical(node: Any, key: str | None = None) -> Any:
+def _canonical(node: Any, key: str | None = None, parent: str | None = None) -> Any:
     if isinstance(node, list):
         return [_canonical(item) for item in node]
     if key in ACTIVATION_KEYS and isinstance(node, str):
@@ -303,12 +343,12 @@ def _canonical(node: Any, key: str | None = None) -> Any:
         if class_name == "ModuleList":
             return _canonical(list((node.get("init_args") or {}).get("modules") or []))
         args = dict(node.get("init_args") or {})
-    elif key in _CLASS_OF_KEY:
-        class_name, args = _CLASS_OF_KEY[key], dict(node)
+    elif _class_of(key, parent) is not None:
+        class_name, args = _class_of(key, parent), dict(node)
     else:
         return {k: _canonical(v, k) for k, v in node.items()}
     defaults = _defaults(class_name)
-    args = {k: _canonical(v, k) for k, v in args.items() if k not in _NOT_MODEL}
+    args = {k: _canonical(v, k, class_name) for k, v in args.items() if k not in _NOT_MODEL}
     return {"class": class_name, "args": {k: v for k, v in args.items() if k not in defaults or v != _canonical(defaults[k], k)}}
 
 

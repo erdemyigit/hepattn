@@ -496,8 +496,8 @@ def encoder_and_decoder(rc) -> tuple[dict, dict]:
 def test_overlays_merge_as_lightningcli(overlay, tmp_path):
     """Base + linformer + an overlay == what LightningCLI parses from the same three files (``--print_config``).
 
-    ``eval.yaml`` writes ``model: model: encoder: attn_type: torch`` without ``init_args`` (keys next to the class
-    path are init args); the partial overlay gives dict-typed arguments (``attn_kwargs``, ``decoder_layer_config``)
+    ``eval.yaml`` writes ``model: model: encoder: attn_type: torch``: init args as a plain dict, without ``class_path``
+    or ``init_args``, at classes base.yaml gave; the partial overlay gives dict-typed arguments (``attn_kwargs``, ``decoder_layer_config``)
     that LightningCLI replaces whole. Control: a key-by-key merge of every dict gives another model for both.
     """
     raw = quiet_load([*ORG, OVERLAYS[overlay]])
@@ -516,12 +516,12 @@ def test_overlays_merge_as_lightningcli(overlay, tmp_path):
         assert decoder["mask_attention"] is True  # a decoder key the overlay does not give is kept
         assert decoder["decoder_layer_config"] == {"dim": 256, "attn_kwargs": {"num_heads": 8}}
         assert raw.data.num_val == 10
-    # control 1: a key-by-key merge leaves the overlay's keys next to model.model's init_args, which the loader rejects
+    # control 1: a key-by-key merge leaves the overlay's keys next to model.model's class_path, which the loader rejects
     # (it ignored them before fix round 3: the eval model was the linformer one, hash equal to base + linformer)
     org = naive_merge(*(yaml.safe_load(p.read_text()) for p in ORG))
     naive = naive_merge(org, yaml.safe_load(OVERLAYS[overlay].read_text()))
     assert set(naive["model"]["model"]) == {"class_path", "init_args", "encoder"} | ({"decoder"} if overlay == "partial" else set())
-    with pytest.raises(ConfigError, match="init_args and also"):
+    with pytest.raises(ConfigError, match="next to class_path"):
         quiet_load(write(tmp_path / "naive.yaml", naive))
 
 
@@ -582,12 +582,20 @@ def test_merge_rules():
     keras = {"model": {"model": {"class_path": "h.KerasMaskFormer", "init_args": {"encoder": {"a": 1, "b": 2}}}}}
     replaced = merge_configs(keras, {"model": {"model": {"encoder": {"b": 3}}}})
     assert replaced["model"]["model"]["init_args"]["encoder"] == {"b": 3}
-    # keys next to class_path are init args, in one file and in an overlay
-    assert merge_configs({}, {"model": {"model": {"class_path": "m.X", "dim": 4}}}) == {
-        "model": {"model": {"class_path": "m.X", "init_args": {"dim": 4}}}
-    }
-    short = merge_configs(base, {"model": {"model": {"class_path": "m.MaskFormer", "dim": 4}}})["model"]["model"]
-    assert short == {"class_path": "m.MaskFormer", "init_args": {**base["model"]["model"]["init_args"], "dim": 4}}
+    # init args as a plain dict (no class_path, no init_args) at a class an earlier file gave: merged (eval.yaml's form)
+    plain = merge_configs(base, {"model": {"model": {"dim": 4}}})["model"]["model"]
+    assert plain == {"class_path": "m.MaskFormer", "init_args": {**base["model"]["model"]["init_args"], "dim": 4}}
+    # keys next to class_path: rejected, in one file and in an overlay (LightningCLI: test_short_class_entries_are_rejected)
+    for first in ({}, base):
+        with pytest.raises(ConfigError, match="next to class_path"):
+            merge_configs(first, {"model": {"model": {"class_path": "m.MaskFormer", "dim": 4}}})
+    # the torch decoder's posenc is dict-typed (replaced whole); InputNet's posenc is a class (merged)
+    dec = {"model": {"model": {"class_path": "m.MaskFormer", "init_args": {"decoder": {"posenc": {"alpha": 1.0, "base": 2.0}}}}}}
+    over_dec = {"model": {"model": {"decoder": {"posenc": {"alpha": 3.0}}}}}
+    assert merge_configs(dec, over_dec)["model"]["model"]["init_args"]["decoder"]["posenc"] == {"alpha": 3.0}
+    net = {"model": {"model": {"class_path": "m.InputNet", "init_args": {"posenc": {"dim": 8, "scale": 0.1}}}}}
+    over_net = {"model": {"model": {"posenc": {"scale": 1.0}}}}
+    assert merge_configs(net, over_net)["model"]["model"]["init_args"]["posenc"] == {"dim": 8, "scale": 1.0}
     # a null replaces a class entry
     assert merge_configs(base, {"model": {"model": {"decoder": None}}})["model"]["model"]["init_args"]["decoder"] is None
 
@@ -596,13 +604,21 @@ def test_merge_rules():
     ("overlay", "message"),
     [
         ({"model": {"model": {"class_path": "m.Other", "init_args": {}}}}, "changes class_path"),
-        ({"model": {"model": {"class_path": "m.MaskFormer", "init_args": {"dim": 4}, "x": 1}}}, "init_args and also"),
+        ({"model": {"model": {"class_path": "m.MaskFormer", "init_args": {"dim": 4}, "x": 1}}}, "next to class_path"),
+        ({"model": {"model": {"class_path": "m.MaskFormer", "dim": 4}}}, "next to class_path"),
+        ({"model": {"model": {"init_args": {"nets": {"init_args": {"modules": [{"init_args": {"a": 2}}]}}}}}}, "no class_path"),
         ({"model": {"model": {"init_args": {"dim": 4}, "x": 1}}}, "init_args and also"),
     ],
 )
 def test_merge_rejects_what_jsonargparse_rejects_or_needs_the_class_for(overlay, message):
-    base = {"model": {"model": {"class_path": "m.MaskFormer", "init_args": {"dim": 8}}}}
+    nets = {"class_path": "torch.nn.ModuleList", "init_args": {"modules": [{"class_path": "m.InputNet", "init_args": {"a": 1, "b": 1}}]}}
+    base = {"model": {"model": {"class_path": "m.MaskFormer", "init_args": {"dim": 8, "nets": nets}}}}
     merge_configs(base, {"model": {"model": {"init_args": {"dim": 4}}}})  # control: a plain override merges
+    # control: list items with their class_path replace the list (as before)
+    full = {"model": {"model": {"init_args": {"nets": {"init_args": {"modules": [{"class_path": "m.InputNet", "init_args": {"a": 2}}]}}}}}}
+    assert merge_configs(base, full)["model"]["model"]["init_args"]["nets"]["init_args"]["modules"] == [
+        {"class_path": "m.InputNet", "init_args": {"a": 2}}
+    ]
     with pytest.raises(ConfigError, match=message):
         merge_configs(base, overlay)
 
@@ -615,3 +631,73 @@ def test_partial_lrs_config_is_replaced_whole(tmp_path):
     ])
     with pytest.raises(ConfigError, match="weight_decay"):
         quiet_load([*ORG, write(tmp_path / "lrs.yaml", {"model": {"lrs_config": {"max": 1e-4}}})])
+
+
+PROBES = yaml.safe_load((FIXTURES / "lightningcli_probes.yaml").read_text())
+
+
+def probe_files(name: str, tmp_path: Path) -> list[Path]:
+    return [write(tmp_path / f"{name}_{i}.yaml", overlay) for i, overlay in enumerate(PROBES[name]["overlays"])]
+
+
+def printed(name: str):
+    return PROBES[name]["printed"]["value"]
+
+
+@pytest.mark.parametrize("name", ["short_model", "short_encoder", "short_callback"])
+def test_short_class_entries_are_rejected_as_lightningcli_rejects_them(name, tmp_path):
+    """Keys next to ``class_path``: LightningCLI (jsonargparse 4.40.1) exits 2 (recorded probe); the loader raises."""
+    assert PROBES[name]["returncode"] == 2 and "class_path" in PROBES[name]["error"]
+    with pytest.raises(ConfigError, match="next to class_path"):
+        quiet_load([*ORG, *probe_files(name, tmp_path)])
+    with pytest.raises(ConfigError, match="next to class_path"):  # also as the only file
+        quiet_load(probe_files(name, tmp_path))
+
+
+def test_explicit_class_entries_are_read_as_lightningcli_reads_them(tmp_path):
+    """Control for the rejection: the same entries under ``init_args`` parse in LightningCLI and in the loader."""
+    assert PROBES["explicit_encoder"]["returncode"] == PROBES["explicit_callback"]["returncode"] == 0
+    raw = quiet_load([*ORG, *probe_files("explicit_encoder", tmp_path)])
+    encoder = raw.model_section["model"]["init_args"]["encoder"]
+    want = printed("explicit_encoder")
+    assert encoder["class_path"] == want["class_path"] and encoder["init_args"]["num_layers"] == 2
+    assert {k: v for k, v in want["init_args"].items() if k in encoder["init_args"]} == encoder["init_args"]
+    callbacks = quiet_load([*ORG, *probe_files("explicit_callback", tmp_path)])
+    assert [c["init_args"]["every_n_epochs"] for c in printed("explicit_callback")] == [2]
+    assert callbacks.checkpoint.epoch is not None and callbacks.checkpoint.epoch.every_n_epochs == 2
+
+
+def test_overlay_list_item_without_class_path_is_rejected(tmp_path):
+    """LightningCLI merges a ``ModuleList`` item without ``class_path`` into base's item (it keeps InputNet's class and
+    posenc); replacing the list whole would build another model, so the loader raises.
+    """
+    item = printed("modulelist_bare_item")["init_args"]["modules"][0]
+    # control: what LightningCLI did, which a whole replacement of the list loses
+    assert item["class_path"] == "hepattn.models.InputNet" and item["init_args"]["posenc"]["init_args"]["fields"] == ["eta", "phi"]
+    assert (
+        "posenc"
+        not in PROBES["modulelist_bare_item"]["overlays"][0]["model"]["model"]["init_args"]["input_nets"]["init_args"]["modules"][0]["init_args"]
+    )
+    with pytest.raises(ConfigError, match="no class_path"):
+        quiet_load([*ORG, *probe_files("modulelist_bare_item", tmp_path)])
+    # control: the item LightningCLI printed (class_path and every init arg) is accepted and gives the printed item
+    full = {"model": {"model": {"init_args": {"input_nets": {"init_args": {"modules": [item]}}}}}}
+    raw = quiet_load([*ORG, write(tmp_path / "full.yaml", full)])
+    assert raw.model_section["model"]["init_args"]["input_nets"]["init_args"]["modules"][0]["class_path"] == "hepattn.models.InputNet"
+
+
+def test_decoder_posenc_is_replaced_whole_as_lightningcli_does(tmp_path):
+    """The torch decoder's ``posenc`` is ``dict[str, float]``: the second overlay replaces the first whole.
+
+    Control: a class-style merge keeps ``base`` from the first overlay (the loader before the delta fix).
+    """
+    want = printed("decoder_posenc")["init_args"]["posenc"]
+    assert want == {"alpha": 3.0}
+    files = probe_files("decoder_posenc", tmp_path)
+    raw = quiet_load([*ORG, *files])
+    decoder = raw.model_section["model"]["init_args"]["decoder"]
+    assert decoder["posenc"] == want
+    assert model_description(raw.model_section)["args"]["decoder"]["args"]["posenc"] == want  # a dict, not a class
+    first = quiet_load([*ORG, files[0]])
+    assert first.model_section["model"]["init_args"]["decoder"]["posenc"] == {"alpha": 1.0, "base": 2.0}
+    assert first.model_hash != raw.model_hash != quiet_load(ORG).model_hash
