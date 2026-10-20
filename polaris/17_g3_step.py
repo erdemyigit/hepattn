@@ -4,8 +4,9 @@ Both arms build the org model from the config ``polaris/03_make_config.py`` gene
 HGQ_DEVICES=1`` (fp32, one GPU, accumulation 4, PeriodicEBOPs every 8, BetaPID). Each job runs in its own process
 (OOM at batch 32 is recorded, not fatal), in ``--jobs`` order, and the JSON is saved after every job. The default order
 puts the gate first (``jax-prod:32``, then the hybrid denominators, then ``jax-match`` and ``jax-prod:16``); the
-diagnostics ``jax-g1`` and ``jax-precision`` (about 10 more compiled programs at ~2 min each on an A100) go in a second
-submission (``17_g3_step.pbs``: ``G3_JOBS``), so the hybrid arms are not cut off by the 1 h walltime.
+diagnostics ``jax-g1``, ``jax-precision`` (about 10 more compiled programs at ~2 min each on an A100) and
+``hybrid-tf32`` go in a second submission (``17_g3_step.pbs``: ``G3_JOBS``), so the hybrid arms are not cut off by the
+1 h walltime.
 
 Jobs (``--job``):
   jax-prod       ``TrainStep(matmul_precision="highest", donate=True)`` with the config's accumulation and EBOPs period:
@@ -24,8 +25,10 @@ Jobs (``--job``):
                  matching, and with an identity assignment and no callback (the costs are still computed and kept
                  live). Shares of the EBOPs-on and -off micro-batches and of the production mix (one on in ``every``).
   hybrid         ``polaris/13_step_time_fit.py`` (Lightning fit of ``main_hgq`` with ``StepTimer``) on the same
-                 generated config: the hybrid's in-run micro-batch time, and its peak CUDA memory (printed by the child
-                 process at exit).
+                 generated config at ``--matmul_precision highest`` (full fp32 matmuls, as jax-prod; the hybrid CLI's
+                 default "high" is TF32 on an A100): the hybrid's in-run micro-batch time, and its peak CUDA memory and
+                 ``torch.get_float32_matmul_precision()`` (both printed by the child process at exit).
+  hybrid-tf32    The same at the hybrid CLI's default "high" (TF32): the production hybrid's speed next to its fp32 one.
 
 G3 passes when hybrid median / jax-prod median >= 1.8 at batch 32 and the production matching share is <= 15% of the
 step. If the hybrid has no batch 32 result (G1 and G2 saw it OOM there), the verdict decides at batch 16, records the
@@ -52,9 +55,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from jax_common import REPO, generate_config, median_ms, quantiles_ms, shrink_config
 
-JOBS = ("jax-prod", "jax-g1", "jax-precision", "jax-match", "hybrid")
+# torch.set_float32_matmul_precision of each hybrid job (hepattn.utils.cli.CLI --matmul_precision; its default is "high")
+HYBRID_PRECISION = {"hybrid": "highest", "hybrid-tf32": "high"}
+JOBS = ("jax-prod", "jax-g1", "jax-precision", "jax-match", *HYBRID_PRECISION)
 GATE_JOBS = "jax-prod:32,hybrid:32,hybrid:16,jax-match:32,jax-prod:16"
-DIAGNOSTIC_JOBS = "jax-g1:32,jax-precision:32"
+DIAGNOSTIC_JOBS = "jax-g1:32,jax-precision:32,hybrid-tf32:16"
 DEFAULT_JOBS = f"{GATE_JOBS},{DIAGNOSTIC_JOBS}"
 TINY = {"dim": 16, "heads": 2, "enc_layers": 1, "dec_layers": 1, "linformer_k": 8, "nodes": 64, "queries": 16}
 G3_RATIO, MATCH_SHARE = 1.8, 0.15
@@ -123,8 +128,8 @@ def run_sweep(args) -> None:
             cfg["data"]["batch_size"] = batch
             config = out.parent / f"g3_b{batch}_given.yaml"
             config.write_text(yaml.safe_dump(cfg, sort_keys=False))
-        py = args.torch_python if job == "hybrid" else args.jax_python
-        backend = "torch" if job == "hybrid" else "jax"
+        py = args.torch_python if job in HYBRID_PRECISION else args.jax_python
+        backend = "torch" if job in HYBRID_PRECISION else "jax"
         env = {**os.environ, "KERAS_BACKEND": backend, "PYTHONPATH": f"{REPO / 'src'}{os.pathsep}{os.environ.get('PYTHONPATH', '')}"}
         passthrough = [
             "--data-file",
@@ -208,6 +213,13 @@ def verdict(results) -> dict:
     out["matching_share"] = None if match is None else match["matching_share"]
     out["matching_share_ebops_on_off"] = None if match is None else (match.get("matching_share_ebops_on"), match.get("matching_share_ebops_off"))
     out["matching_pass"] = None if match is None else match["matching_share"] <= MATCH_SHARE
+    hyb16, tf16 = _get(results, "hybrid", 16), _get(results, "hybrid-tf32", 16)
+    if hyb16 and tf16:  # the production hybrid (TF32) vs the gate's fp32 denominator
+        out["hybrid_tf32_b16"] = {
+            "fp32_median_ms": hyb16["median_ms"],
+            "tf32_median_ms": tf16["median_ms"],
+            "fp32_over_tf32": hyb16["median_ms"] / tf16["median_ms"],
+        }
     g1 = _get(results, "jax-g1", 32)
     if g1:
         out["g1"] = {k: g1[k] for k in ("none_donate_ms", "none_nodonate_ms", "keras_trainer_ms", "donate_vs_keras")}
@@ -485,21 +497,26 @@ def job_match(args, rc) -> dict:
 # --------------------------------------------------------------------------------------------- hybrid job
 STEP_RE = re.compile(r"\[STEP-TIME rank=0\] batches=(\d+) warmup=(\d+) median=([\d.]+)s mean=([\d.]+)s p10=([\d.]+)s first=([\d.]+)s")
 PEAK_RE = re.compile(r"^\[G3-PEAK-CUDA-BYTES\] (-?\d+)$")
-# runs 13_step_time_fit.py as __main__ and prints the child's own peak CUDA memory at exit (-1 without CUDA)
+PRECISION_RE = re.compile(r"^\[G3-TORCH-MATMUL-PRECISION\] (\w+)$")
+# runs 13_step_time_fit.py as __main__ and prints, at exit, the child's own peak CUDA memory (-1 without CUDA) and the
+# float32 matmul precision the run used (set by the hybrid CLI during fit)
 HYBRID_CHILD = (
     "import atexit, runpy, sys, torch\n"
     "atexit.register(lambda: print(f'[G3-PEAK-CUDA-BYTES] {torch.cuda.max_memory_allocated() if torch.cuda.is_available() else -1}', flush=True))\n"
+    "atexit.register(lambda: print(f'[G3-TORCH-MATMUL-PRECISION] {torch.get_float32_matmul_precision()}', flush=True))\n"
     "sys.argv = sys.argv[1:]\n"
     "runpy.run_path(sys.argv[0], run_name='__main__')\n"
 )
 
 
 def job_hybrid(args) -> dict:
-    """``13_step_time_fit.py fit`` on the generated config (one device, fp32, the config's accumulation and EBOPs period).
+    """``13_step_time_fit.py fit`` on the generated config (one device, fp32 weights, the config's accumulation and EBOPs
+    period) at the job's float32 matmul precision (``HYBRID_PRECISION``).
 
     Raises:
-        SystemExit: If the run fails or prints no ``STEP-TIME`` line.
+        SystemExit: If the run fails, prints no ``STEP-TIME`` line, or ran at another matmul precision.
     """
+    precision = HYBRID_PRECISION[args.job]
     cmd = [
         sys.executable,
         "-c",
@@ -522,6 +539,8 @@ def job_hybrid(args) -> dict:
         str(2 * args.batch),
         "--trainer.default_root_dir",
         str(Path(tempfile.mkdtemp()) / "g3_hybrid"),
+        "--matmul_precision",
+        precision,
     ]
     if args.tiny:
         cmd += ["--data.dummy_data", "true", "--trainer.accelerator", "cpu", "--data.num_workers", "0"]
@@ -542,13 +561,18 @@ def job_hybrid(args) -> dict:
     peak = next((int(m.group(1)) for ln in reversed(cp.stdout.splitlines()) if (m := PEAK_RE.match(ln))), None)
     res["peak_dev_gb"] = None if peak is None or peak < 0 else peak / 2**30
     res["peak_line_seen"] = peak is not None  # the child printed its line (-1 without CUDA)
+    used = next((m.group(1) for ln in reversed(cp.stdout.splitlines()) if (m := PRECISION_RE.match(ln))), None)
+    if used != precision:
+        raise SystemExit(f"hybrid run used float32 matmul precision {used!r}, asked {precision!r}")
+    res["torch_matmul_precision"] = used
     return res
 
 
 # --------------------------------------------------------------------------------------------- one job
 def run_job(args) -> None:
-    info = {"job": args.job, "batch": args.batch, "precision": "fp32", "config": args.config, "tiny": args.tiny}
-    if args.job == "hybrid":
+    tf32 = HYBRID_PRECISION.get(args.job, "highest") != "highest"
+    info = {"job": args.job, "batch": args.batch, "precision": "tf32" if tf32 else "fp32", "config": args.config, "tiny": args.tiny}
+    if args.job in HYBRID_PRECISION:
         info.update(job_hybrid(args))
         print("RESULT " + json.dumps(info, default=str), flush=True)
         return
