@@ -6,6 +6,8 @@
 #   bash polaris/submit.sh 05_sweep.pbs
 #   bash polaris/submit.sh 05_sweep.pbs --depend afterany:1234567.polaris
 #
+#   G3_JOBS=jax-g1:32,jax-precision:32,hybrid-tf32:16 bash polaris/submit.sh 17_g3_step.pbs   # job knobs: see JOB_VARS
+#
 # Prints the job id. Use `qstat -u $USER` to watch, `qdel <id>` to cancel.
 set -euo pipefail
 
@@ -52,7 +54,8 @@ case "$BASE" in
   # 2 driver runs (train + resume) at production shape, each compiling 3 programs (cache hits on the resume)
   16_jax_smoke.pbs)     DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
   # gate (default G3_JOBS): 3 JAX jobs (6 programs) + 2 hybrid Lightning runs; the diagnostics (G3_JOBS=jax-g1:32,
-  # jax-precision:32: ~10 programs at ~2 min each on an A100) need their own submission within the 1 h debug walltime
+  # jax-precision:32,hybrid-tf32:16: ~10 programs at ~2 min each on an A100 + 1 Lightning run) need their own
+  # submission within the 1 h debug walltime
   17_g3_step.pbs)       DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
   *)            DEF_QUEUE="${QUEUE_DEBUG:-debug}";      DEF_WALL="${WALLTIME_SMOKE:-00:20:00}" ;;
 esac
@@ -67,6 +70,27 @@ mkdir -p "$LOGDIR"
 ARGS=(-A "$PBS_PROJECT" -l "filesystems=$PBS_FILESYSTEMS" -q "$QUEUE"
       -l "walltime=$DEF_WALL" -o "$LOGDIR/${BASE%.pbs}.log")
 [ -n "$DEPEND" ] && ARGS+=(-W "depend=$DEPEND")
+
+# Job knobs that the .pbs scripts read (16_jax_smoke, 17_g3_step). qsub runs here without -V, so the job does not see
+# the submit shell's environment. The knobs that are set (an empty value counts: SMOKE_XLA_FLAGS= drops the flag) go
+# into a file of `export` lines, and the job gets only that file's path (-v SUBMIT_ENV_FILE=...), because qsub -v
+# splits its list at commas (G3_JOBS holds commas).
+JOB_VARS=(G3_JOBS G3_ARGS G3_DATA_FILE SMOKE_ARGS SMOKE_XLA_FLAGS JAX_COMPILATION_CACHE_DIR)
+ENV_FILE=""
+for v in "${JOB_VARS[@]}"; do
+  [ -n "${!v+x}" ] || continue
+  if [ -z "$ENV_FILE" ]; then
+    ENV_FILE="$LOGDIR/${BASE%.pbs}.$(date +%Y%m%d-%H%M%S).$$.env"
+    : > "$ENV_FILE"
+  fi
+  printf 'export %s=%q\n' "$v" "${!v}" >> "$ENV_FILE"
+done
+if [ -n "$ENV_FILE" ]; then
+  case "$ENV_FILE" in *,*) echo "ERROR: the log directory path has a comma: $ENV_FILE"; exit 1 ;; esac
+  ARGS+=(-v "SUBMIT_ENV_FILE=$ENV_FILE")
+  echo "job variables ($ENV_FILE):"
+  cat "$ENV_FILE"
+fi
 
 echo "qsub ${ARGS[*]} $SCRIPT"
 qsub "${ARGS[@]}" "$SCRIPT"

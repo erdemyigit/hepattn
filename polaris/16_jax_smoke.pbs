@@ -10,6 +10,7 @@
 #PBS -o logs/16_jax_smoke.log
 #
 # Submit with:  bash polaris/submit.sh 16_jax_smoke.pbs
+# (submit.sh hands SMOKE_ARGS, SMOKE_XLA_FLAGS and JAX_COMPILATION_CACHE_DIR to the job; a bare qsub does not)
 #
 # S6b smoke of the native JAX driver (hepattn.experiments.clic.main_jax) on real CLIC events, one A100, fp32:
 # run A trains 3 epochs x 400 micro-batches (batch 32, accumulation 4: 300 optimizer steps) with validation, step
@@ -38,6 +39,11 @@
 set -uo pipefail
 cd "${PBS_O_WORKDIR:-$PWD}"
 source polaris/env.sh
+# the job knobs set in the submit shell (polaris/submit.sh writes them to a file: qsub passes no environment)
+if [ -n "${SUBMIT_ENV_FILE:-}" ]; then
+  echo "job variables from $SUBMIT_ENV_FILE:"; cat "$SUBMIT_ENV_FILE"
+  source "$SUBMIT_ENV_FILE"
+fi
 export PYTHONNOUSERSITE=1 TORCHDYNAMO_DISABLE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # report real JAX device memory instead of the default 75% preallocation (as 15_g2_forward.pbs)

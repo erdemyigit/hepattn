@@ -1,0 +1,26 @@
+== 17 with G3_JOBS (commas) and G3_ARGS (spaces)
+JOB G3_JOBS=[jax-g1:32,jax-precision:32,hybrid-tf32:16]
+JOB G3_ARGS=[--iters 64 --warmup 8]
+JOB G3_DATA_FILE=[UNSET]
+JOB SMOKE_ARGS=[UNSET]
+JOB SMOKE_XLA_FLAGS=[UNSET]
+JOB XLA_FLAGS=[UNSET]
+JOB JAX_COMPILATION_CACHE_DIR=[/w/jax_cache]
+== 16 with SMOKE_XLA_FLAGS= (empty: drop the flag) and SMOKE_ARGS with = , and a quote
+JOB G3_JOBS=[UNSET]
+JOB G3_ARGS=[UNSET]
+JOB G3_DATA_FILE=[UNSET]
+JOB SMOKE_ARGS=[--steps 300 --tag a=b,c'd]
+JOB SMOKE_XLA_FLAGS=[]
+JOB XLA_FLAGS=[]
+JOB JAX_COMPILATION_CACHE_DIR=[/w/jax_cache]
+== 16 with no knobs (the defaults)
+JOB G3_JOBS=[UNSET]
+JOB G3_ARGS=[UNSET]
+JOB G3_DATA_FILE=[UNSET]
+JOB SMOKE_ARGS=[UNSET]
+JOB SMOKE_XLA_FLAGS=[UNSET]
+JOB XLA_FLAGS=[--xla_gpu_deterministic_ops=true]
+JOB JAX_COMPILATION_CACHE_DIR=[/w/jax_cache]
+== CONTROL: submit.sh at 8380d8a
+JOB G3_JOBS=[UNSET]
