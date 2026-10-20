@@ -23,7 +23,8 @@ measured on Polaris (native fwd + bwd 165.2 ms vs hybrid ~1615 ms at b16, fp32; 
 the production "highest"). **Not run:** **G3** (`polaris/17_g3_step.pbs`: >= 1.8x the hybrid in-run step at b32,
 matching <= 15%; also the G1 gap, TF32 and the EBOPs share at b32) and the real-data smoke
 (`polaris/16_jax_smoke.pbs`). **G1 is not resolved** (the Keras-trainer gap is measured only by G3). Next: the two
-Polaris jobs, then S7 (converter, export) and S8 (G4).
+Polaris jobs (G3 in two submissions: the gate set first, then `G3_JOBS=jax-g1:32,jax-precision:32`; S6b.md "Fix
+round"), then S7 (converter, export) and S8 (G4).
 
 ## Status update (2026-10-16, after the retarget R0-R5)
 

@@ -15,11 +15,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 LOOP = "src/hepattn/keras_native/loop.py"
 OPTIM = "src/hepattn/keras_native/optim.py"
+CLI = "src/hepattn/keras_native/cli.py"
 T = "tests/keras_native/test_loop.py"
+TC = "tests/keras_native/test_cli.py"
 
 
 def tests(*names: str) -> list[str]:
     return [T, "-k", " or ".join(names)]
+
+
+def cli_tests(*names: str) -> list[str]:
+    return [TC, "-k", " or ".join(names)]
+
+
+CADENCE = "log_cadence"
+SAME_DIR = "same_run_directory"
 
 
 RESUME = "continues_bit_for_bit"
@@ -72,6 +82,70 @@ MUTANTS = {
     "K12_null_clip_algorithm_rejected": (
         [(OPTIM, 'trainer_section.get("gradient_clip_algorithm") or "norm"', 'trainer_section.get("gradient_clip_algorithm", "norm")')],
         tests("optimizer_reader"),
+    ),
+    # fix round (reviewer mutants R1/R6, R11, R2, R3, R5, R8, R9 and the fixes of this round)
+    "K0b_none_fix_round": ([], tests("val_metrics", CADENCE, SAME_DIR, "csv_log", "refuses_another", RESUME)),
+    "K13_val_metrics_count_padding": (
+        [
+            (
+                LOOP,
+                '            events += n\n            metrics.update(res["preds"], batch.targets, event_valid=batch.event_valid)\n',
+                '            events += n\n            metrics.update(res["preds"], batch.targets, event_valid=None)\n',
+            )
+        ],
+        tests("val_metrics"),
+    ),
+    "K14_val_metrics_per_layer": (
+        [(LOOP, 'ClicMetrics("val", pool_layers=self.s.pool_layers)', 'ClicMetrics("val", pool_layers=False)')],
+        tests("val_metrics"),
+    ),
+    "K15_log_cadence_off_by_one": (
+        [(LOOP, "if self.global_step % self.s.log_every_n_steps == 0:", "if (self.global_step - 1) % self.s.log_every_n_steps == 0:")],
+        tests(CADENCE),
+    ),
+    "K16_lr_of_the_next_update": (
+        [(LOOP, "float(self.schedule((self.global_step - 1) * self.k))", "float(self.schedule(self.global_step * self.k))")],
+        tests(CADENCE),
+    ),
+    "K17_bits_trainable_only": (
+        [(LOOP, "[i for i, v in enumerate(model.non_trainable_variables) if last(v) == s]", "[]")],
+        tests(CADENCE),
+    ),
+    "K18_check_val_interval_ignored": (
+        [(LOOP, "if val is not None and (epoch + 1) % self.s.check_val_every_n_epoch == 0:", "if val is not None:")],
+        tests(CADENCE),
+    ),
+    "K19_no_matmul_precision": (
+        [(LOOP, "matmul_precision=settings.matmul_precision, donate", "matmul_precision=None, donate")],
+        tests(CADENCE),
+    ),
+    "K20_logs_not_restored": (
+        [
+            (
+                LOOP,
+                '        self.epoch_logs = dict(meta.get("epoch_logs") or {})\n        self.train_logs = dict(meta.get("train_logs") or {})\n',
+                "",
+            )
+        ],
+        tests(RESUME),
+    ),
+    "K21_csv_rows_not_dropped_on_resume": (
+        [(LOOP, "        if self.resumed_from is not None:  # same run directory", "        if False:  # same run directory")],
+        tests(SAME_DIR),
+    ),
+    "K22_stale_temporaries_kept": ([(LOOP, "            stale.unlink(missing_ok=True)\n", "            pass\n")], tests(SAME_DIR)),
+    "K23_seed_not_checked": ([(LOOP, '*(("seed",) if check_seed else ())', "*()")], tests("refuses_another")),
+    "K24_csv_header_fixed_at_first_row": (
+        [(LOOP, "        elif new:\n            self._rewrite(", "        elif False:\n            self._rewrite(")],
+        tests("csv_log", RESUME),
+    ),
+    "K25_saved_config_without_overrides": (
+        [(CLI, "yaml.safe_dump(effective_raw(rc, args), sort_keys=False)", "yaml.safe_dump(rc.raw, sort_keys=False)")],
+        cli_tests("saved_config"),
+    ),
+    "K26_run_json_overwritten_on_resume": (
+        [(CLI, '_revision(run_dir / "run.json")', 'run_dir / "run.json"')],
+        cli_tests("keeps_the_first_run_files"),
     ),
 }
 

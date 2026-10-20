@@ -44,3 +44,53 @@ K11_keras_default_epsilon
 K12_null_clip_algorithm_rejected
   FAILED tests/keras_native/test_loop.py::test_one_optimizer_reader_for_every_form[org saved]
   1 failed, 5 passed, 19 deselected, 17 warnings in 2.59s
+
+# fix round (S6b review), HEAD d104d44, scratch copies; loop mutants then CLI mutants
+K0b_none_fix_round
+  9 passed, 20 deselected, 14 warnings in 205.18s (0:03:25)
+K13_val_metrics_count_padding
+  FAILED tests/keras_native/test_loop.py::test_val_metrics_drop_the_padding_events_and_pool_the_layers
+  1 failed, 28 deselected, 14 warnings in 65.50s (0:01:05)
+K14_val_metrics_per_layer
+  FAILED tests/keras_native/test_loop.py::test_val_metrics_drop_the_padding_events_and_pool_the_layers
+  1 failed, 28 deselected, 14 warnings in 73.02s (0:01:13)
+K15_log_cadence_off_by_one
+  FAILED tests/keras_native/test_loop.py::test_log_cadence_lr_bits_val_interval_and_precision
+  1 failed, 28 deselected, 14 warnings in 95.31s (0:01:35)
+K16_lr_of_the_next_update
+  FAILED tests/keras_native/test_loop.py::test_log_cadence_lr_bits_val_interval_and_precision
+  1 failed, 28 deselected, 14 warnings in 96.92s (0:01:36)
+K17_bits_trainable_only
+  FAILED tests/keras_native/test_loop.py::test_log_cadence_lr_bits_val_interval_and_precision
+  1 failed, 28 deselected, 14 warnings in 95.18s (0:01:35)
+K18_check_val_interval_ignored
+  FAILED tests/keras_native/test_loop.py::test_log_cadence_lr_bits_val_interval_and_precision
+  1 failed, 28 deselected, 14 warnings in 99.17s (0:01:39)
+K19_no_matmul_precision
+  FAILED tests/keras_native/test_loop.py::test_log_cadence_lr_bits_val_interval_and_precision
+  1 failed, 28 deselected, 14 warnings in 96.38s (0:01:36)
+K20_logs_not_restored
+  FAILED tests/keras_native/test_loop.py::test_resume_continues_bit_for_bit[step-000000003.npz-position0]
+  FAILED tests/keras_native/test_loop.py::test_resume_continues_bit_for_bit[step-000000004.npz-position1]
+  FAILED tests/keras_native/test_loop.py::test_resume_continues_bit_for_bit[step-000000006.npz-position3]
+  3 failed, 1 passed, 25 deselected, 14 warnings in 125.53s (0:02:05)
+K21_csv_rows_not_dropped_on_resume
+  FAILED tests/keras_native/test_loop.py::test_resume_in_the_same_run_directory
+  1 failed, 28 deselected, 14 warnings in 74.28s (0:01:14)
+K22_stale_temporaries_kept
+  FAILED tests/keras_native/test_loop.py::test_resume_in_the_same_run_directory
+  1 failed, 28 deselected, 14 warnings in 74.38s (0:01:14)
+K23_seed_not_checked
+  FAILED tests/keras_native/test_loop.py::test_restore_refuses_another_schedule_or_model
+  1 failed, 28 deselected, 14 warnings in 61.07s (0:01:01)
+K24_csv_header_fixed_at_first_row
+  FAILED tests/keras_native/test_loop.py::test_csv_log_grows_its_header - Asser...
+  1 failed, 4 passed, 24 deselected, 14 warnings in 124.29s (0:02:04)
+EXIT 0
+K25_saved_config_without_overrides
+  FAILED tests/keras_native/test_cli.py::test_saved_config_holds_the_command_line_options
+  1 failed, 5 deselected in 187.99s (0:03:07)
+K26_run_json_overwritten_on_resume
+  FAILED tests/keras_native/test_cli.py::test_resume_in_the_run_directory_keeps_the_first_run_files
+  1 failed, 5 deselected in 188.71s (0:03:08)
+EXIT 0

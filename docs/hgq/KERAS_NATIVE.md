@@ -137,13 +137,27 @@ env -u KERAS_BACKEND PYTHONPATH=$PWD/src .venv-jax/bin/python -m hepattn.experim
 `--help` lists the overrides (`--max-epochs`, `--max-steps`, `--limit-train-batches`, `--limit-val-batches`,
 `--batch-size`, `--num-workers`, `--num-train`, `--num-val`, `--log-every-n-steps`, `--ckpt-every-n-steps`,
 `--ckpt-save-top-k`, `--seed`, `--matmul-precision`, `--no-donate`, `--compile-cache`, `--metrics-per-layer`).
-A run directory holds: `config.yaml` (the merged config), `run.json` (options, versions, model hash, `total_steps`),
+A run directory holds: `config.yaml` (the merged config with the command-line data, trainer, seed and step-checkpoint
+options written in: `fit --config <run-dir>/config.yaml` repeats the run; `--matmul-precision`, `--no-donate` and
+`--metrics-per-layer` are only in `run.json`), `run.json` (options, versions, model hash, `total_steps`),
 `ckpts/` (`step-*.npz` every `every_n_train_steps` of the YAML's `ModelCheckpoint`, `epoch-*-step-*.npz` after each
 validation as hepattn's `Checkpoint`, pointers `last.json` / `best.json` on `val/loss`), `steps.csv` (one row per logged
-optimizer step), `metrics.csv` (one row per validation epoch, the hybrid `MetricsCsvWriter` layout) and `summary.json`
-(counters, compile counts, persistent-cache hits). Use one run directory per run and its resumes; the YAML's
-`CKPT_DIR` and `MetricsCsvWriter` paths are not used. A resume needs the same config and the same epoch length
-and total steps (the LR schedule): the driver refuses another. On CPU a resume continues bit for bit.
+optimizer step), `metrics.csv` (one row per validation epoch, the hybrid `MetricsCsvWriter` layout; a row with new
+keys adds columns) and `summary.json` (counters, compile counts, persistent-cache hits of the latest process). Use one
+run directory per run and its resumes; the YAML's `CKPT_DIR` and `MetricsCsvWriter` paths are not used. A resume in
+the same directory writes `config-r<n>.yaml` / `run-r<n>.json` (the first run's files stay), drops the CSV rows written
+after its checkpoint and removes checkpoint temporaries of a killed write. A resume needs the same config, epoch
+length, total steps (the LR schedule) and seed (the data order): the driver refuses another. On CPU a resume continues
+bit for bit. `--resume last` needs a step checkpoint callback (the YAML's `ModelCheckpoint` or `--ckpt-every-n-steps`):
+hepattn's epoch `Checkpoint` writes no `last`, as in the hybrid; pass an epoch checkpoint path instead.
+
+Polaris checks of the driver (one A100 each, 1 h debug queue):
+
+```bash
+bash polaris/submit.sh 16_jax_smoke.pbs                                     # real-data smoke + resume
+bash polaris/submit.sh 17_g3_step.pbs                                       # gate G3: jax-prod, hybrid, jax-match
+G3_JOBS=jax-g1:32,jax-precision:32 bash polaris/submit.sh 17_g3_step.pbs    # the G1 gap and TF32 (second job)
+```
 
 The DataLoader workers (`data.num_workers`, 8 in the Polaris config) are spawned; keep `main_jax` as the entry point
 (its `__main__` guard is what a spawned worker re-imports). What differs from the Lightning run is listed in

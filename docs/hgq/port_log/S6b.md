@@ -99,7 +99,7 @@ ran locally at tiny sizes only.
 | Trace counts over an epoch of dummy data: <= 2 train, <= 1 eval / predict | pass | `test_trace_counts_over_the_run` over 3 epochs (stronger than one): train 2 (EBOPs on / off), val 1 (eval + predict in one program, also used for the train-metric rows and `test`), tail 1 (loss only), bits 1; `TrainStep.eval_step` / `predict_step` 0 (unused). Control: a batch of another shape adds a val trace (2). Counts are traces, as S5 deviation 5 asks. Same counts in the CLI process (`test_fit_writes_checkpoints_logs_and_summary`). |
 | val/loss as the hybrid defines it | pass | `test_val_loss_is_the_event_weighted_task_loss_on_real_events` (= unpadded event-weighted task loss within 2x the measured 3.52e-8; `val/quant_ebops_loss` = regularizers), `test_tail_loss_from_the_padded_forward_equals_the_unpadded_batch` (<= 2x the measured 2 ulps; control: padded 188961 ulps). Mutants K2 (task + regularizers), K3 (no tail recompute), K4 (weights = batch size) killed. Hybrid definition: decision 1 probe. |
 | Prediction h5 layout | pass (S6a) + wiring | S6a `test_h5_layout_and_values_equal_the_torch_writer` (in the full-suite run below). Driver: `test_test_command_writes_the_prediction_file` (the `test` command on the best checkpoint: groups, 10 events in order 0..9, no padding rows, mask fields). |
-| Metrics = torchmetrics | pass (S6a) + wiring | S6a `test_metrics.py` (full-suite run). The driver uses `ClicMetrics(pool_layers=True)` by default (the hybrid's logged values, S6a decision 5; `--metrics-per-layer` for the per-layer values) with `event_valid`. |
+| Metrics = torchmetrics | pass (S6a) + wiring (fix round) | S6a `test_metrics.py` (full-suite run). Driver wiring, added in the fix round (the first round had no test for it): `test_val_metrics_drop_the_padding_events_and_pool_the_layers` compares `Trainer.validate`'s val metrics with `ClicMetrics(pool_layers=True)` on the real events only (val batches 4, 4, 2): equal bitwise in all 42; the torchmetrics counters are pooled (one value for every layer). Controls: counting the padding events changes 26 of 42 values; per-layer values differ. Mutants K13 (`event_valid=None`, reviewer R1 / R6) and K14 (per layer, R11) killed. |
 | YAML loader reads every form | pass (S6a) + one reader | S6a `test_config.py`; `test_one_optimizer_reader_for_every_form` x6 (decision 3; control: another accumulation is seen). Mutants K11 (keras epsilon 1e-7 in the driver) and K12 (the old null-algorithm check) killed; the old `optim.py` fails `[org saved]` with `NotImplementedError` (measured before the fix). |
 | CLI end to end from a clean shell: checkpoints, metrics CSV, resumable state, loss decreases, quantizers move | pass | `test_cli.py` (4 passed): env = `PATH`, `HOME`, `TMPDIR`, `PYTHONPATH` only; `fit` with 2 spawned workers -> 6 step + 3 epoch checkpoints, `steps.csv` 12 rows, `metrics.csv` 3 rows, `summary.json`; mean train loss of the last 4 rows < first 4, val loss epoch 2 < epoch 0, > 10 trainable quantizer arrays differ between steps 2 and 12, `train/bits_b_mean` changes; resume in a new process bitwise with 3 cache hits (control: run 1 had 0); `test` command. `test_run_a_is_non_vacuous`: every state group changes, beta changes after the warm-up. |
 | PeriodicEBOPs / BetaPID / BetaScheduler wiring | pass | `test_periodic_ebops_follows_the_optimizer_step` (active rows = steps 1, 3, 5, ...; a micro-step counter would log 0 on every row; on-step HGQ2 term > 5x off-step), `test_beta_pid_steps_each_epoch_on_the_latest_readout` (an independent controller fed the logged read-outs gives the logged betas; control: without a read-out the PID would hold init_beta), `test_beta_scheduler_ramps_at_the_optimizer_step` (control: the next step's ramp differs). Mutants K1 (micro-step period), K9 (ramp one step late) killed. |
@@ -107,11 +107,45 @@ ran locally at tiny sizes only.
 | Both Polaris scripts run locally at tiny sizes on dummy data (both G3 arms) | pass | `16_jax_smoke.py --tiny`: SMOKE-PASS, all 7 checks true, resume 2285 / 2285 arrays bitwise, 230 quantizer arrays moved, val loss 22.196 -> 21.912 -> 21.835, resume run 3 cache hits (`S6b_evidence/smoke_tiny.json`). `17_g3_step.py --sweep --tiny --iters 40`: all 7 jobs (jax-prod 32 / 16, jax-g1, jax-precision, jax-match, hybrid 32 / 16) ran with no error and `verdict()` filled every field (`S6b_evidence/g3_tiny.json`; both runs on the committed scripts). The tiny CPU numbers are not G3 evidence (CPU ignores the matmul precision, 1 + 1 layers, dim 16; e.g. its matching share 0.169 and ratio 8.0 say nothing about the A100). |
 | G3 on the A100 (>= 1.8x the hybrid in-run step; matching <= 15%; G1 gap; TF32; EBOPs share at b32) | **deferred to Polaris** | `bash polaris/submit.sh 17_g3_step.pbs`; no Polaris access in this session. G1 stays OPEN. |
 | Real-data smoke and resume on the A100 | **deferred to Polaris** | `bash polaris/submit.sh 16_jax_smoke.pbs` (S6a open issue 3: GPU resume within `--rtol` 1e-3, bitwise count reported). |
-| Lint | pass | `prek run --files` on every changed file. |
+| Lint | pass (fix round) | At `1aaf041` this row was wrong: ruff 0.13.0 `--preview` (the `.pre-commit-config.yaml` rev and args) reported E501 at `polaris/16_jax_smoke.py:67` and `ruff format --check` would reformat it (reproduced on `git show 1aaf041:polaris/16_jax_smoke.py`). Fixed; `prek run --files` and `uvx ruff@0.13.0 check --preview` / `format --check` pass on every file of the fix round. |
+
+## Fix round (review of `1aaf041`)
+
+Each reviewer issue was checked before it was fixed. Commits `c4d0dca` (driver), `4b4e3ec` (command line),
+`d104d44` (Polaris scripts) and the docs commit.
+
+| Issue | Verified | Fix and evidence |
+|---|---|---|
+| (major) No test of the val-metric wiring (`event_valid`, pooled) | yes: R1/R6/R11 survived the first-round suite | New driver test (gate row "Metrics"); K13, K14 killed. |
+| Lint claim false for `16_jax_smoke.py` | yes (E501 at 67, `format --check`) | Wrapped; Lint row corrected. |
+| BetaPID / train columns lost after a mid-epoch resume; header fixed at the first row | yes (by reading `meta` / `CsvLog`) | `meta()` stores `epoch_logs` / `train_logs`, `restore` reads them; `CsvLog` adds columns for new keys (deviation 12). `test_resume_continues_bit_for_bit` now compares every non-`time/` column of every `steps.csv` / `metrics.csv` row: K20 (logs not restored) fails 3 of 4 positions (the epoch-checkpoint position needs no logs), K24 (fixed header) killed by `test_csv_log_grows_its_header`. |
+| Untested log cadence, logged LR, bit counts over non-trainable variables, `check_val_every_n_epoch`, matmul precision of `_val` / `_tail` | yes: R2/R3/R5/R8/R9 survived | `test_log_cadence_lr_bits_val_interval_and_precision` (log every 3 steps across the 4-step epochs, validation every 2nd epoch): logged steps [3, 6], `train/lr` = schedule at `(step - 1) * k` (control: next update's LR differs), `bits_*_n` = trainable + non-trainable counts (non-trainable quantizer variables exist), one val row (epoch 1), every `dot_general` of the val and tail programs HIGHEST. K15-K19 killed. |
+| G3 compile count underestimated; hybrid arms run last | yes: ~16 programs, not ~9 | `--jobs` order kept; default gate set first (`jax-prod:32`, `hybrid:32`, `hybrid:16`, `jax-match:32`, `jax-prod:16`: 6 JAX programs); `17_g3_step.pbs` submits the gate set, `G3_JOBS=jax-g1:32,jax-precision:32` the diagnostics (~10 programs) as a second job. |
+| Hybrid peak memory read in the wrong process | yes | The hybrid child (`13_step_time_fit.py` run through `runpy`) prints `torch.cuda.max_memory_allocated()` at exit; parsed into `peak_dev_gb` (None on CPU: the line is `-1`; seen in `g3_tiny.json`). |
+| `meta()` (device sync) on every optimizer step | yes | Built only when a step checkpoint is due. |
+| Resume with another `--seed`; `run.json` / `config.yaml` overwritten | yes | `restore` refuses another seed (`check_seed=False` for `test`); later processes write `run-r<n>.json` / `config-r<n>.yaml`. K23, K26 killed. |
+| `config.yaml` without the CLI overrides | yes (measured by the reviewer; `apply_overrides` leaves `rc.raw`) | `cli.effective_raw` writes the data, trainer, seed and step-checkpoint options in; `test_saved_config_holds_the_command_line_options` reloads it to run 1's data / checkpoint / trainer settings and model hash (control: the fixture differs in `num_workers` and the step callback). K25 killed. |
+| Stale `.tmp` after a kill; duplicated CSV rows on a same-directory resume | yes | `Trainer._managers` removes `ckpts/.*.tmp`; `fit` after `restore` keeps CSV rows with step <= the checkpoint's and epochs < its data-position epoch (deviation 13). `test_resume_in_the_same_run_directory` (copy of run A + a stale temporary, resume at step 6): 12 step rows equal to A's, 3 epoch rows equal, temporary gone, state bitwise. K21, K22 killed. CLI: `--resume last` in a copy of run 1 replaces, not repeats, the epoch-2 row. |
+| `16_jax_smoke.py` assumes a step file at the final step | yes | Final files from each run's `last.json`; new check `resume_same_final_step`. |
+| G3 verdict at b16 only when the hybrid OOMs at b32 | yes | Records `substitution` and reports `per_event_jax_b32_vs_hybrid_b16`. Checked on synthetic results: hybrid b32 OOM -> decided at 16 with both fields; with a hybrid b32 result neither field appears. |
+| Matching share measured with EBOPs on every step | yes | `jax-match` uses the config's period: shares of on and off micro-batches and of the production mix (1 on : `every - 1` off); the gate uses the mix. Tiny CPU: on 0.154, off 0.134, mix 0.137 (not A100 evidence). |
+| GPU resume may drift past `--rtol` | plausible | `16_jax_smoke.pbs` exports `XLA_FLAGS=--xla_gpu_deterministic_ops=true` (`SMOKE_XLA_FLAGS=` drops it). The flag is in jaxlib 0.11.2 (`libjax_common.dylib`), and the CPU build accepts it, whereas an unknown flag (`--xla_gpu_bogus_flag`) aborts with "Unknown flag in XLA_FLAGS". The pass still needs only `--rtol`; `resume_bitwise` is reported. |
+| Evidence JSONs are git-ignored | yes (`.gitignore:8-9`) | `smoke_tiny.json`, `g3_tiny.json`, `val_loss_probe.out` added with `git add -f` (re-run on the fix-round code). |
+| Per-term `float()` syncs in `validate` / `_log_step` | yes | One `jax.device_get` per val batch / logged row. |
+| `save_last` only on the step manager; "Lightning would write last.ckpt" | **no** (push back) | hepattn's `Checkpoint.setup` sets `self.save_last = False` (`src/hepattn/callbacks/checkpoint.py:13-15`), so the hybrid writes no `last.ckpt` with only that callback either, and `config._checkpoint_callback` already reads it as `save_last=False`. No code change: `--resume last` now says that a step callback is needed and points to epoch checkpoint paths; KERAS_NATIVE.md says the same. |
+
+Tiny local re-runs on the fix-round code (CPU, dummy data): `16_jax_smoke.py --tiny` (with the GPU determinism
+flag set) SMOKE-PASS, all 8 checks true, resume bitwise in 2285 of 2285 arrays; `17_g3_step.py --sweep --tiny --iters
+40`: all 7 jobs, in the new order, with no error (`S6b_evidence/{smoke_tiny,g3_tiny}.json`).
 
 ## Test runs and mutants
 
 - `tests/keras_native/test_loop.py` + `test_cli.py`: 25 + 4 tests, all passed in the full-suite run at `14a941a`.
+  Fix round at `d104d44`: `test_loop.py` 29, `test_cli.py` 6, with `test_import_hygiene.py` and `test_config.py`: 113
+  passed, 0 failed (8 min 27 s). The rest of the native suite was not re-run (the fix round changed only `loop.py`,
+  `cli.py`, their tests and the Polaris scripts).
+- Fix-round mutants (`S6b_mutations.py`, scratch copies, appended to `S6b_evidence/mutations.log`): K0b (no mutant)
+  9 passed; K13-K26 14 / 14 killed (K13-K24 in `test_loop.py`, K25-K26 in `test_cli.py`).
 - Mutants (`S6b_mutations.py`, scratch copies, log `S6b_evidence/mutations.log`): K0 (none) 12 passed; K1-K12 12 / 12
   killed (each by the test named in the gate table).
 - Full native suite at `14a941a` (`env -u KERAS_BACKEND PYTHONPATH=$PWD/src .venv-jax/bin/python -m pytest tests/keras_native`):
@@ -143,6 +177,12 @@ ran locally at tiny sizes only.
 10. Changed one line of S5's `optim.py` (decision 3) and added files outside the listed ones: `polaris/jax_common.py`,
     `tests/keras_native/s6b_utils.py`, `tests/keras_native/s6b_fixtures/`, the `S6b_*` evidence files.
 11. WORKLOG.hgq.md is in the `hepattn` main tree, which must not be modified; not updated.
+12. (fix round) `metrics.csv` / `steps.csv` (`CsvLog`): a row with new keys rewrites the file with the new columns
+    appended; the hybrid `MetricsCsvWriter` fixes the header at its first row. Lightning's `callback_metrics` holds
+    the train values at every validation, the driver only after a logged step, so a fixed header could drop them.
+13. (fix round) A process that resumes into its own run directory drops the CSV rows after the checkpoint (steps >
+    the checkpoint's step; epochs >= its data-position epoch) and removes `ckpts/.*.tmp`; it writes
+    `config-r<n>.yaml` / `run-r<n>.json` next to the first run's files. A resume with another seed is refused.
 
 ## Open issues
 

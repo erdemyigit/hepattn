@@ -1,0 +1,2 @@
+{'returned (backpropagated)': 12.0, 'val/final_classification_object_ce': 2.0, 'val/final_mask_mask_bce': 3.0, 'val/final_loss': 5.0, 'val/loss': 5.0, 'val/quant_ebops_loss': 7.0}
+val/loss = task loss only; the quant term is logged separately and only added to the returned value
