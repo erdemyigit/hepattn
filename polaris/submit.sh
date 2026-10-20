@@ -51,7 +51,8 @@ case "$BASE" in
   15_g2_forward.pbs)    DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
   # 2 driver runs (train + resume) at production shape, each compiling 3 programs (cache hits on the resume)
   16_jax_smoke.pbs)     DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
-  # 5 JAX jobs (~9 programs) + 2 hybrid Lightning runs at production shape
+  # gate (default G3_JOBS): 3 JAX jobs (6 programs) + 2 hybrid Lightning runs; the diagnostics (G3_JOBS=jax-g1:32,
+  # jax-precision:32: ~10 programs at ~2 min each on an A100) need their own submission within the 1 h debug walltime
   17_g3_step.pbs)       DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
   *)            DEF_QUEUE="${QUEUE_DEBUG:-debug}";      DEF_WALL="${WALLTIME_SMOKE:-00:20:00}" ;;
 esac

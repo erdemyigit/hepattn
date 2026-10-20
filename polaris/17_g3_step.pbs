@@ -14,11 +14,15 @@
 # Gate G3 (docs/hgq/KERAS_JAX_PLAN.md section 4, S5): the full native train step (matching + losses + optimizer)
 # against the hybrid's in-run step (13_step_time.pbs pattern), both fp32 on one A100 with the generated config's
 # accumulation 4 and PeriodicEBOPs every 8, at batches 32 and 16 (each job its own process: an OOM is recorded).
-# JAX jobs first: jax-prod (production step, EBOPs share, matching callback time), jax-g1 (TrainStep None+donate /
-# None+no donation / Keras train_on_batch: the G1 gap; profiled if the donating step is slower), jax-precision
-# ("highest" vs "default"/TF32: outputs, prediction flips, loss trajectories, step time), jax-match (matching share,
-# gate <= 15%); then the hybrid. Pass: hybrid / jax-prod median >= 1.8 at batch 32.
-# Results: logs/g3_<jobid>.json, written after every job (polaris/17_g3_step.py verdict()).
+# Two submissions (one 1 h debug job cannot hold all ~16 compiled programs at ~2 min each plus the Lightning runs):
+#   bash polaris/submit.sh 17_g3_step.pbs                                          # the gate (default G3_JOBS)
+#   G3_JOBS=jax-g1:32,jax-precision:32 bash polaris/submit.sh 17_g3_step.pbs        # the G1 gap and TF32 diagnostics
+# Gate order: jax-prod:32 (production step, EBOPs share, matching callback time; 2 programs), hybrid:32 and hybrid:16
+# (the denominators), jax-match:32 (matching share at the production EBOPs period, gate <= 15%; 2 programs),
+# jax-prod:16 (2 programs). Diagnostics: jax-g1 (TrainStep None+donate / None+no donation / Keras train_on_batch: 3
+# programs, 4 with the profile), jax-precision ("highest" vs "default"/TF32: 2 predict + 4 train programs).
+# Pass: hybrid / jax-prod median >= 1.8 at batch 32 (at 16 with the substitution recorded, plus jax b32 vs hybrid b16
+# per event, if the hybrid OOMs at 32). Results: logs/g3_<jobid>.json, written after every job (verdict()).
 #
 # ONE-TIME SETUP on a login node (compute nodes may not reach PyPI). .venv-jax is the env of 14_backend_spike.pbs;
 # this adds what the keras_native suite needs (the S1 set of docs/hgq/KERAS_NATIVE.md) with the CUDA 12 jax and a
@@ -62,6 +66,6 @@ G3_DATA_FILE="${G3_DATA_FILE-$DATA_ROOT/val_clic_fix.root}"
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$REPO/src" "$REPO/.venv-jax/bin/python" polaris/17_g3_step.py --sweep \
   --jax-python "$REPO/.venv-jax/bin/python" --torch-python "$REPO/.venv/bin/python" \
   --data-file "$G3_DATA_FILE" --data-dir "$DATA_ROOT" --profile-dir "logs/g3_profile_${PBS_JOBID:-local}" \
-  --jobs "${G3_JOBS:-jax-prod:32,jax-prod:16,jax-g1:32,jax-precision:32,jax-match:32,hybrid:32,hybrid:16}" \
+  --jobs "${G3_JOBS:-jax-prod:32,hybrid:32,hybrid:16,jax-match:32,jax-prod:16}" \
   --out "logs/g3_${PBS_JOBID:-local}.json" ${G3_ARGS:-}
 echo "G3-EXIT-$?"

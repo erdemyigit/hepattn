@@ -2,7 +2,10 @@
 
 Both arms build the org model from the config ``polaris/03_make_config.py`` generates with ``HGQ_PRECISION=32
 HGQ_DEVICES=1`` (fp32, one GPU, accumulation 4, PeriodicEBOPs every 8, BetaPID). Each job runs in its own process
-(OOM at batch 32 is recorded, not fatal); the JAX jobs run first and the JSON is saved after every job.
+(OOM at batch 32 is recorded, not fatal), in ``--jobs`` order, and the JSON is saved after every job. The default order
+puts the gate first (``jax-prod:32``, then the hybrid denominators, then ``jax-match`` and ``jax-prod:16``); the
+diagnostics ``jax-g1`` and ``jax-precision`` (about 10 more compiled programs at ~2 min each on an A100) go in a second
+submission (``17_g3_step.pbs``: ``G3_JOBS``), so the hybrid arms are not cut off by the 1 h walltime.
 
 Jobs (``--job``):
   jax-prod       ``TrainStep(matmul_precision="highest", donate=True)`` with the config's accumulation and EBOPs period:
@@ -17,13 +20,16 @@ Jobs (``--job``):
                  step is slower than ``train_on_batch``, both are traced with ``jax.profiler`` (``--profile-dir``).
   jax-precision  "highest" vs JAX "default" (TF32 on an A100): forward output differences and prediction flips at the
                  initial state, and the loss trajectories of both from the same state over the same batches.
-  jax-match      The matching share: the production step with EBOPs on every step, with the host matching, and with
-                 an identity assignment and no callback (the costs are still computed and kept live).
+  jax-match      The matching share: the production step (the config's accumulation and EBOPs period) with the host
+                 matching, and with an identity assignment and no callback (the costs are still computed and kept
+                 live). Shares of the EBOPs-on and -off micro-batches and of the production mix (one on in ``every``).
   hybrid         ``polaris/13_step_time_fit.py`` (Lightning fit of ``main_hgq`` with ``StepTimer``) on the same
-                 generated config: the hybrid's in-run micro-batch time.
+                 generated config: the hybrid's in-run micro-batch time, and its peak CUDA memory (printed by the child
+                 process at exit).
 
-G3 passes when hybrid median / jax-prod median >= 1.8 at batch 32 (if the hybrid OOMs at batch 32, the batch 16 ratio is
-reported instead and the substitution recorded) and the matching share is <= 15% of the step.
+G3 passes when hybrid median / jax-prod median >= 1.8 at batch 32 and the production matching share is <= 15% of the
+step. If the hybrid has no batch 32 result (G1 and G2 saw it OOM there), the verdict decides at batch 16, records the
+substitution, and also reports the per-event comparison jax b32 vs hybrid b16 (ms / event).
 
 Local check at tiny sizes (CPU, dummy events): ``python polaris/17_g3_step.py --sweep --tiny --out g3_local.json``.
 """
@@ -47,6 +53,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from jax_common import REPO, generate_config, median_ms, quantiles_ms, shrink_config
 
 JOBS = ("jax-prod", "jax-g1", "jax-precision", "jax-match", "hybrid")
+GATE_JOBS = "jax-prod:32,hybrid:32,hybrid:16,jax-match:32,jax-prod:16"
+DIAGNOSTIC_JOBS = "jax-g1:32,jax-precision:32"
+DEFAULT_JOBS = f"{GATE_JOBS},{DIAGNOSTIC_JOBS}"
 TINY = {"dim": 16, "heads": 2, "enc_layers": 1, "dec_layers": 1, "linformer_k": 8, "nodes": 64, "queries": 16}
 G3_RATIO, MATCH_SHARE = 1.8, 0.15
 
@@ -69,7 +78,7 @@ def parse_args(argv=None):
     p.add_argument("--seed", type=int, default=0)
     # sweep
     p.add_argument("--sweep", action="store_true")
-    p.add_argument("--jobs", default="jax-prod:32,jax-prod:16,jax-g1:32,jax-precision:32,jax-match:32,hybrid:32,hybrid:16")
+    p.add_argument("--jobs", default=DEFAULT_JOBS)
     p.add_argument("--jax-python", default=sys.executable)
     p.add_argument("--torch-python", default=sys.executable)
     p.add_argument("--out", default="")
@@ -105,7 +114,6 @@ def run_sweep(args) -> None:
         out.write_text(json.dumps({"args": vars(args), "results": results, "verdict": verdict(results)}, indent=1, default=str))
 
     plan = [(job, int(b)) for job, b in (item.split(":") for item in args.jobs.split(","))]
-    plan.sort(key=lambda jb: jb[0] == "hybrid")  # JAX first, order otherwise kept
     for job, batch in plan:
         config = Path(args.config) if args.config else make_config(args, out.parent, batch)
         if args.config:  # one given config: rewrite its batch size
@@ -186,8 +194,19 @@ def verdict(results) -> dict:
     decided = out.get("b32") or out.get("b16")
     out["decided_at"] = 32 if "b32" in out else (16 if "b16" in out else None)
     out["g3_speed_pass"] = None if decided is None else decided["ratio_median"] >= G3_RATIO
+    if out["decided_at"] == 16:
+        out["substitution"] = "no hybrid batch 32 result: decided at batch 16 (the plan's criterion is at batch 32)"
+    prod32, hyb32, hyb16 = _get(results, "jax-prod", 32), _get(results, "hybrid", 32), _get(results, "hybrid", 16)
+    if prod32 and hyb16 and not hyb32:
+        # the throughput question when the hybrid cannot run batch 32: each arm at its largest batch, per event
+        out["per_event_jax_b32_vs_hybrid_b16"] = {
+            "jax_ms_per_event": prod32["median_ms"] / 32,
+            "hybrid_ms_per_event": hyb16["median_ms"] / 16,
+            "ratio": (hyb16["median_ms"] / 16) / (prod32["median_ms"] / 32),
+        }
     match = _get(results, "jax-match", 32) or _get(results, "jax-match", 16)
     out["matching_share"] = None if match is None else match["matching_share"]
+    out["matching_share_ebops_on_off"] = None if match is None else (match.get("matching_share_ebops_on"), match.get("matching_share_ebops_off"))
     out["matching_pass"] = None if match is None else match["matching_share"] <= MATCH_SHARE
     g1 = _get(results, "jax-g1", 32)
     if g1:
@@ -416,7 +435,11 @@ def job_precision(args, rc) -> dict:
 
 
 def job_match(args, rc) -> dict:
-    """Matching share = 1 - t(no callback) / t(host matching), both "highest", EBOPs on every step."""
+    """Matching share = 1 - t(no callback) / t(host matching), both "highest", at the config's EBOPs period.
+
+    ``matching_share`` (the gate) is of the production mix: medians of the EBOPs-on and -off micro-batches weighted
+    1 : (every - 1), as ``loop`` runs them (all micro-batches of every ``every``-th optimizer step carry the term).
+    """
     import jax
     import jax.numpy as jnp
 
@@ -435,20 +458,40 @@ def job_match(args, rc) -> dict:
         losses = model_losses(permute_outputs(outputs, idx, specs), targets, specs)
         return total_loss(losses), losses
 
+    k, every = rc.optimizer.accumulate_grad_batches, rc.quant.ebops_every_n_steps
     model, optimizer = build(args, rc)
-    res = {}
+    res, med = {"accumulate": k, "ebops_every": every}, {}
     for name, loss_fn in (("host_matching", None), ("no_callback", no_match)):
         steps = make_steps(rc, model, optimizer, loss_fn=loss_fn)
         state = steps.set_beta(steps.init_state(), beta_of(rc))
-        state, times, _, _ = time_steps(steps, state, args.batches, n_warm=args.warmup, n_iter=args.iters, ebops_fn=lambda _i: True)
-        res[name] = summary(times)
+        state, times, flags, _ = time_steps(
+            steps, state, args.batches, n_warm=args.warmup, n_iter=args.iters, ebops_fn=lambda i: (i // k) % every == 0
+        )
+        on = [t for t, f in zip(times, flags, strict=True) if f]
+        off = [t for t, f in zip(times, flags, strict=True) if not f]
+        res[name] = {**summary(times), "ebops_on": summary(on) if on else None, "ebops_off": summary(off) if off else None}
+        med[name] = (median_ms(on) if on else None, median_ms(off) if off else None)
         del steps, state
-    res["matching_share"] = 1 - res["no_callback"]["median_ms"] / res["host_matching"]["median_ms"]
+    (m_on, m_off), (n_on, n_off) = med["host_matching"], med["no_callback"]
+    res["matching_share_ebops_on"] = None if m_on is None else 1 - n_on / m_on
+    res["matching_share_ebops_off"] = None if m_off is None else 1 - n_off / m_off
+    if m_on is not None and m_off is not None:
+        res["matching_share"] = 1 - (n_on + (every - 1) * n_off) / (m_on + (every - 1) * m_off)
+    else:  # every == 1, or too few iterations for both kinds: the plain medians
+        res["matching_share"] = 1 - res["no_callback"]["median_ms"] / res["host_matching"]["median_ms"]
     return res
 
 
 # --------------------------------------------------------------------------------------------- hybrid job
 STEP_RE = re.compile(r"\[STEP-TIME rank=0\] batches=(\d+) warmup=(\d+) median=([\d.]+)s mean=([\d.]+)s p10=([\d.]+)s first=([\d.]+)s")
+PEAK_RE = re.compile(r"^\[G3-PEAK-CUDA-BYTES\] (-?\d+)$")
+# runs 13_step_time_fit.py as __main__ and prints the child's own peak CUDA memory at exit (-1 without CUDA)
+HYBRID_CHILD = (
+    "import atexit, runpy, sys, torch\n"
+    "atexit.register(lambda: print(f'[G3-PEAK-CUDA-BYTES] {torch.cuda.max_memory_allocated() if torch.cuda.is_available() else -1}', flush=True))\n"
+    "sys.argv = sys.argv[1:]\n"
+    "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+)
 
 
 def job_hybrid(args) -> dict:
@@ -459,6 +502,8 @@ def job_hybrid(args) -> dict:
     """
     cmd = [
         sys.executable,
+        "-c",
+        HYBRID_CHILD,
         str(REPO / "polaris/13_step_time_fit.py"),
         "fit",
         "--config",
@@ -494,12 +539,9 @@ def job_hybrid(args) -> dict:
         "p10_ms": float(p10) * 1e3,
         "first_s": float(first),
     }
-    try:
-        import torch
-
-        res["peak_dev_gb_this_process"] = torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else None
-    except ImportError:
-        pass
+    peak = next((int(m.group(1)) for ln in reversed(cp.stdout.splitlines()) if (m := PEAK_RE.match(ln))), None)
+    res["peak_dev_gb"] = None if peak is None or peak < 0 else peak / 2**30
+    res["peak_line_seen"] = peak is not None  # the child printed its line (-1 without CUDA)
     return res
 
 

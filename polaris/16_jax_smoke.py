@@ -10,7 +10,8 @@
 4. Checks (``RESULT`` / ``--out`` JSON, written after every stage): the logged train loss falls (mean of the last
    ``--window`` logged steps below the first), the val loss falls from the first to the last epoch, the quantizer
    variables move (first vs final checkpoint), ``metrics.csv`` / ``steps.csv`` exist, B's final state equals A's within
-   ``--rtol`` (bitwise on CPU; GPU determinism is not assumed, S6a open issue 3: the bitwise count is reported), B's
+   ``--rtol`` (bitwise on CPU; on the GPU the .pbs sets ``XLA_FLAGS=--xla_gpu_deterministic_ops=true``, so bitwise is
+   expected there too, but the pass needs only ``--rtol``; ``resume_bitwise`` and the bitwise count are reported), B's
    logged losses after the resume equal A's within the same tolerance, and B's compiles hit the cache.
 
     python polaris/16_jax_smoke.py --run-root logs/jax_smoke --data-dir $DATA_ROOT --out logs/jax_smoke.json
@@ -64,7 +65,13 @@ def make_config(args, root: Path) -> Path:
     if args.config:
         return Path(args.config)
     # CKPT_DIR is not used by the native driver (it writes under --run-dir); set so nothing lands in the repo
-    env = {"HGQ_PRECISION": "32", "HGQ_DEVICES": "1", "HGQ_BATCH": str(args.batch), "HGQ_ACCUM": str(args.accum), "CKPT_DIR": str(root / "unused_ckpts")}
+    env = {
+        "HGQ_PRECISION": "32",
+        "HGQ_DEVICES": "1",
+        "HGQ_BATCH": str(args.batch),
+        "HGQ_ACCUM": str(args.accum),
+        "CKPT_DIR": str(root / "unused_ckpts"),
+    }
     if args.data_dir:
         env["DATA_DIR"] = args.data_dir
     path = generate_config(root / "config.yaml", **env)
@@ -174,10 +181,12 @@ def main(args) -> int:
 
     steps_a, epochs_a = rows(run_a / "steps.csv"), rows(run_a / "metrics.csv")
     losses = [r["train/loss"] for r in steps_a]
-    final = f"step-{result['run_a']['global_step']:09d}.npz"
+    # the final state of each run: its ``last`` pointer (a step file only if the last step is a multiple of --ckpt-every)
+    final_a, final_b = (run / "ckpts" / json.loads((run / "ckpts" / "last.json").read_text())["file"] for run in (run_a, run_b))
+    result.update(final_a=str(final_a), final_b=str(final_b), same_final_step=result["run_a"]["global_step"] == result["run_b"]["global_step"])
     first = min((run_a / "ckpts").glob("step-*.npz"))
-    moved = [k for k, v in compare_keys(arrays(first), arrays(run_a / "ckpts" / final))]
-    state = compare(arrays(run_a / "ckpts" / final), arrays(run_b / "ckpts" / final))
+    moved = [k for k, v in compare_keys(arrays(first), arrays(final_a))]
+    state = compare(arrays(final_a), arrays(final_b))
     by_step = {r["step"]: r for r in steps_a}
     resumed_rows = rows(run_b / "steps.csv")
     loss_rel = max(
@@ -188,6 +197,7 @@ def main(args) -> int:
         "val_loss_falls": epochs_a[-1]["val/loss"] < epochs_a[0]["val/loss"],
         "quantizers_move": len(moved) > 0,
         "metrics_csv": len(epochs_a) == args.epochs and len(steps_a) > 0,
+        "resume_same_final_step": result["same_final_step"],
         "resume_state_within_rtol": state["max_rel"] <= args.rtol,
         "resume_losses_within_rtol": loss_rel <= args.rtol,
         "resume_hits_cache": result["run_b"]["cache_events"]["cache_hits"] > 0,
@@ -201,6 +211,8 @@ def main(args) -> int:
         ebops_by_epoch=[r.get("val/ebops") for r in epochs_a],
         beta_by_epoch=[r.get("train/quant_beta") for r in epochs_a],
         resume_state=state,
+        resume_bitwise=state["bitwise_equal"] == state["arrays"],
+        xla_flags=os.environ.get("XLA_FLAGS", ""),
         resume_loss_max_rel=loss_rel,
         checks=checks,
         passed=all(checks.values()),
