@@ -28,7 +28,7 @@ import h5py
 import numpy as np
 import pytest
 
-from hepattn.keras_native import loop
+from hepattn.keras_native import cli, loop
 from hepattn.keras_native.cli import apply_overrides
 from hepattn.keras_native.config import load_config
 
@@ -95,10 +95,14 @@ def test_resume_in_a_new_process_is_bitwise_and_hits_the_compilation_cache(runs)
     assert [r["step"] for r in b] == [7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
     assert all(r["train/loss"] == a[r["step"]]["train/loss"] for r in b)
     assert second["resumed_from"].endswith("step-000000006.npz")
-    # the train (EBOPs on / off) and val programs come from the cache written by run 1; run 1 started with none
+    # the train (EBOPs on / off) and val programs come from the cache written by run 1; run 1 started with none.
+    # No check on misses: JAX writes only programs that compile for >= 1 s, and a small program (bits, tail) can cross
+    # that line between runs under load (measured: 1 miss in a loaded run).
     assert first["cache_events"]["cache_hits"] == 0
     assert second["cache_events"]["cache_hits"] >= 3
-    assert second["cache_events"]["cache_misses"] == 0
+    entries = [p.name for p in (base / "jax_cache").iterdir()]
+    assert sum(n.startswith("jit__train_impl") for n in entries) >= 2
+    assert sum(n.startswith("jit__val_impl") for n in entries) >= 1
 
 
 def test_test_command_writes_the_prediction_file(runs):
@@ -148,3 +152,37 @@ def test_saved_config_holds_the_command_line_options(runs):
     assert plain.data.num_workers != saved.data.num_workers
     assert plain.checkpoint.step != saved.checkpoint.step
     assert dataclasses.replace(saved.checkpoint.step, every_n_train_steps=2, save_top_k=-1) == saved.checkpoint.step
+
+
+class _StopError(Exception):
+    pass
+
+
+def test_command_line_options_reach_the_data_and_the_trainer(monkeypatch, tmp_path):
+    """``fit --seed 7 --limit-val-batches 1 --max-steps 5``: the train and val sources and the ``Trainer`` settings get
+    them (in process; the trainer is a spy that stops the command). Control: without the options, the YAML seed 42 and
+    the defaults.
+    """
+    seen = []
+
+    class Source:
+        num_batches = 8
+
+        def epoch(self, *_):
+            return iter([None])
+
+    def factory(rc, split, *, seed, dummy_data):  # noqa: ARG001
+        seen.append((split, seed))
+        return Source()
+
+    def spy(rc, settings, **_):  # noqa: ARG001
+        seen.append(("trainer", settings.seed, settings.limit_val_batches, settings.max_steps))
+        raise _StopError
+
+    monkeypatch.setattr(loop, "Trainer", spy)
+    options = ["--seed", 7, "--limit-val-batches", 1, "--max-steps", 5]
+    for i, extra in enumerate((options, [])):
+        args = cli.build_parser().parse_args(list(map(str, ["fit", "--config", TINY, "--dummy-data", "--run-dir", tmp_path / str(i), *extra])))
+        with pytest.raises(_StopError):
+            cli.fit(args, factory)
+    assert seen == [("train", 7), ("val", 7), ("trainer", 7, 1, 5), ("train", 42), ("val", 42), ("trainer", 42, None, -1)]
