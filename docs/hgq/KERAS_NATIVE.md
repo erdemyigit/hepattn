@@ -61,10 +61,10 @@ The two local venvs were installed from the equivalent `git+https://github.com/c
 URL, so `keras_native_env.txt` records that form; the command above freezes as the archive URL. Both give the same
 `masked_linformer.py` (`cmp` against the `dce2e15` checkout, R0 review).
 
-On Polaris (one time; the login node needs outbound HTTPS to GitHub). **Valid only after `keras-jax` is
-fast-forwarded to `rt/integration` and pushed (after R5).** Until then `origin/keras-jax` (`197ede2`) has neither
-the org merge nor masked-linformer in `uv.lock`: `uv sync --locked` succeeds there but gives an env that cannot import
-org attention. To test earlier, push a branch that contains the merge and set `KJ_BRANCH` to it.
+On Polaris (one time; the login node needs outbound HTTPS to GitHub). `origin/keras-jax` is at `826bc0a` (after R5):
+it has the org merge and masked-linformer in `uv.lock`, but not S5 / S6 (the driver and the `16_jax_smoke` /
+`17_g3_step` scripts; nothing after `826bc0a` is pushed). The Polaris jobs of S6b need a pushed branch that holds them;
+set `KJ_BRANCH` to it.
 
 ```bash
 # Hybrid env: a separate clone, because running jobs use $WORK_ROOT/hepattn on keras-hgq2 (01_setup_env.sh:38-41).
@@ -156,8 +156,14 @@ Polaris checks of the driver (one A100 each, 1 h debug queue):
 ```bash
 bash polaris/submit.sh 16_jax_smoke.pbs                                     # real-data smoke + resume
 bash polaris/submit.sh 17_g3_step.pbs                                       # gate G3: jax-prod, hybrid, jax-match
-G3_JOBS=jax-g1:32,jax-precision:32 bash polaris/submit.sh 17_g3_step.pbs    # the G1 gap and TF32 (second job)
+G3_JOBS=jax-g1:32,jax-precision:32,hybrid-tf32:16 bash polaris/submit.sh 17_g3_step.pbs   # G1 gap, TF32 (2nd job)
 ```
+
+Both G3 arms run full fp32 matmuls: jax-prod at "highest", the hybrid with `--matmul_precision highest` (the hybrid
+CLI's default "high" is TF32 on an A100; `hybrid-tf32` measures that production setting next to it). `qsub` passes no
+environment to a job, so `submit.sh` writes the set knobs (`G3_JOBS`, `G3_ARGS`, `G3_DATA_FILE`, `SMOKE_ARGS`,
+`SMOKE_XLA_FLAGS`, `JAX_COMPILATION_CACHE_DIR`) to `logs/<script>.<time>.<pid>.env` and gives the job only that path
+(`-v SUBMIT_ENV_FILE=...`); a bare `qsub` runs the defaults.
 
 The DataLoader workers (`data.num_workers`, 8 in the Polaris config) are spawned; keep `main_jax` as the entry point
 (its `__main__` guard is what a spawned worker re-imports). What differs from the Lightning run is listed in

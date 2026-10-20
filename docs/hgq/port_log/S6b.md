@@ -104,7 +104,7 @@ ran locally at tiny sizes only.
 | CLI end to end from a clean shell: checkpoints, metrics CSV, resumable state, loss decreases, quantizers move | pass | `test_cli.py` (4 passed): env = `PATH`, `HOME`, `TMPDIR`, `PYTHONPATH` only; `fit` with 2 spawned workers -> 6 step + 3 epoch checkpoints, `steps.csv` 12 rows, `metrics.csv` 3 rows, `summary.json`; mean train loss of the last 4 rows < first 4, val loss epoch 2 < epoch 0, > 10 trainable quantizer arrays differ between steps 2 and 12, `train/bits_b_mean` changes; resume in a new process bitwise with 3 cache hits (control: run 1 had 0); `test` command. `test_run_a_is_non_vacuous`: every state group changes, beta changes after the warm-up. |
 | PeriodicEBOPs / BetaPID / BetaScheduler wiring | pass | `test_periodic_ebops_follows_the_optimizer_step` (active rows = steps 1, 3, 5, ...; a micro-step counter would log 0 on every row; on-step HGQ2 term > 5x off-step), `test_beta_pid_steps_each_epoch_on_the_latest_readout` (an independent controller fed the logged read-outs gives the logged betas; control: without a read-out the PID would hold init_beta), `test_beta_scheduler_ramps_at_the_optimizer_step` (control: the next step's ramp differs). Mutants K1 (micro-step period), K9 (ramp one step late) killed. |
 | Checkpoint policy, resume checkpoint kept, `total_steps` guard, refusals | pass | `test_checkpoint_policy`, `test_resume_checkpoint_survives_pruning` (top-k 1 keeps the newest and the resume file; K10 killed), `test_stepping_past_total_steps_raises` (K8 killed), `test_restore_refuses_another_schedule_or_model` (control: equal lengths load), `test_non_fp32_precision_is_refused`. |
-| Both Polaris scripts run locally at tiny sizes on dummy data (both G3 arms) | pass | `16_jax_smoke.py --tiny`: SMOKE-PASS, all 7 checks true, resume 2285 / 2285 arrays bitwise, 230 quantizer arrays moved, val loss 22.196 -> 21.912 -> 21.835, resume run 3 cache hits (`S6b_evidence/smoke_tiny.json`). `17_g3_step.py --sweep --tiny --iters 40`: all 7 jobs (jax-prod 32 / 16, jax-g1, jax-precision, jax-match, hybrid 32 / 16) ran with no error and `verdict()` filled every field (`S6b_evidence/g3_tiny.json`; both runs on the committed scripts). The tiny CPU numbers are not G3 evidence (CPU ignores the matmul precision, 1 + 1 layers, dim 16; e.g. its matching share 0.169 and ratio 8.0 say nothing about the A100). |
+| Both Polaris scripts run locally at tiny sizes on dummy data (both G3 arms) | pass | Latest run: fix round 2 (section below; `S6b_evidence/{smoke_tiny,g3_tiny}.json`): `16_jax_smoke.py --tiny` SMOKE-PASS, 8 of 8 checks, resume bitwise; `17_g3_step.py --sweep --tiny --iters 40` all 8 jobs (now with `hybrid-tf32`) with no error, the hybrid at `torch_matmul_precision` "highest" ("high" for `hybrid-tf32`). The tiny CPU numbers are not G3 evidence (CPU ignores the matmul precision, 1 + 1 layers, dim 16, and they move with machine load: matching share 0.137 in fix round 1, see fix round 2). |
 | G3 on the A100 (>= 1.8x the hybrid in-run step; matching <= 15%; G1 gap; TF32; EBOPs share at b32) | **deferred to Polaris** | `bash polaris/submit.sh 17_g3_step.pbs`; no Polaris access in this session. G1 stays OPEN. |
 | Real-data smoke and resume on the A100 | **deferred to Polaris** | `bash polaris/submit.sh 16_jax_smoke.pbs` (S6a open issue 3: GPU resume within `--rtol` 1e-3, bitwise count reported). |
 | Lint | pass (fix round) | At `1aaf041` this row was wrong: ruff 0.13.0 `--preview` (the `.pre-commit-config.yaml` rev and args) reported E501 at `polaris/16_jax_smoke.py:67` and `ruff format --check` would reformat it (reproduced on `git show 1aaf041:polaris/16_jax_smoke.py`). Fixed; `prek run --files` and `uvx ruff@0.13.0 check --preview` / `format --check` pass on every file of the fix round. |
@@ -138,12 +138,39 @@ Tiny local re-runs on the fix-round code (CPU, dummy data): `16_jax_smoke.py --t
 flag set) SMOKE-PASS, all 8 checks true, resume bitwise in 2285 of 2285 arrays; `17_g3_step.py --sweep --tiny --iters
 40`: all 7 jobs, in the new order, with no error (`S6b_evidence/{smoke_tiny,g3_tiny}.json`).
 
+## Fix round 2 (review of `8380d8a`)
+
+Each issue was checked before the fix. Commits `4276ef2` (driver + tests), `dbbfae9` (CLI tests), `70d6f6a` (G3
+precision), `bd6d1ba` (submit.sh) and the docs commit. Mutants K27-K35: `S6b_mutations.py`, log appended to
+`S6b_evidence/mutations.log`.
+
+| Issue | Verified | Fix and evidence |
+|---|---|---|
+| (major) G3 hybrid arm at TF32, labelled fp32 | yes: `hepattn.utils.cli.CLI` defaults `--matmul_precision high` (`src/hepattn/utils/cli.py:54-59`) and calls `torch.set_float32_matmul_precision` (`:113-114`); nothing in `polaris/` set it. Measured: a scratch copy of `17_g3_step.py` without the new option makes the tiny hybrid job report "high" and fail ("used 'high', asked 'highest'"). | `job_hybrid` passes `--matmul_precision highest`; the child prints `torch.get_float32_matmul_precision()` at exit; the job fails on a mismatch and records `torch_matmul_precision`. New diagnostic `hybrid-tf32:16` (CLI default "high", `precision` "tf32") and verdict field `hybrid_tf32_b16`. Tiny CPU: hybrid "highest" 154.8 ms, hybrid-tf32 "high" 149.2 ms at b16 (CPU has no TF32; the values only show the wiring). Earlier hybrid in-run numbers from `13_step_time.pbs` (CLI) were at "high"; G2's hybrid arm (`15_g2_forward.py`, no CLI) ran at torch's default "highest" (torch 2.10.0 `get_float32_matmul_precision()` = "highest", measured). |
+| (major) `G3_JOBS=... bash polaris/submit.sh` never reaches the job | yes: `submit.sh` passes no `-V` / `-v`, and the repo's own notes say jobs get no environment (`polaris/repo_dir.sh:5`). | `submit.sh` writes the set knobs (`G3_JOBS`, `G3_ARGS`, `G3_DATA_FILE`, `SMOKE_ARGS`, `SMOKE_XLA_FLAGS`, `JAX_COMPILATION_CACHE_DIR`) as `export` lines (`printf %q`) to `logs/<script>.<time>.<pid>.env` and passes only `-v SUBMIT_ENV_FILE=<path>`; 16 / 17 source it after `env.sh` and print it. A file, not a `-v` list: `qsub -v` splits at commas, and a comma value needs nested quotes (OpenPBS test `pbs_passing_environment_variable.py`). `S6b_submit_passthrough.sh` with a fake `qsub` (only `-v` variables reach the job; the real `.pbs` lines run): `G3_JOBS` with commas, `G3_ARGS` with spaces, an empty `SMOKE_XLA_FLAGS` (clears `XLA_FLAGS`) and a value with `=`, `,` and `'` arrive intact; no knobs -> defaults. Control: `submit.sh` of `8380d8a` -> `G3_JOBS` UNSET in the job (`S6b_evidence/submit_passthrough.out`). Not run on PBS itself. |
+| (major) No seed test | yes (reviewer mutants; at seed 42 a dropped `set_random_seed` is invisible because `CLICDataset` seeds 42) | `test_seed_sets_the_model_init_and_the_train_order` (seeds 7, 7, 8: equal init and epoch-0 order for one seed, other init and order for another) and `test_command_line_options_reach_the_data_and_the_trainer` (`--seed 7` reaches both sources and the `Trainer` settings; control: no option -> the YAML's 42). K32 (no `set_random_seed`), K33 (`ClicSource` seed fixed at 42), K34 (CLI data seed fixed) killed. |
+| Cache assertion load-sensitive | yes (reasoning: JAX persists only programs compiling >= 1 s) | `cache_misses == 0` dropped; asserts hits >= 3 and >= 2 `jit__train_impl` + >= 1 `jit__val_impl` entries in the cache. The S6b suite passed with the G3 sweep and the smoke running beside it. |
+| Epoch checkpoint after an epoch without validation | yes (Lightning 2.5.2 `_should_save_on_train_epoch_end` returns False when `check_val_every_n_epoch != 1`) | `_on_epoch_end` saves the epoch file only when this epoch validated or `check_val_every_n_epoch == 1` (deviation 9). The cadence test now runs 3 epochs at val every 2: one epoch file, `epoch-001-step-000000008.npz` (the old code also wrote `epoch-002-step-000000012.npz`; K27 killed). |
+| No `max_steps` test | yes | `test_max_steps_stops_inside_an_epoch` (`max_steps` 5, 4 steps per epoch): global step 5, `total_steps` 5, position (1, 2), rows 1-5, LR = the 5-step schedule (control: the 12-step one differs), only the epoch-0 val row, `last` = step 5. K29 (ignored) killed; K30 (no stop inside the epoch) never ends: killed by the 900 s timeout (the unmutated test takes ~90 s). |
+| No `limit_val_batches` test | yes | `test_limit_val_batches_validates_the_first_batches_only`: val/loss = the first batch's task loss (4 real events; control: all 3 batches differ); the CLI test checks `--limit-val-batches 1` reaches the settings. K31, K35 killed. |
+| Bitwidth min / max never compared | yes | The cadence test recomputes `BitwidthMonitor`'s reduction in numpy (min of mins, max of maxes exact; mean of means within 2x the measured 1.915e-6 relative) for the step-12 train row (final state) and the epoch-1 val row (its checkpoint); some min < max (else vacuous). K28 (min -> max) killed. |
+| Stale gate row, old push hash in the docs | yes | Gate row rewritten; plan header and KERAS_NATIVE.md say `origin/keras-jax` = `826bc0a` (after R5: it has the org merge and masked-linformer, not S5 / S6). The historical 2026-10-15 status line keeps `197ede2`. |
+
+Tiny local re-runs (CPU, dummy data) on this code: `16_jax_smoke.py --tiny` with the determinism flag SMOKE-PASS, 8 of
+8 checks, resume bitwise; `17_g3_step.py --sweep --tiny --iters 40` all 8 jobs, no error, b32 ratio 8.42, matching
+share 0.214 (0.137 in fix round 1, 0.634 with the test suite running beside it: the tiny CPU share follows machine load
+and is not G3 evidence).
+
 ## Test runs and mutants
 
 - `tests/keras_native/test_loop.py` + `test_cli.py`: 25 + 4 tests, all passed in the full-suite run at `14a941a`.
   Fix round at `d104d44`: `test_loop.py` 29, `test_cli.py` 6, with `test_import_hygiene.py` and `test_config.py`: 113
   passed, 0 failed (8 min 27 s). The rest of the native suite was not re-run (the fix round changed only `loop.py`,
   `cli.py`, their tests and the Polaris scripts).
+- Fix round 2: `test_loop.py` 32, `test_cli.py` 7, with `test_import_hygiene.py` and `test_config.py`: **117 passed, 0
+  failed** (11 min 0 s, with the G3 sweep and the smoke running beside it). Mutants: K0c (no mutant) 4 passed;
+  K27-K35 9 / 9 killed (K30 by the 900 s timeout). The rest of the native suite was not re-run (only `loop.py`'s epoch
+  checkpoint condition changed in `src/`).
 - Fix-round mutants (`S6b_mutations.py`, scratch copies, appended to `S6b_evidence/mutations.log`): K0b (no mutant)
   9 passed; K13-K26 14 / 14 killed (K13-K24 in `test_loop.py`, K25-K26 in `test_cli.py`).
 - Mutants (`S6b_mutations.py`, scratch copies, log `S6b_evidence/mutations.log`): K0 (none) 12 passed; K1-K12 12 / 12
@@ -173,7 +200,9 @@ flag set) SMOKE-PASS, all 8 checks true, resume bitwise in 2285 of 2285 arrays; 
    `_ebops` then.
 8. The YAML's checkpoint `dirpath` and `MetricsCsvWriter.path` are ignored (decision 13).
 9. Stopping at `max_steps` inside an epoch: no validation (as S6a decision 10 reads Lightning); the epoch checkpoint uses
-   the last val metrics, or is skipped with a warning when none exists (Lightning saves without the monitor).
+   the last val metrics, or is skipped with a warning when none exists (Lightning saves without the monitor). (fix
+   round 2) With `check_val_every_n_epoch != 1` an epoch checkpoint is written only in an epoch that validated, as
+   Lightning's `ModelCheckpoint._should_save_on_train_epoch_end` (lightning 2.5.2) decides.
 10. Changed one line of S5's `optim.py` (decision 3) and added files outside the listed ones: `polaris/jax_common.py`,
     `tests/keras_native/s6b_utils.py`, `tests/keras_native/s6b_fixtures/`, the `S6b_*` evidence files.
 11. WORKLOG.hgq.md is in the `hepattn` main tree, which must not be modified; not updated.
@@ -183,12 +212,18 @@ flag set) SMOKE-PASS, all 8 checks true, resume bitwise in 2285 of 2285 arrays; 
 13. (fix round) A process that resumes into its own run directory drops the CSV rows after the checkpoint (steps >
     the checkpoint's step; epochs >= its data-position epoch) and removes `ckpts/.*.tmp`; it writes
     `config-r<n>.yaml` / `run-r<n>.json` next to the first run's files. A resume with another seed is refused.
+14. (fix round 2) `polaris/submit.sh` passes the job knobs through a file (`-v SUBMIT_ENV_FILE`), not through
+    `qsub -v` lists or `-V`. A bare `qsub` of 16 / 17 runs the defaults.
+15. (fix round 2) G3 has one more diagnostic job, `hybrid-tf32:16` (the hybrid at its CLI default "high"), in the
+    second submission.
 
 ## Open issues
 
-1. **Polaris**: run `16_jax_smoke.pbs` and `17_g3_step.pbs`; record G3 (ratio, matching share, EBOPs share at b32,
-   G1 gap with profiles if the donating step is slower, TF32 effect) in this log and the plan; until then G1 is OPEN and
-   PeriodicEBOPs stays (S5).
+1. **Polaris**: run `bash polaris/submit.sh 16_jax_smoke.pbs`, `bash polaris/submit.sh 17_g3_step.pbs` (the gate) and
+   `G3_JOBS=jax-g1:32,jax-precision:32,hybrid-tf32:16 bash polaris/submit.sh 17_g3_step.pbs` (the diagnostics); the
+   job log prints the knobs it got. Record G3 (ratio, matching share, EBOPs share at b32, G1 gap with profiles if the
+   donating step is slower, TF32 effect on both sides) in this log and the plan; until then G1 is OPEN and
+   PeriodicEBOPs stays (S5). Needs a pushed branch with S5 / S6 (`origin/keras-jax` is `826bc0a`; KERAS_NATIVE.md).
 2. The compilation cache saves the XLA compile only; tracing (CPU tiny: ~6.9 s of the 14.4 s first step) and the eager
    build (21.7 s) remain per process. Measure both on the A100 (`summary.json` `build_s`, `first_step_s`); if the
    build dominates, cache the eager ops (`jax_persistent_cache_min_compile_time_secs=0`) or build from shapes.

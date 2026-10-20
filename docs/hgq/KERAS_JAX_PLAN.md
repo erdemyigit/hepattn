@@ -2,7 +2,7 @@
 
 Status: G1 GO (its trainer gap still OPEN until G3); S1-S4 merged into `keras-jax` on 2026-10-15; retargeted to the org/main float Linformer model (`ac0da8f`)
 on 2026-10-16; S5, S6a, S6b done on 2026-10-20 (G3 and the Polaris smoke not run yet) ([RETARGET_ORG_MAIN.md](RETARGET_ORG_MAIN.md), stages R0-R5; see "Status" below). Originally a proposal that waited for G1.
-Date: 2026-10-14. Branch: `keras-jax` (pushed only up to `197ede2`), worktree `hepattn-keras-jax`.
+Date: 2026-10-14. Branch: `keras-jax` (pushed only up to `826bc0a`, after R5; S5 and S6 are not pushed), worktree `hepattn-keras-jax`.
 Scope: only the CLIC HGQ2 quantization-aware training, evaluation and export path. The other
 experiments (`atlas_muon`, `trackml`, `tide`, ...) and the float torch model stay on torch and Lightning.
 
@@ -23,8 +23,9 @@ measured on Polaris (native fwd + bwd 165.2 ms vs hybrid ~1615 ms at b16, fp32; 
 the production "highest"). **Not run:** **G3** (`polaris/17_g3_step.pbs`: >= 1.8x the hybrid in-run step at b32,
 matching <= 15%; also the G1 gap, TF32 and the EBOPs share at b32) and the real-data smoke
 (`polaris/16_jax_smoke.pbs`). **G1 is not resolved** (the Keras-trainer gap is measured only by G3). Next: the two
-Polaris jobs (G3 in two submissions: the gate set first, then `G3_JOBS=jax-g1:32,jax-precision:32`; S6b.md "Fix
-round"), then S7 (converter, export) and S8 (G4).
+Polaris jobs (G3 in two submissions: the gate set first, then `G3_JOBS=jax-g1:32,jax-precision:32,hybrid-tf32:16`;
+both arms at full fp32 matmuls, the hybrid with `--matmul_precision highest`; S6b.md "Fix round 2"), then S7
+(converter, export) and S8 (G4).
 
 ## Status update (2026-10-16, after the retarget R0-R5)
 

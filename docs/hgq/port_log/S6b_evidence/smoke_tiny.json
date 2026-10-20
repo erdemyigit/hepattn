@@ -1,6 +1,6 @@
 {
  "args": {
-  "run_root": "/private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/s6bfix/smoke",
+  "run_root": "/private/tmp/claude-501/s6b_fix2/smoke",
   "config": "",
   "data_dir": "",
   "tiny": true,
@@ -15,20 +15,20 @@
   "window": 5,
   "rtol": 0.001,
   "num_workers": null,
-  "compile_cache": "/private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/s6bfix/smoke/jax_cache",
+  "compile_cache": "/private/tmp/claude-501/s6b_fix2/smoke/jax_cache",
   "python": "/Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-keras-jax/.venv-jax/bin/python",
-  "out": "/private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/s6bfix/smoke_tiny.json"
+  "out": "/private/tmp/claude-501/s6b_fix2/smoke_tiny.json"
  },
- "config": "/private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/s6bfix/smoke/config.yaml",
+ "config": "/private/tmp/claude-501/s6b_fix2/smoke/config.yaml",
  "run_a": {
   "beta": 6.959986070757028e-10,
-  "build_s": 24.358627333000186,
+  "build_s": 26.021249708006508,
   "cache_events": {
    "cache_hits": 0,
    "cache_misses": 3,
    "requests": 1391
   },
-  "compile_cache": "/private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/s6bfix/smoke/jax_cache",
+  "compile_cache": "/private/tmp/claude-501/s6b_fix2/smoke/jax_cache",
   "compile_counts": {
    "bits": 1,
    "eval": 0,
@@ -38,8 +38,8 @@
    "val": 1
   },
   "epoch": 3,
-  "first_step_s": 15.556202457999461,
-  "fit_s": 35.089797833003104,
+  "first_step_s": 19.762012583989417,
+  "fit_s": 45.89310299999488,
   "global_step": 12,
   "last_ebops": 110967124.86447775,
   "last_val": {
@@ -123,22 +123,22 @@
    "max_epochs": 3,
    "max_steps": -1,
    "pool_layers": true,
-   "run_dir": "/private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/s6bfix/smoke/run_a",
+   "run_dir": "/private/tmp/claude-501/s6b_fix2/smoke/run_a",
    "seed": 42
   },
   "steps_per_epoch": 4,
   "total_steps": 12,
-  "wall_s": 64.49722449999535
+  "wall_s": 77.56798820800032
  },
  "run_b": {
   "beta": 6.959986070757028e-10,
-  "build_s": 24.34628829199937,
+  "build_s": 26.987064749991987,
   "cache_events": {
    "cache_hits": 3,
-   "cache_misses": 0,
+   "cache_misses": 1,
    "requests": 1473
   },
-  "compile_cache": "/private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/s6bfix/smoke/jax_cache",
+  "compile_cache": "/private/tmp/claude-501/s6b_fix2/smoke/jax_cache",
   "compile_counts": {
    "bits": 1,
    "eval": 0,
@@ -148,8 +148,8 @@
    "val": 1
   },
   "epoch": 3,
-  "first_step_s": 6.066883834006148,
-  "fit_s": 16.53692716700607,
+  "first_step_s": 6.1599300840025535,
+  "fit_s": 17.192386833005003,
   "global_step": 12,
   "last_ebops": 110967124.86447775,
   "last_val": {
@@ -222,7 +222,7 @@
    "val/quant_ebops_loss": 0.008773403242230415
   },
   "micro_step": 48,
-  "resumed_from": "/private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/s6bfix/smoke/run_a/ckpts/step-000000006.npz",
+  "resumed_from": "/private/tmp/claude-501/s6b_fix2/smoke/run_a/ckpts/step-000000006.npz",
   "settings": {
    "check_val_every_n_epoch": 1,
    "donate": true,
@@ -233,15 +233,15 @@
    "max_epochs": 3,
    "max_steps": -1,
    "pool_layers": true,
-   "run_dir": "/private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/s6bfix/smoke/run_b",
+   "run_dir": "/private/tmp/claude-501/s6b_fix2/smoke/run_b",
    "seed": 42
   },
   "steps_per_epoch": 4,
   "total_steps": 12,
-  "wall_s": 45.97322404199804
+  "wall_s": 49.7758004579955
  },
- "final_a": "/private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/s6bfix/smoke/run_a/ckpts/step-000000012.npz",
- "final_b": "/private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/s6bfix/smoke/run_b/ckpts/step-000000012.npz",
+ "final_a": "/private/tmp/claude-501/s6b_fix2/smoke/run_a/ckpts/step-000000012.npz",
+ "final_b": "/private/tmp/claude-501/s6b_fix2/smoke/run_b/ckpts/step-000000012.npz",
  "same_final_step": true,
  "train_loss_first": [
   24.378665924072266,
@@ -269,15 +269,15 @@
    8.715169906616211,
    8.715158462524414
   ],
-  "b": [
-   8.00026798248291,
-   8.000408172607422,
-   8.000385284423828
-  ],
   "i": [
    2.9339916706085205,
    2.8223888874053955,
    2.7105817794799805
+  ],
+  "b": [
+   8.00026798248291,
+   8.000408172607422,
+   8.000385284423828
   ]
  },
  "ebops_by_epoch": [

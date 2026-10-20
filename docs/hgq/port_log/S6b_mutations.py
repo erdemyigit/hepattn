@@ -147,6 +147,48 @@ MUTANTS = {
         [(CLI, '_revision(run_dir / "run.json")', 'run_dir / "run.json"')],
         cli_tests("keeps_the_first_run_files"),
     ),
+    # second fix round (review of 8380d8a)
+    "K0c_none_fix_round2": ([], tests(CADENCE, "max_steps", "limit_val", "seed_sets")),
+    "K27_epoch_checkpoint_without_validation": (
+        [(LOOP, "(validated or self.s.check_val_every_n_epoch == 1)", "True")],
+        tests(CADENCE),
+    ),
+    "K28_bits_min_is_max": (
+        [
+            (
+                LOOP,
+                "jnp.min(jnp.stack([jnp.min(a.astype(jnp.float32)) for a in arrays]))",
+                "jnp.max(jnp.stack([jnp.max(a.astype(jnp.float32)) for a in arrays]))",
+            )
+        ],
+        tests(CADENCE),
+    ),
+    "K29_max_steps_ignored": ([(LOOP, "        if settings.max_steps > 0:\n", "        if False:\n")], tests("max_steps")),
+    "K30_no_stop_after_max_steps_inside_an_epoch": (
+        [(LOOP, "            if not ended:  # max_steps inside an epoch: Lightning runs no validation there\n                break\n", "")],
+        tests("max_steps"),
+        900,  # the mutant loops forever: a timeout is a kill
+    ),
+    "K31_limit_val_batches_ignored": (
+        [(LOOP, "            if self.s.limit_val_batches is not None and i >= self.s.limit_val_batches:\n", "            if False:\n")],
+        tests("limit_val"),
+    ),
+    "K32_no_set_random_seed": (
+        [(LOOP, "        keras.utils.set_random_seed(settings.seed)", "        pass")],
+        tests("seed_sets"),
+    ),
+    "K33_source_seed_fixed": (
+        [("src/hepattn/experiments/clic/main_jax.py", "dataset=self.dataset, seed=seed)", "dataset=self.dataset, seed=42)")],
+        tests("seed_sets"),
+    ),
+    "K34_cli_data_seed_fixed": (
+        [(CLI, 'train = data_factory(rc, "train", seed=settings.seed', 'train = data_factory(rc, "train", seed=42')],
+        cli_tests("reach_the_data"),
+    ),
+    "K35_cli_limit_val_not_passed": (
+        [(CLI, "        limit_val_batches=args.limit_val_batches,\n", "        limit_val_batches=None,\n")],
+        cli_tests("reach_the_data"),
+    ),
 }
 
 
@@ -161,7 +203,7 @@ def apply(copy: Path, edits) -> None:
 
 def main(scratch: str, names: list[str]) -> int:
     for name in names or list(MUTANTS):
-        edits, args = MUTANTS[name]
+        edits, args, *limit = MUTANTS[name]
         copy = Path(scratch) / name
         shutil.rmtree(copy, ignore_errors=True)
         for part in ("src", "tests"):
@@ -169,14 +211,19 @@ def main(scratch: str, names: list[str]) -> int:
         shutil.copy(ROOT / "pyproject.toml", copy / "pyproject.toml")
         apply(copy, edits)
         env = {**os.environ, "KERAS_BACKEND": "jax", "PYTHONPATH": str(copy / "src")}
-        proc = subprocess.run(
-            [sys.executable, "-m", "pytest", *args, "-q", "-p", "no:cacheprovider", "-rf"],
-            cwd=copy,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "pytest", *args, "-q", "-p", "no:cacheprovider", "-rf"],
+                cwd=copy,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=limit[0] if limit else None,
+            )
+        except subprocess.TimeoutExpired:
+            print(name, f"TIMEOUT after {limit[0]} s: killed (the run does not end)", sep="\n  ", flush=True)
+            continue
         (copy / "pytest.out").write_text(proc.stdout + proc.stderr)
         summary = [line for line in proc.stdout.splitlines() if line.startswith(("FAILED", "ERROR")) or " passed" in line or " failed" in line]
         print(name, *summary, sep="\n  ", flush=True)

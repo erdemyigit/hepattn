@@ -94,3 +94,33 @@ K26_run_json_overwritten_on_resume
   FAILED tests/keras_native/test_cli.py::test_resume_in_the_run_directory_keeps_the_first_run_files
   1 failed, 5 deselected in 188.71s (0:03:08)
 EXIT 0
+
+# fix round 2 (review of 8380d8a), 2026-10-20, code at bd6d1ba; K30 has a 900 s timeout (the mutant never ends)
+K0c_none_fix_round2
+  4 passed, 28 deselected, 14 warnings in 136.42s (0:02:16)
+K27_epoch_checkpoint_without_validation
+  FAILED tests/keras_native/test_loop.py::test_log_cadence_lr_bits_val_interval_and_precision
+  1 failed, 31 deselected, 15 warnings in 93.27s (0:01:33)
+K28_bits_min_is_max
+  FAILED tests/keras_native/test_loop.py::test_log_cadence_lr_bits_val_interval_and_precision
+  1 failed, 31 deselected, 14 warnings in 97.21s (0:01:37)
+K29_max_steps_ignored
+  FAILED tests/keras_native/test_loop.py::test_max_steps_stops_inside_an_epoch
+  1 failed, 31 deselected, 14 warnings in 92.92s (0:01:32)
+K30_no_stop_after_max_steps_inside_an_epoch
+  TIMEOUT after 900 s: killed (the run does not end)
+K31_limit_val_batches_ignored
+  FAILED tests/keras_native/test_loop.py::test_limit_val_batches_validates_the_first_batches_only
+  1 failed, 31 deselected, 14 warnings in 58.87s
+K32_no_set_random_seed
+  FAILED tests/keras_native/test_loop.py::test_seed_sets_the_model_init_and_the_train_order
+  1 failed, 31 deselected, 14 warnings in 61.92s (0:01:01)
+K33_source_seed_fixed
+  FAILED tests/keras_native/test_loop.py::test_seed_sets_the_model_init_and_the_train_order
+  1 failed, 31 deselected, 14 warnings in 61.90s (0:01:01)
+K34_cli_data_seed_fixed
+  FAILED tests/keras_native/test_cli.py::test_command_line_options_reach_the_data_and_the_trainer
+  1 failed, 6 deselected in 2.24s
+K35_cli_limit_val_not_passed
+  FAILED tests/keras_native/test_cli.py::test_command_line_options_reach_the_data_and_the_trainer
+  1 failed, 6 deselected in 1.87s
