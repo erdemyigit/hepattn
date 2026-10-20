@@ -9,12 +9,13 @@ No module in it imports torch. `hepattn/keras/` (the hybrid, torch backend) stay
 | Stage | Modules | Tests (`tests/keras_native/`) |
 |---|---|---|
 | S1 | `factory.py` (moved from `hepattn/keras`, re-exported there), `norm.py`, `scaling.py` | `test_import_hygiene.py`, `test_helpers.py`, `test_collection_guard.py` |
-| S2 | `dense.py`, `attention.py`, `linformer.py`, `encoder.py`, `input.py` | `test_float_parity.py`, `test_masked_query.py`, `test_quantized_golden.py`, `test_jit.py`, `test_variables.py`, `test_init.py` |
+| S2 | `dense.py`, `attention.py`, `encoder.py`, `input.py` (S2's `linformer.py` was deleted in the retarget, `0c95e21`) | `test_float_parity.py`, `test_masked_query.py`, `test_quantized_golden.py`, `test_jit.py`, `test_variables.py`, `test_init.py` |
 | S3 | `tasks.py` (4 task forwards), `decoder.py`, `maskformer.py` (`MaskFormer`, `from_config`) | `test_maskformer.py`, `test_mf_golden.py`, `test_mf_jit.py` |
 | S4 | `losses.py`, `matching.py` (host scipy LSAP via `jax.pure_callback`), `objective.py` (`matched_loss`) | `test_objective_parity.py`, `test_matching.py`, `test_objective_e2e.py` |
 | merge | | `test_lane_integration.py` (S3 model through the S4 loss, one jitted step) |
+| R1-R5 (retarget) | `masked_linformer.py` (R2, also used by the hybrid) | `test_org_loss_fixes.py` (R1), `test_masked_linformer.py` (R2), `test_pr8_layers.py` (R3), `test_org_model.py` (R5) |
 | S5 | `train_step.py` (`TrainStep`), `optim.py`, `ebops.py`, `beta_control.py` | `test_train_step.py`, `test_optim.py`, `test_ebops.py`, `test_beta_control.py` |
-| S6a | `config.py`, `checkpoint.py`, `data.py`, `metrics.py`, `predict_writer.py` (+ `experiments/clic/native_data.py`, the torch data half) | `test_config.py`, `test_checkpoint.py`, `test_data.py`, `test_metrics.py`, `test_predict_writer.py`, `test_resume_cross_lane.py` |
+| S6a | `config.py`, `checkpoint.py`, `data.py`, `metrics.py`, `predict_writer.py` (+ `experiments/clic/native_data.py`, the torch data half) | `test_config.py`, `test_checkpoint.py`, `test_data.py`, `test_metrics.py`, `test_predict_writer.py`, `test_resume_cross_lane.py`, `test_data_real.py` (`requiresdata`) |
 | S6b | `loop.py` (`Trainer`), `cli.py` (+ `experiments/clic/main_jax.py`, the entry point) | `test_loop.py`, `test_cli.py` |
 
 `matching.py` imports `jax` directly (`jax.pure_callback`, `jax.lax.stop_gradient`), so the matched loss
@@ -72,7 +73,9 @@ set `KJ_BRANCH` to it.
 KJ_BRANCH=${KJ_BRANCH:-keras-jax}
 git clone --branch $KJ_BRANCH https://github.com/erdemyigit/hepattn.git $WORK_ROOT/hepattn-kj && cd $WORK_ROOT/hepattn-kj && \
   uv venv --python 3.12.0 .venv && uv sync --group hgq --no-install-project --locked --python .venv/bin/python
-# .venv-jax: the KERAS_JAX_PLAN.md section 5.1 line, then masked-linformer (needed only for the torch parity tests):
+# .venv-jax for the S6b driver and polaris/16, 17: the ONE-TIME SETUP block of polaris/16_jax_smoke.pbs (the same in
+# 17_g3_step.pbs: CUDA jax + CPU torch + the CLICDataset stack + masked-linformer). The KERAS_JAX_PLAN.md section 5.1
+# line alone has no torch, which main_jax's data source (native_data, CLICDataset) imports. The masked-linformer step:
 uv pip install --python .venv-jax/bin/python --no-deps \
   "masked-linformer @ https://github.com/compressed-maskformer-reco/masked-linformer/archive/dce2e151e9d25cefd85454b3dffd5c83ec217097.tar.gz"
 ```
@@ -129,14 +132,15 @@ PYTHONPATH=$PWD/src .venv-jax/bin/python -m hepattn.experiments.clic.main_jax fi
 PYTHONPATH=$PWD/src .venv-jax/bin/python -m hepattn.experiments.clic.main_jax test \
   --config polaris_hgq.yaml --ckpt $WORK_ROOT/runs/r1/ckpts/epoch-004-step-....npz
 
-# local check on dummy events at test sizes (CPU, ~1 min)
+# local check on dummy events at test sizes (CPU, ~1-2 min: about 45 s build + 60 s fit on an M2 Pro under load)
 env -u KERAS_BACKEND PYTHONPATH=$PWD/src .venv-jax/bin/python -m hepattn.experiments.clic.main_jax fit \
   --config tests/keras_native/s6b_fixtures/tiny_polaris.yaml --run-dir /tmp/r_tiny --dummy-data
 ```
 
-`--help` lists the overrides (`--max-epochs`, `--max-steps`, `--limit-train-batches`, `--limit-val-batches`,
-`--batch-size`, `--num-workers`, `--num-train`, `--num-val`, `--log-every-n-steps`, `--ckpt-every-n-steps`,
-`--ckpt-save-top-k`, `--seed`, `--matmul-precision`, `--no-donate`, `--compile-cache`, `--metrics-per-layer`).
+`fit --help` lists the overrides (`--max-epochs`, `--max-steps`, `--limit-train-batches`, `--limit-val-batches`,
+`--check-val-every-n-epoch`, `--batch-size`, `--num-workers`, `--num-train`, `--num-val`, `--train-path`, `--valid-path`,
+`--log-every-n-steps`, `--ckpt-every-n-steps`, `--ckpt-save-top-k`, `--seed`, `--matmul-precision`, `--no-donate`,
+`--compile-cache`, `--metrics-per-layer`, `--dummy-data`, `--resume`).
 A run directory holds: `config.yaml` (the merged config with the command-line data, trainer, seed and step-checkpoint
 options written in: `fit --config <run-dir>/config.yaml` repeats the run; `--matmul-precision`, `--no-donate` and
 `--metrics-per-layer` are only in `run.json`), `run.json` (options, versions, model hash, `total_steps`),

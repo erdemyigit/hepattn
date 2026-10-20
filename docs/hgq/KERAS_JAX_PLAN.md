@@ -17,8 +17,9 @@ metrics, prediction writer ([port_log/S6a.md](port_log/S6a.md)), their merge ([p
 and S6b, the single-device training driver ([port_log/S6b.md](port_log/S6b.md)):
 `python -m hepattn.experiments.clic.main_jax fit|test` ([KERAS_NATIVE.md](KERAS_NATIVE.md), "Training"). On CPU it
 trains the generated Polaris config end to end (at test sizes), resumes bit for bit from every checkpoint position
-tested (inside an epoch, at an epoch end, after the PID's epoch step), compiles 2 train + 1 val programs per run, and
-logs the hybrid's names (`val/loss` = task loss, measured on the hybrid: S5's "task + quant_losses" was wrong). G2 was
+tested (inside an epoch, at an epoch end, after the PID's epoch step), compiles 2 train + 1 val programs per run
+(plus a loss-only `tail` program for the short last val batch and a bit-statistics program:
+`test_trace_counts_over_the_run`), and logs the hybrid's names (`val/loss` = task loss, measured on the hybrid: S5's "task + quant_losses" was wrong). G2 was
 measured on Polaris (native fwd + bwd 165.2 ms vs hybrid ~1615 ms at b16, fp32; at JAX's default matmul precision, not
 the production "highest"). **Not run:** **G3** (`polaris/17_g3_step.pbs`: >= 1.8x the hybrid in-run step at b32,
 matching <= 15%; also the G1 gap, TF32 and the EBOPs share at b32) and the real-data smoke
