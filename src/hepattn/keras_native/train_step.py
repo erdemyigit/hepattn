@@ -23,8 +23,9 @@ API for the S6 driver
     #   ``beta`` is the host value last given to ``set_beta``: keep it on the host. ``steps.read_beta(state)`` copies
     #   every leaf's beta to the host (a device sync that stalls async dispatch), so use it for checks only.
     out = steps.eval_step(state, (inputs, targets))  # training=False: no EBOPs term, state unchanged; EvalOutput
-    #   ``out.loss`` = ``out.task_loss + out.regularization`` is the hybrid's val/loss: ``MPflowHGQ.aggregate_losses``
-    #   adds ``quant_losses()``, which at training=False holds only the HGQ2 weight-regularizer terms.
+    #   ``out.loss`` = ``out.task_loss + out.regularization`` is what ``MPflowHGQ.aggregate_losses`` returns at val
+    #   (``quant_losses()`` at training=False holds only the HGQ2 weight-regularizer terms). The hybrid LOGS
+    #   ``val/loss`` = the task loss only (``models/wrapper.py`` logs before the quant term is added): log ``task_loss``.
     outputs = steps.predict_step(state, inputs)      # training=False output tree
     steps.assign_to_model(state)                     # copy the state into the Keras variables (save_weights, export)
     state = steps.init_state()                       # after loading weights into the model
@@ -87,7 +88,7 @@ class EvalOutput(NamedTuple):
     """Device values of one ``training=False`` step."""
 
     outputs: Any
-    loss: Any  # task + regularization: the hybrid's val/loss
+    loss: Any  # task + regularization (the hybrid's returned val loss; its logged val/loss is task_loss)
     task_loss: Any
     losses: Any
     regularization: Any  # sum of the weight-regularizer terms (no EBOPs term exists at training=False)

@@ -19,7 +19,8 @@
   ``matmul_precision=None``).
 - ``assign_to_model`` / ``init_state`` round-trip the quantized model's state exactly after a training step, the
   non-trainable state included (control: the step changed that state, so a write that skips it fails).
-- ``eval_step``'s loss is the hybrid's val/loss, task + the HGQ2 weight regularizers (no EBOPs term at training=False):
+- ``eval_step``'s loss is the hybrid's returned val loss (not its logged ``val/loss``, which is the task loss), task + the
+  HGQ2 weight regularizers (no EBOPs term at training=False):
   its regularization equals the training step's on the same weights; control: it is nonzero.
 - The non-trainable state the training forward updates (WRAP integer bits ``/i``, ``_ebops``) is kept: the returned
   ``ntv`` equals a reference ``stateless_call(training=True)`` over 2 steps; control: predicting with the stale ``ntv``
@@ -502,7 +503,7 @@ def test_assign_to_model_round_trips_the_quantized_state(setup, batches, model):
 
 
 def test_eval_loss_is_task_plus_regularization(setup, batches):
-    """The hybrid's val/loss: ``MPflowHGQ.aggregate_losses`` adds ``quant_losses()`` (the regularizers at training=False)."""
+    """``MPflowHGQ.aggregate_losses``' return value adds ``quant_losses()`` (the regularizers at training=False); logged val/loss is the task."""
     steps, state0, _ = setup
     ev = steps.eval_step(state0, batches[0])
     _, out = steps.train_step(copy_state(state0), batches[0], ebops_on=True)
