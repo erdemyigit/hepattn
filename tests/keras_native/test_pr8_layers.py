@@ -26,6 +26,7 @@ import torch
 import yaml
 from torch import nn
 
+from hepattn.experiments.clic.convert_to_native import ConversionError
 from hepattn.keras_native.decoder import MaskFormerDecoderLayer as NDecoderLayer
 from hepattn.keras_native.dense import Dense as NDense
 from hepattn.keras_native.encoder import Encoder as NEncoder
@@ -415,7 +416,7 @@ def test_encoder_legacy_placement_equals_torch(num_layers):
 def test_placement_mismatch_is_refused_by_the_porter():
     torch.manual_seed(1)
     tenc = Encoder(**encoder_cfg("legacy", 1)).eval()
-    with pytest.raises(AssertionError, match="post_norm mismatch"):
+    with pytest.raises(ConversionError, match="post_norm mismatch"):
         ported_encoder(tenc, "hybridnorm", 1)
 
 

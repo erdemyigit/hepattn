@@ -142,3 +142,6 @@ polaris_hgq.yaml
 
 # Out-of-environment builds, e.g. setup/build_torch_linear_assignment.sh
 vendor/
+# S7 converter fixtures (two Lightning runs at test sizes and the hybrid's outputs): test data
+!tests/keras_native/s7_fixtures/*/*.npz
+!tests/keras_native/s7_fixtures/*/*.json
