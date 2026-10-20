@@ -1,0 +1,38 @@
+D0_none
+  17 passed, 40 deselected, 14 warnings in 9.35s
+D1_short_form_accepted
+  FAILED tests/keras_native/test_config.py::test_overlays_merge_as_lightningcli[eval]
+  FAILED tests/keras_native/test_config.py::test_overlays_merge_as_lightningcli[partial]
+  FAILED tests/keras_native/test_config.py::test_merge_rules - Failed: DID NOT ...
+  FAILED tests/keras_native/test_config.py::test_merge_rejects_what_jsonargparse_rejects_or_needs_the_class_for[overlay1-next to class_path]
+  FAILED tests/keras_native/test_config.py::test_merge_rejects_what_jsonargparse_rejects_or_needs_the_class_for[overlay2-next to class_path]
+  FAILED tests/keras_native/test_config.py::test_short_class_entries_are_rejected_as_lightningcli_rejects_them[short_model]
+  FAILED tests/keras_native/test_config.py::test_short_class_entries_are_rejected_as_lightningcli_rejects_them[short_encoder]
+  FAILED tests/keras_native/test_config.py::test_short_class_entries_are_rejected_as_lightningcli_rejects_them[short_callback]
+  8 failed, 9 passed, 40 deselected, 14 warnings in 9.63s
+D2_bare_list_item_accepted
+  FAILED tests/keras_native/test_config.py::test_merge_rejects_what_jsonargparse_rejects_or_needs_the_class_for[overlay3-no class_path]
+  FAILED tests/keras_native/test_config.py::test_overlay_list_item_without_class_path_is_rejected
+  2 failed, 15 passed, 40 deselected, 14 warnings in 9.49s
+D3_decoder_posenc_merged
+  FAILED tests/keras_native/test_config.py::test_merge_rules - AssertionError: ...
+  FAILED tests/keras_native/test_config.py::test_decoder_posenc_is_replaced_whole_as_lightningcli_does
+  2 failed, 15 passed, 40 deselected, 14 warnings in 9.49s
+D4_canonical_without_parent
+  FAILED tests/keras_native/test_config.py::test_decoder_posenc_is_replaced_whole_as_lightningcli_does
+  1 failed, 16 passed, 40 deselected, 14 warnings in 9.55s
+D5_guard_by_path
+  FAILED tests/keras_native/test_train_step.py::test_steps_refuse_an_optimizer_built_for_another_model
+  1 failed, 20 deselected, 14 warnings in 2.19s
+D5_guard_by_path_oldtest
+  1 passed, 20 deselected, 14 warnings in 2.20s
+D6_resume_not_protected
+  FAILED tests/keras_native/test_checkpoint.py::test_pruning_never_removes_the_resume_checkpoint[step-True]
+  FAILED tests/keras_native/test_checkpoint.py::test_pruning_never_removes_the_resume_checkpoint[last-True]
+  2 failed, 11 passed, 34 deselected, 14 warnings in 2.22s
+D7_lr_spike_at_128
+  FAILED tests/keras_native/test_optim.py::test_learning_rate_maps_the_lrs_config_like_torch[1e-06]
+  FAILED tests/keras_native/test_optim.py::test_learning_rate_maps_the_lrs_config_like_torch[1e-08]
+  2 failed, 4 passed, 7 deselected, 14 warnings in 2.35s
+D7_lr_spike_at_128_oldtest
+  6 passed, 7 deselected, 14 warnings in 2.31s

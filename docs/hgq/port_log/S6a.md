@@ -118,6 +118,11 @@ fixtures generated in the hybrid env `hepattn/.venv` (lightning 2.5.2).
    before one). (c) Deviation kept: Lightning ranks a NaN monitor value as +inf (min mode) and keeps it in
    `best_k_models`, so a run whose validations so far are all NaN has a NaN epoch as `best_model_path`; the native
    `best` pointer is then unset (a NaN is never best). From the first finite value on they agree (strict `<`).
+   S56 delta fix: (d) `keep_last_k` > 1 is a native extension (Lightning rejects `save_top_k` > 1 without a monitor,
+   `model_checkpoint.py:469-474`; the loader rejects the config, so only direct construction gives it). (e) Pruning
+   looks at every `step-*` / `last-*` file in the directory, not only the files the manager wrote (Lightning removes
+   only the paths it tracked): the directory belongs to one run. `resume_path` (also on `from_callback`) is never
+   removed, as Lightning never removes `trainer.ckpt_path`; the S6b driver must pass it on resume.
 11. **Checkpoint file mode** (fix round 2). `mkstemp` creates 0o600 and the rename keeps it; files are now chmod-ed to
    `0o666 & ~umask` before the rename, as a plain `open(..., "w")`, so collaborators can read checkpoints in the shared
    project area.
@@ -129,8 +134,13 @@ fixtures generated in the hybrid env `hepattn/.venv` (lightning 2.5.2).
 
 13. **Config merge = LightningCLI** (fix round 3). The first loader merged every dict key by key (as
    `polaris/03_make_config.py:129-137` does). jsonargparse 4.40.1 (hybrid env) differs in two ways, measured with
-   probes and with LightningCLI `--print_config`: (a) keys next to a `class_path` are init args (eval.yaml's
-   `model: model: encoder: attn_type: torch`); the old loader kept them as a stray key and ignored it, so
+   probes and with LightningCLI `--print_config`: (a) an overlay may give a class's init args as a plain dict, without
+   `class_path` / `init_args`, once an earlier file gave the class (eval.yaml's `model: model: encoder: attn_type:
+   torch`; **corrected in the S56 delta fix**: this round wrote "keys next to a `class_path` are init args" and folded
+   such keys into `init_args`, but jsonargparse 4.40.1 rejects keys next to a `class_path` - "Key 'class_path' is not
+   expected" - in one file, an overlay, a nested class and a callbacks item; the loader now raises `ConfigError`
+   there, pinned by `s6_fixtures/lightningcli_probes.yaml`); a naive key-by-key merge kept the overlay's keys as a
+   stray key next to `model.model`'s `class_path` and ignored them, so
    base + linformer + eval loaded the linformer model (hash `b4f17323e5bc`, the base + linformer hash; LightningCLI:
    `attn_type: torch`, hash `3723db9efa12`); (b) a dict-typed argument (`lrs_config`, `attn_kwargs`,
    `decoder_layer_config`, `data.inputs`, the hybrid `KerasMaskFormer`'s `encoder` / `decoder`) is replaced whole,
@@ -138,7 +148,9 @@ fixtures generated in the hybrid env `hepattn/.venv` (lightning 2.5.2).
    args. Also measured: `init_args` next to other keys is rejected, a `class_path` change keeps only the init args the
    new class accepts (needs the class: the loader raises), `null` replaces. `merge_configs` implements this; the
    class-typed plain-dict keys come from `_CLASS_OF_KEY` (encoder, decoder, posenc, net, ...) minus `_DICT_TYPED`
-   (`KerasMaskFormer`: encoder, decoder). Pinned by two new LightningCLI fixtures (`org_eval_normalised.yaml`,
+   (`KerasMaskFormer`: encoder, decoder; since the S56 delta fix also `MaskFormerDecoder`: posenc, which the torch
+   decoder types `dict[str, float] | None`; and an overlay list of class entries with an item without `class_path`
+   raises, because LightningCLI merges it into the earlier item for `ModuleList`). Pinned by two new LightningCLI fixtures (`org_eval_normalised.yaml`,
    `org_partial_normalised.yaml` from `overlay_partial_dicts.yaml`). Old loader on the two overlays: both hashed
    `b4f17323e5bc` (overlay ignored); new: equal to the printed configs (`3723db9efa12`, `a6bfe6adb660`). The
    base + linformer hash and every other fixture hash are unchanged (linformer.yaml repeats its dicts whole).
@@ -350,7 +362,7 @@ Fix round 3: 16 more mutants (M80-M95; the reviewer's N1 = M93 and D3 = M94, and
 | Mutant | Change | Killed by |
 |---|---|---|
 | M3 | `_merge_args` replaces every value (overlay drops base keys) | `test_loader_reads_every_form[org_raw]` |
-| M80 | keys next to `class_path` not folded into `init_args` | `test_overlays_merge_as_lightningcli[eval]` (the naive-merge control must be rejected) |
+| M80 | keys next to `class_path` not folded into `init_args` (S56 delta fix: the fold is gone; keys next to `class_path` now raise, mutant S56 D1) | `test_overlays_merge_as_lightningcli[eval]` (the naive-merge control must be rejected) |
 | M81 | dict-typed arguments merged key by key | `test_overlays_merge_as_lightningcli[partial]` |
 | M82 | `KerasMaskFormer` encoder / decoder merged as classes | `test_merge_rules` |
 | M83 | plain-dict class-typed keys (raw decoder) replaced whole | `test_overlays_merge_as_lightningcli[eval]` |
