@@ -54,6 +54,8 @@ from typing import Any
 import keras
 import numpy as np
 
+from hepattn.keras_native import profile
+
 FORMAT_VERSION = 1
 GROUPS = ("tv", "ntv", "ov")
 META_KEY = "__meta__"
@@ -232,23 +234,27 @@ def save_checkpoint(
         raise ValueError(f"checkpoint path must end in .npz, got {path}")
     if not overwrite and (path.exists() or sidecar_path(path).exists()):
         raise FileExistsError(f"{path} exists (a crash between the two renames of an overwrite leaves it unloadable)")
+    prof = profile.current()
     keys = state_keys(model, optimizer)
     arrays: dict[str, np.ndarray] = {}
     layout: dict[str, dict[str, list]] = {}
-    for group, values in zip(GROUPS, state, strict=True):
-        if len(values) != len(keys[group]):
-            raise CheckpointError(f"{group}: {len(values)} arrays for {len(keys[group])} variables")
-        layout[group] = {}
-        for key, value in zip(keys[group], values, strict=True):
-            array = np.asarray(value)
-            arrays[f"{group}/{key}"] = array
-            layout[group][key] = [list(array.shape), array.dtype.str]
+    with prof.phase("host_copy"):
+        for group, values in zip(GROUPS, state, strict=True):
+            if len(values) != len(keys[group]):
+                raise CheckpointError(f"{group}: {len(values)} arrays for {len(keys[group])} variables")
+            layout[group] = {}
+            for key, value in zip(keys[group], values, strict=True):
+                array = np.asarray(value)
+                arrays[f"{group}/{key}"] = array
+                layout[group][key] = [list(array.shape), array.dtype.str]
     meta_json = _dumps({"format_version": FORMAT_VERSION, **(meta or {})})
     arrays[META_KEY] = np.array(meta_json)
-    with _atomic(path) as f:
+    with prof.phase("npz_write"), _atomic(path) as f:
         np.savez(f, **arrays)
-    sidecar = {"format_version": FORMAT_VERSION, "npz": path.name, "sha256": _sha256(path), "layout": layout, "meta": json.loads(meta_json)}
-    with _atomic(sidecar_path(path), "w") as f:
+    with prof.phase("sha256"):
+        digest = _sha256(path)
+    sidecar = {"format_version": FORMAT_VERSION, "npz": path.name, "sha256": digest, "layout": layout, "meta": json.loads(meta_json)}
+    with prof.phase("sidecar"), _atomic(sidecar_path(path), "w") as f:
         f.write(json.dumps(sidecar, indent=1, sort_keys=True))
     return path
 

@@ -89,6 +89,13 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--ckpt-every-n-steps", type=int, help="step checkpoints (adds a step callback if the YAML has none)")
     fit.add_argument("--ckpt-save-top-k", type=int, help="step checkpoints kept (-1: all)")
     fit.add_argument("--no-donate", action="store_true", help="do not donate the state to the train step")
+    fit.add_argument("--prefetch", type=int, default=0, help="train batches read ahead in a background thread (0: none)")
+    prof = fit.add_argument_group("profiling (docs/hgq/port_log/PROF.md; off by default: no added sync)")
+    prof.add_argument("--profile-phases", metavar="CSV", help="record the loop phases: one row per phase to CSV, summary to CSV.json")
+    prof.add_argument("--profile-sync", action="store_true", help="also block on every train step and transfer (device time per step)")
+    prof.add_argument("--profile-step-ref-ms", type=float, help="reference device step time for the device-idle estimate (async mode)")
+    prof.add_argument("--jax-trace", metavar="DIR", help="jax.profiler trace of --jax-trace-window into DIR")
+    prof.add_argument("--jax-trace-window", default="10:20", metavar="FIRST:LAST", help="micro-batches of the trace (default 10:20)")
     test = sub.add_parser("test", help="write the prediction h5 of a checkpoint")
     _common(test)
     test.add_argument("--ckpt", required=True)
@@ -212,12 +219,17 @@ def fit(args: argparse.Namespace, data_factory: DataFactory) -> dict:
         matmul_precision=MATMUL_PRECISIONS[args.matmul_precision],
         donate=not args.no_donate,
         pool_layers=not args.metrics_per_layer,
+        prefetch=args.prefetch,
     )
     dummy = True if args.dummy_data else None
     train = data_factory(rc, "train", seed=settings.seed, dummy_data=dummy)
     val = data_factory(rc, "val", seed=settings.seed, dummy_data=dummy) if rc.data.valid_path or dummy else None
+    from hepattn.keras_native import profile  # noqa: PLC0415
+
+    profiler = profile.PhaseProfiler(sync=args.profile_sync) if args.profile_phases else None
+    trace = profile.JaxTrace(args.jax_trace, *profile.parse_window(args.jax_trace_window)) if args.jax_trace else None
     t0 = time.perf_counter()
-    trainer = loop.Trainer(rc, settings, sample=_first(train), train_batches=train.num_batches)
+    trainer = loop.Trainer(rc, settings, sample=_first(train), train_batches=train.num_batches, profiler=profiler, trace=trace)
     build_s = time.perf_counter() - t0
     resume = None
     if args.resume:
@@ -253,6 +265,14 @@ def fit(args: argparse.Namespace, data_factory: DataFactory) -> dict:
     summary.update(
         build_s=build_s, fit_s=time.perf_counter() - t1, compile_cache=None if cache is None else str(cache), cache_events=dict(events.counts)
     )
+    if profiler is not None:
+        step_ref = None if args.profile_step_ref_ms is None else args.profile_step_ref_ms / 1e3
+        report = profiler.summary(step_ref_s=step_ref)
+        report["val_events"] = getattr(trainer, "val_events", None)
+        events_csv = profiler.write_events(args.profile_phases)
+        loop.write_json(events_csv.with_name(events_csv.name + ".json"), report)
+        print(profile.format_table(report), flush=True)
+        summary["profile"] = {k: v for k, v in report.items() if k != "phases"} | {"events_csv": str(events_csv)}
     loop.write_json(run_dir / "summary.json", summary)
     return summary
 
