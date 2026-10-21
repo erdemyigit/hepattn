@@ -27,6 +27,8 @@ Setup and test commands: [KERAS_NATIVE.md](../KERAS_NATIVE.md).
 | Completeness critique of S5 + S6 (gate-by-gate mutants, beta setpoint spread, clean-shell CLI, Polaris scripts in a fresh venv) | [S56-critique.md](S56-critique.md) (`S56_critique_mutations.py`, `S56_evidence/critique_*`) | `keras-jax` / `hepattn-keras-jax` |
 | S7 Lightning-checkpoint converter (org float, hybrid HGQ2), `main_jax fit --init-from`, export to hls4ml under JAX (kept / activation export forms, csim on falcon), hybrid CLIs on the org model; two review rounds | [S7.md](S7.md) (`S7_mutations.py`, `S7_csim.py`, `S7_evidence/`) | `s7/export` / `hepattn-s7` |
 | Merge of S7 into `keras-jax` (`f4aab4a`), suites on the merged tree, hls4ml-optional `.venv-jax` | [S7-merge.md](S7-merge.md) | `keras-jax` / `hepattn-keras-jax` |
+| PROF opt-in phase profiler of the native driver (`--profile-phases`, `--prefetch`, `--jax-trace`), production-dim CPU attribution, `18_loop_profile` (A100 variants, H7 pairs then the perturbation pair first; `smoke-timing` for H0; `report`); two review fixes: steady- and loop-window metrics, log-window perturbation, job-start budget, tested data positions and trace window, 76/76 mutants | [PROF.md](PROF.md) (`PROF_mutations.py`, `PROF_evidence/`) | `prof/loop` / `hepattn-prof` |
+| Merge of `prof/loop` into `keras-jax`, suites on the merged tree, profiler-off check | [PROF-merge.md](PROF-merge.md) | `keras-jax` / `hepattn-keras-jax` |
 
 ## Gates carried to a later stage
 

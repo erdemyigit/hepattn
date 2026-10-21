@@ -1,0 +1,51 @@
+variant           s/micro excl.compile over G3 ms  top groups (ms/micro)
+smoke               2.431        0.048     -113.6  train/step+compile 1949.6, train/log 411.9, epoch_end/val 34.2, train/ckpt 14.0, train/step 10.8, epoch_end/ckpt_epoch 6.8
+smoke_nodet         2.823        0.066      -95.7  train/step+compile 2274.9, train/log 451.6, epoch_end/val 49.5, train/ckpt 16.5, train/step 14.4, epoch_end/ckpt_epoch 9.4
+pure                0.929        0.019     -142.4  train/step+compile 909.8, train/step 9.4, epoch_end/ckpt_last 7.0, data 2.2, epoch_start 0.4, train_end 0.1
+pure_det            0.827        0.016     -145.6  train/step+compile 810.6, train/step 7.4, epoch_end/ckpt_last 6.0, data 2.0, epoch_start 0.4, train_end 0.1
+prod                1.215        0.040     -121.6  train/step+compile 970.0, epoch_end/val 210.0, epoch_end/ckpt_epoch 12.6, epoch_end/ckpt_last 11.3, train/step 8.5, data 2.2
+pure_sync           0.818        0.016     -145.5  train/step+compile 802.2, train/step 7.4, epoch_end/ckpt_last 6.2, data 1.8, epoch_start 0.4, train_end 0.1
+pure_noprof         0.838        0.392      229.9
+pure_prefetch       0.845        0.015     -146.7  train/step+compile 830.4, train/step 7.6, epoch_end/ckpt_last 6.3, epoch_start 0.4, data 0.2, train_end 0.1
+pure_trace          2.295        1.299     1136.9  trace 1278.7, train/step+compile 996.1, train/step 10.0, epoch_end/ckpt_last 6.6, data 2.6, epoch_start 0.4
+loader0          loader: 1.4 ms/batch median, first batch 0.0 s
+loader4          loader: 0.5 ms/batch median, first batch 2.7 s
+LOOP-PROFILE-DONE /private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/prof2/lp_tiny.json
+EXIT 0
+##### final script, --tiny --variants smoke_nodet,pure,pure_noprof (fresh run root)
+variant           s/micro excl.compile over G3 ms  top groups (ms/micro)
+smoke_nodet         3.290        0.065      -96.8  compile 3225.5, train/log 21.7, train/step 14.8, train/ckpt 14.0, epoch_end/ckpt_epoch 7.1, data 4.1
+pure                0.955        0.018     -144.0  compile 937.5, train/step 8.3, epoch_end/ckpt_last 6.4, data 2.2, epoch_start 0.5, train_end 0.1
+pure_noprof         0.910            -          -  no profiler: fit_s 14.6
+profiler perturbation: fit_s pure 15.3 / pure_noprof 14.6 = 1.049
+
+##### review fix 2026-10-20: --tiny --variants smoke,smoke_nodet,pure,pure_det,pure_log,pure_noprof,pure_sync,prod,loader0 (fresh run root, 9:49 wall)
+variant           s/micro excl.compile   steady over G3 ms misses  top groups (ms/micro)
+smoke               3.358        0.059    0.062      -99.3      4  compile 3299.4, train/ckpt 16.8, train/log 14.8, train/step 12.4, epoch_end/ckpt_epoch 9.2, data 2.8
+smoke_nodet         3.506        0.059    0.063      -98.6      4  compile 3446.7, train/ckpt 17.1, train/log 15.6, train/step 12.7, epoch_end/ckpt_epoch 8.6, data 2.7
+pure                1.300        0.021    0.022     -139.1      0  compile 1279.0, train/step 9.7, epoch_end/ckpt_last 8.3, data 2.5, epoch_start 0.5, train_end 0.1
+pure_det            1.281        0.023    0.024     -137.7      0  compile 1257.9, train/step 10.1, epoch_end/ckpt_last 9.1, data 2.6, epoch_start 0.6, train_end 0.1
+pure_log            1.484        0.035    0.037     -124.6      0  compile 1449.6, train/log 12.7, train/step 9.9, epoch_end/ckpt_last 8.8, data 2.7, epoch_start 0.5
+pure_noprof         1.407            -        -          -      0  no profiler: fit_s 22.5
+pure_sync           1.124        0.021    0.023     -139.0      0  compile 1102.2, train/step 9.4, epoch_end/ckpt_last 8.6, data 2.6, epoch_start 0.5, train_end 0.1
+prod                1.485        0.036    0.038     -124.1      0  compile 1448.8, train/step 11.5, epoch_end/ckpt_epoch 9.0, epoch_end/ckpt_last 8.6, data 3.1, epoch_end/val 2.6
+loader0          loader: 1.8 ms/batch median, first batch 0.0 s
+profiler perturbation (steady log windows): pure_log 13.4 / pure_noprof 14.6 ms per micro-batch = 0.922 (whole-fit fit_s ratio 1.055, not the perturbation)
+pure_sync profile: wall_s 17.977 compile_s 17.636 first_train_batch 0.0027 steady_wall_s 0.339 steady_micro_batches 15 device_busy_s 0.159 device_idle_frac 0.531 (steady window) device_idle_frac_wall 0.991 unattributed_frac 7.7e-05
+ckpt_bytes_deleted: smoke 13611636, smoke_nodet 13611636, pure 4517079, pure_det 4517079, pure_log 4531633, pure_noprof 4531633, pure_sync 4517079, prod 9067296; no */ckpts left
+log windows (n incl. first): pure_log 4, pure_noprof 4, smoke 4, smoke_nodet 4
+report part_a.json (all but pure_noprof, no table/perturbation keys) + part_b.json (pure_noprof only):
+profiler perturbation (steady log windows): pure_log 13.4 / pure_noprof 14.6 ms per micro-batch = 0.922 (whole-fit fit_s ratio 1.055, not the perturbation)
+
+## review 2 fix (2026-10-21): --tiny smoke,pure,pure_sync,pure_log,pure_noprof,loader0 (fresh run root)
+variant           s/micro excl.compile   steady     loop loop-G3 ms misses  top groups (ms/micro)
+smoke               2.359        0.055    0.058    0.048     -113.2      4  compile 2304.1, train/log 16.4, train/ckpt 13.4, train/step 13.3, epoch_end/ckpt_epoch 6.9, data 2.3
+pure                1.950        0.019    0.020    0.013     -148.7      2  compile 1930.6, train/step 9.9, epoch_end/ckpt_last 6.4, data 2.2, epoch_start 0.4, train_end 0.1
+pure_sync           0.857        0.017    0.017    0.010     -151.2      0  compile 840.9, train/step 7.8, epoch_end/ckpt_last 6.2, data 2.0, epoch_start 0.4, train_end 0.1
+pure_log            1.184        0.026    0.027    0.020     -141.7      1  compile 1158.1, train/log 9.3, train/step 7.5, epoch_end/ckpt_last 6.2, data 2.0, epoch_start 0.4
+pure_noprof         1.024            -        -        -          -      0  no profiler: fit_s 16.4
+loader0          loader: 1.4 ms/batch median, first batch 0.0 s
+profiler perturbation (steady log windows): pure_log 10.4 / pure_noprof 10.1 ms per micro-batch = 1.034 (whole-fit fit_s ratio 1.156, not the perturbation)
+pure {'steady_wall_s': 0.3027, 'outside_loop_s': 0.1096, 'loop_wall_s': 0.1931, 'unattributed_frac': 0.0} ckpt_bytes_deleted 4517079
+pure_sync {'steady_wall_s': 0.2624, 'outside_loop_s': 0.1065, 'loop_wall_s': 0.1559, 'device_idle_frac': 0.5041, 'device_idle_frac_loop': 0.2001, 'unattributed_frac': 0.0001} ckpt_bytes_deleted 4517079
+smoke {'steady_wall_s': 0.8712, 'outside_loop_s': 0.1473, 'loop_wall_s': 0.7262, 'unattributed_frac': 0.0001} ckpt_bytes_deleted 13611636

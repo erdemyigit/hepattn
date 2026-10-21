@@ -1,0 +1,286 @@
+[
+ {
+  "mutant": "p00",
+  "file": null,
+  "what": "baseline: the unmutated copy passes",
+  "tests": [
+   "tests/keras_native/test_profile.py"
+  ],
+  "killed": false,
+  "failed": [],
+  "summary": "12 passed in 374.30s (0:06:14)",
+  "seconds": 387
+ },
+ {
+  "mutant": "p01",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "NULL.wait syncs (profiler off adds a block per epoch end)",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "syncs_added"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_syncs_added_by_each_mode"
+  ],
+  "summary": "1 failed, 11 deselected in 128.83s (0:02:08)",
+  "seconds": 141
+ },
+ {
+  "mutant": "p02",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "profiled matching callback changes the matching",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "do_not_change_the_run"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_profiler_and_prefetch_do_not_change_the_run"
+  ],
+  "summary": "1 failed, 11 deselected in 123.06s (0:02:03)",
+  "seconds": 134
+ },
+ {
+  "mutant": "p03",
+  "file": "src/hepattn/keras_native/data.py",
+  "what": "prefetch reorders items",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "prefetch_order"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_prefetch_order_errors_and_shutdown"
+  ],
+  "summary": "1 failed, 11 deselected in 2.52s",
+  "seconds": 5
+ },
+ {
+  "mutant": "p04",
+  "file": "src/hepattn/keras_native/data.py",
+  "what": "prefetch drops the error",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "prefetch_order"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_prefetch_order_errors_and_shutdown"
+  ],
+  "summary": "1 failed, 11 deselected in 2.01s",
+  "seconds": 4
+ },
+ {
+  "mutant": "p05",
+  "file": "src/hepattn/keras_native/data.py",
+  "what": "prefetch close leaves the thread running",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "prefetch_order"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_prefetch_order_errors_and_shutdown"
+  ],
+  "summary": "1 failed, 11 deselected in 2.15s",
+  "seconds": 4
+ },
+ {
+  "mutant": "p06",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "exclusive time = duration",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_exclusive_times_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 11 deselected in 2.19s",
+  "seconds": 4
+ },
+ {
+  "mutant": "p07",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "summary sums durations",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock or sum_to_the_wall"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phases_sum_to_the_wall_time[async]"
+  ],
+  "summary": "1 failed, 9 deselected in 243.92s (0:04:03)",
+  "seconds": 279
+ },
+ {
+  "mutant": "p08",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "other threads record phases",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "null_profiler"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_null_profiler_is_inert"
+  ],
+  "summary": "1 failed, 11 deselected in 5.10s",
+  "seconds": 9
+ },
+ {
+  "mutant": "p09",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "async mode syncs every step",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "syncs_added or cadence"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phase_counts_follow_the_cadence"
+  ],
+  "summary": "1 failed, 10 deselected in 228.68s (0:03:48)",
+  "seconds": 276
+ },
+ {
+  "mutant": "p10",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "+compile label lost",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "cadence"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phase_counts_follow_the_cadence"
+  ],
+  "summary": "1 failed, 11 deselected in 152.00s (0:02:31)",
+  "seconds": 166
+ },
+ {
+  "mutant": "p11",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "train/ckpt phase missing",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "cadence"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phase_counts_follow_the_cadence"
+  ],
+  "summary": "1 failed, 11 deselected in 154.90s (0:02:34)",
+  "seconds": 169
+ },
+ {
+  "mutant": "p12",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "data phase missing",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "cadence"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phase_counts_follow_the_cadence"
+  ],
+  "summary": "1 failed, 11 deselected in 137.12s (0:02:17)",
+  "seconds": 149
+ },
+ {
+  "mutant": "p13",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "epoch_end/drain wait missing",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "syncs_added"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_syncs_added_by_each_mode"
+  ],
+  "summary": "1 failed, 11 deselected in 126.68s (0:02:06)",
+  "seconds": 139
+ },
+ {
+  "mutant": "p14",
+  "file": "src/hepattn/keras_native/checkpoint.py",
+  "what": "ckpt npz_write phase missing",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "cadence"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phase_counts_follow_the_cadence"
+  ],
+  "summary": "1 failed, 11 deselected in 125.05s (0:02:05)",
+  "seconds": 136
+ },
+ {
+  "mutant": "p15",
+  "file": "src/hepattn/keras_native/data.py",
+  "what": "sync mode misses transfer waits",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "syncs_added"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_syncs_added_by_each_mode"
+  ],
+  "summary": "1 failed, 11 deselected in 129.28s (0:02:09)",
+  "seconds": 144
+ },
+ {
+  "mutant": "p16",
+  "file": "src/hepattn/keras_native/cli.py",
+  "what": "CLI ignores --profile-phases",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fit_command"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_fit_command_writes_the_profile"
+  ],
+  "summary": "1 failed, 11 deselected in 66.63s (0:01:06)",
+  "seconds": 71
+ },
+ {
+  "mutant": "p17",
+  "file": "src/hepattn/keras_native/cli.py",
+  "what": "CLI ignores --prefetch",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fit_command"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_fit_command_writes_the_profile"
+  ],
+  "summary": "1 failed, 11 deselected in 68.24s (0:01:08)",
+  "seconds": 72
+ }
+]

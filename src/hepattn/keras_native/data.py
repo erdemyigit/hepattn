@@ -19,11 +19,15 @@ Train loaders must drop the last short batch themselves (``DataLoader(drop_last=
 on a short batch when ``pad_to`` is None.
 """
 
+import queue
+import threading
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 import jax
 import numpy as np
+
+from hepattn.keras_native import profile
 
 HOST_KEYS = ("event_number",)
 
@@ -122,20 +126,24 @@ class HostBatches:
         return len(self.loader)  # type: ignore[arg-type]
 
     def convert(self, inputs: dict, targets: dict) -> Batch:
-        inputs, targets = to_numpy(inputs), to_numpy(targets)
-        size = next(iter(inputs.values())).shape[0]
-        if size != self.batch_size and not self.pad_to_batch:
-            raise ValueError(f"batch of {size} events, expected {self.batch_size}: use drop_last=True for training loaders")
-        event_valid = np.arange(self.batch_size) < size
-        if size != self.batch_size:
-            pad = {"target_object": self.target_object, "null_class": self.null_class}
-            inputs, targets = pad_events(inputs, self.batch_size, **pad), pad_events(targets, self.batch_size, **pad)
-        host = {key: tree.pop(key) for tree in (inputs, targets) for key in list(tree) if key in self.host_keys}
-        inputs = {key: _cast(key, value) for key, value in inputs.items()}
-        targets = {key: _cast(key, value) for key, value in targets.items()}
-        self._check_signature(inputs, targets)
+        prof = profile.current()
+        with prof.phase("numpy"):
+            inputs, targets = to_numpy(inputs), to_numpy(targets)
+            size = next(iter(inputs.values())).shape[0]
+            if size != self.batch_size and not self.pad_to_batch:
+                raise ValueError(f"batch of {size} events, expected {self.batch_size}: use drop_last=True for training loaders")
+            event_valid = np.arange(self.batch_size) < size
+            if size != self.batch_size:
+                pad = {"target_object": self.target_object, "null_class": self.null_class}
+                inputs, targets = pad_events(inputs, self.batch_size, **pad), pad_events(targets, self.batch_size, **pad)
+            host = {key: tree.pop(key) for tree in (inputs, targets) for key in list(tree) if key in self.host_keys}
+            inputs = {key: _cast(key, value) for key, value in inputs.items()}
+            targets = {key: _cast(key, value) for key, value in targets.items()}
+            self._check_signature(inputs, targets)
         if self.device_put:
-            inputs, targets = jax.device_put(inputs), jax.device_put(targets)
+            with prof.phase("device_put"):
+                inputs, targets = jax.device_put(inputs), jax.device_put(targets)
+            prof.block((inputs, targets), "device_put_wait")
         return Batch(inputs=inputs, targets=targets, event_valid=event_valid, host=host)
 
     def _check_signature(self, inputs: dict, targets: dict) -> None:
@@ -149,5 +157,76 @@ class HostBatches:
             raise ValueError(f"batch shapes/dtypes changed (a new compile): {changed}")
 
     def __iter__(self) -> Iterator[Batch]:
-        for inputs, targets in self.loader:
+        loader = iter(self.loader)
+        while True:
+            with profile.current().phase("loader"):
+                item = next(loader, _END)
+            if item is _END:
+                return
+            inputs, targets = item
             yield self.convert(inputs, targets)
+
+
+_END = object()
+
+
+@dataclass(frozen=True)
+class _Raised:
+    error: BaseException
+
+
+def prefetch(iterable: Iterable, depth: int) -> Iterator:
+    """Iterate ``iterable`` in a background thread, up to ``depth`` items ahead (same items, same order).
+
+    For ``HostBatches``: the loader wait, the numpy conversion and the ``device_put`` of the next batches run while the
+    main thread dispatches the step. Close the returned generator (or exhaust it) before iterating ``iterable``
+    again: closing stops the thread after the item it is producing and drops the items it read ahead. An exception
+    in the thread is raised in the consumer at its position in the sequence.
+
+    Yields:
+        The items of ``iterable``, in order.
+
+    Raises:
+        ValueError: If ``depth`` < 1.
+    """
+    if depth < 1:
+        raise ValueError(f"prefetch depth must be >= 1, got {depth}")
+    items: queue.Queue = queue.Queue(maxsize=depth)
+    stop = threading.Event()
+
+    def put(item) -> bool:
+        while not stop.is_set():
+            try:
+                items.put(item, timeout=0.05)
+            except queue.Full:
+                continue
+            else:
+                return True
+        return False
+
+    def work() -> None:
+        try:
+            for item in iterable:
+                if not put(item):
+                    return
+        except BaseException as error:  # noqa: BLE001  (re-raised in the consumer)
+            put(_Raised(error))
+            return
+        put(_END)
+
+    thread = threading.Thread(target=work, name="hepattn-prefetch", daemon=True)
+    thread.start()
+    try:
+        while True:
+            item = items.get()
+            if item is _END:
+                return
+            if isinstance(item, _Raised):
+                raise item.error
+            yield item
+    finally:
+        stop.set()
+        while thread.is_alive():  # the thread may be blocked in put(): keep the queue empty until it sees ``stop``
+            thread.join(timeout=0.05)
+            while not items.empty():
+                items.get_nowait()

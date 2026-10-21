@@ -1,0 +1,75 @@
+#!/bin/bash -l
+#PBS -N loop_profile
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=01:00:00
+# NOTE: -q and -l walltime= below are FALLBACKS for a bare qsub.
+# submit.sh overrides both from polaris/env.sh (QUEUE_*/WALLTIME_*).
+#PBS -q debug
+#PBS -j oe
+#PBS -o logs/18_loop_profile.log
+#
+# Submit with:  bash polaris/submit.sh 18_loop_profile.pbs
+# (submit.sh hands PROF_VARIANTS, PROF_ARGS, PROF_XLA_FLAGS and JAX_COMPILATION_CACHE_DIR to the job; a bare qsub does not)
+#   PROF_VARIANTS=pure,pure_sync,loader8 PROF_ARGS="--micro 200" bash polaris/submit.sh 18_loop_profile.pbs
+#
+# Where the native driver's ~0.3 s per micro-batch beyond the 161.6 ms G3 step goes (docs/hgq/port_log/PROF.md):
+# short profiled fits (main_jax fit --profile-phases) on real CLIC events, one A100, fp32, batch 32 x accumulation 4,
+# one epoch of 320 micro-batches each, in variants that isolate the phases (smoke cadence with and without the
+# determinism XLA flag of 16_jax_smoke.pbs, the production settings, the bare loop async / sync / prefetch / traced,
+# the perturbation pair pure_log / pure_noprof) and the train loader alone with 4 / 8 / 16 workers.
+# polaris/18_loop_profile.py lists the variants (the default order runs the determinism-flag pairs smoke / smoke_nodet
+# and pure / pure_det first, hypothesis H7, then the perturbation pair). A variant starts only if the time since this
+# job started (PROF_JOB_START below) plus the longest variant so far is within --budget-min (55 min). Results:
+# logs/loop_profile_<jobid>.json, written after every variant (`18_loop_profile.py report <json>` prints the table of a
+# partial one); the jax.profiler trace of pure_trace: $WORK_ROOT/loop_profile_<jobid>/jax_trace. Each fit's
+# checkpoints are deleted after the fit (--keep-ckpts keeps them).
+#
+# ONE-TIME SETUP on a login node (compute nodes may not reach PyPI). .venv-jax is the env of 14_backend_spike.pbs;
+# this adds what the keras_native suite needs (the S1 set of docs/hgq/KERAS_NATIVE.md) with the CUDA 12 jax and a
+# CPU-only torch (used only by CLICDataset here; a CUDA torch would load a second set of CUDA libraries into the JAX
+# process). The resolution was checked with `uv pip compile --python-platform x86_64-manylinux_2_28 --python-version
+# 3.12` (torch 2.10.0+cpu, jax-cuda12-plugin 0.11.2, nvidia-cudnn-cu12 9.27):
+#   cd "$HEPATTN_DIR"   # see polaris/repo_dir.sh
+#   [ -x .venv-jax/bin/python ] || uv venv --python 3.12.0 .venv-jax
+#   uv pip install --python .venv-jax/bin/python \
+#     --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match \
+#     "keras==3.15.0" "hgq2==0.1.9" "quantizers==1.2.2" "numpy==2.3.5" "jax[cuda12]==0.11.2" psutil \
+#     "torch==2.10.0" "lightning==2.5.2" "pyyaml==6.0.3" "uproot==5.7.1" "awkward==2.9.0" "atlas-ftag-tools==0.2.18" \
+#     "einops==0.8.2" "lapx==0.9.4" "scipy==1.18.1" "torchmetrics==1.8.2" "pytorch-lightning==2.6.1" \
+#     "lion-pytorch==0.2.3" "torchjd==0.7.0" "jsonargparse[signatures]==4.40.1" "matplotlib==3.10.8"
+#   # masked-linformer dce2e15 (imported by the org torch attention; --no-deps keeps torch 2.10.0+cpu), as docs/hgq/KERAS_NATIVE.md:
+#   uv pip install --python .venv-jax/bin/python --no-deps \
+#     "masked-linformer @ https://github.com/compressed-maskformer-reco/masked-linformer/archive/dce2e151e9d25cefd85454b3dffd5c83ec217097.tar.gz"
+# $REPO must hold this branch (keras_native/profile.py); the env imports hepattn from $REPO/src through PYTHONPATH.
+set -uo pipefail
+export PROF_JOB_START="$(date +%s)"   # 18_loop_profile.py's budget clock starts here, before the prelude
+cd "${PBS_O_WORKDIR:-$PWD}"
+source polaris/env.sh
+# the job knobs set in the submit shell (polaris/submit.sh writes them to a file: qsub passes no environment)
+if [ -n "${SUBMIT_ENV_FILE:-}" ]; then
+  echo "job variables from $SUBMIT_ENV_FILE:"; cat "$SUBMIT_ENV_FILE"
+  source "$SUBMIT_ENV_FILE"
+fi
+export PYTHONNOUSERSITE=1 TORCHDYNAMO_DISABLE=1
+# report real JAX device memory instead of the default 75% preallocation (as 16_jax_smoke.pbs)
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+# base XLA flags of every variant (the *_det / smoke variants add --det-flags); 17_g3_step.pbs sets none
+export XLA_FLAGS="${PROF_XLA_FLAGS:-}"
+# persistent compilation cache shared by the keras_native jobs (~2 min per program on an A100 otherwise)
+export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-$WORK_ROOT/jax_cache}"
+
+source polaris/repo_dir.sh
+REPO="$HEPATTN_DIR"; cd "$REPO"
+mkdir -p logs
+
+[ -x "$REPO/.venv-jax/bin/python" ] || { echo "ERROR: $REPO/.venv-jax missing; see ONE-TIME SETUP in this file"; exit 1; }
+[ -f "$REPO/src/hepattn/keras_native/profile.py" ] || { echo "ERROR: $REPO has no keras_native/profile.py (check out the prof/loop branch)"; exit 1; }
+nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv | head -2
+nproc; lscpu | grep -E "Model name|^CPU\(s\)" || true
+"$REPO/.venv-jax/bin/python" -c "import jax, torch; print('jax', jax.__version__, jax.devices(), '| torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$REPO/src" "$REPO/.venv-jax/bin/python" polaris/18_loop_profile.py \
+  --run-root "$WORK_ROOT/loop_profile_${PBS_JOBID:-local}" --data-dir "$DATA_ROOT" \
+  --python "$REPO/.venv-jax/bin/python" --out "logs/loop_profile_${PBS_JOBID:-local}.json" ${PROF_ARGS:-}
+echo "LOOP-PROFILE-EXIT-$?"

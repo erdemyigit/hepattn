@@ -1,0 +1,52 @@
+targeted (loop, cli, data, checkpoint, train_step, resume_cross_lane, profile): 139 passed, 4240 warnings in 2227.26s (0:37:07)
+full tests/keras_native (.venv-jax): 842 passed, 16 skipped, 401 warnings in 2616.80s (0:43:36)
+test_data_real.py with CLIC_DATA_DIR=<main checkout>/data/clic: 4 passed in 6.70s
+test_export.py in hepattn-s7/.venv-jax (hls4ml 1.3.0): 18 passed, 5 skipped, 2 warnings in 81.33s (0:01:21)
+
+## review fix 2026-10-20
+full tests/keras_native (.venv-jax, PYTHONPATH=hepattn-prof/src, KERAS_BACKEND=jax), started after the profile.py/cli.py edits:
+  SKIPPED [1] tests/keras_native/test_data_real.py:54: /eagle/hgcal-maskformer-fpga/clic_data/val_clic_fix.root not found (set CLIC_DATA_DIR)
+  SKIPPED [1] tests/keras_native/test_data_real.py:65: /eagle/hgcal-maskformer-fpga/clic_data/val_clic_fix.root not found (set CLIC_DATA_DIR)
+  SKIPPED [1] tests/keras_native/test_data_real.py:77: /eagle/hgcal-maskformer-fpga/clic_data/val_clic_fix.root not found (set CLIC_DATA_DIR)
+  SKIPPED [1] tests/keras_native/test_data_real.py:87: /eagle/hgcal-maskformer-fpga/clic_data/val_clic_fix.root not found (set CLIC_DATA_DIR)
+  SKIPPED [1] tests/keras_native/test_export.py:181: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:187: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:193: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:199: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:206: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:221: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:251: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:334: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:346: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:382: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:395: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:406: hls4ml not installed
+  844 passed, 16 skipped, 401 warnings in 2207.32s (0:36:47)
+  (842 -> 844: test_derived_numbers_on_a_fake_clock, test_cli_profiler_flags; the 16 skips are hls4ml / real data as before, files this fix does not touch)
+  note: this suite ran before one later edit to profile.py (the redundant is_compile filter in busy removed; mutant m10 shows it was redundant); test_profile.py on the final code = mutation baseline p00 in mutations_review_all.json
+tests/polaris/test_loop_profile_script.py: 6 passed (baseline p00b)
+
+## review 2 fix (2026-10-21), final code (no src edit after these runs)
+full tests/keras_native (.venv-jax, PYTHONPATH=hepattn-prof/src, -rs):
+  SKIPPED [1] tests/keras_native/test_data_real.py:54: /eagle/hgcal-maskformer-fpga/clic_data/val_clic_fix.root not found (set CLIC_DATA_DIR)
+  SKIPPED [1] tests/keras_native/test_data_real.py:65: /eagle/hgcal-maskformer-fpga/clic_data/val_clic_fix.root not found (set CLIC_DATA_DIR)
+  SKIPPED [1] tests/keras_native/test_data_real.py:77: /eagle/hgcal-maskformer-fpga/clic_data/val_clic_fix.root not found (set CLIC_DATA_DIR)
+  SKIPPED [1] tests/keras_native/test_data_real.py:87: /eagle/hgcal-maskformer-fpga/clic_data/val_clic_fix.root not found (set CLIC_DATA_DIR)
+  SKIPPED [1] tests/keras_native/test_export.py:181: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:187: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:193: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:199: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:206: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:221: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:251: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:334: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:346: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:382: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:395: hls4ml not installed
+  SKIPPED [1] tests/keras_native/test_export.py:406: hls4ml not installed
+  845 passed, 16 skipped, 4820 warnings in 2307.90s (0:38:27)
+  (844 -> 845: test_driver_sets_the_data_position; same 16 skips)
+tests/keras_native/test_profile.py: 15 passed (mutation baseline p00); fast subset 3 passed (p00c, p00d)
+tests/polaris/test_loop_profile_script.py: 8 passed (baseline p00b)
+mutations: 80 entries, 4 baselines pass, 76 of 76 mutants killed (mutations_review2_all.json)
+bitwise vs S7 111aede: off / async / sync_pf EQUAL, ctl_bit / ctl_meta DIFFERENT (baseline_cmp2_review2.out)

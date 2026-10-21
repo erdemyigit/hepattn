@@ -57,6 +57,8 @@ case "$BASE" in
   # jax-precision:32,hybrid-tf32:16: ~10 programs at ~2 min each on an A100 + 1 Lightning run) need their own
   # submission within the 1 h debug walltime
   17_g3_step.pbs)       DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
+  # default: 10 fits of 320 micro-batches (9 profiled; compile-cache hits after the first of each XLA-flag set) + 3 loader runs
+  18_loop_profile.pbs)  DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
   *)            DEF_QUEUE="${QUEUE_DEBUG:-debug}";      DEF_WALL="${WALLTIME_SMOKE:-00:20:00}" ;;
 esac
 QUEUE="${QUEUE:-$DEF_QUEUE}"
@@ -71,11 +73,11 @@ ARGS=(-A "$PBS_PROJECT" -l "filesystems=$PBS_FILESYSTEMS" -q "$QUEUE"
       -l "walltime=$DEF_WALL" -o "$LOGDIR/${BASE%.pbs}.log")
 [ -n "$DEPEND" ] && ARGS+=(-W "depend=$DEPEND")
 
-# Job knobs that the .pbs scripts read (16_jax_smoke, 17_g3_step). qsub runs here without -V, so the job does not see
+# Job knobs that the .pbs scripts read (16_jax_smoke, 17_g3_step, 18_loop_profile). qsub runs here without -V, so the job does not see
 # the submit shell's environment. The knobs that are set (an empty value counts: SMOKE_XLA_FLAGS= drops the flag) go
 # into a file of `export` lines, and the job gets only that file's path (-v SUBMIT_ENV_FILE=...), because qsub -v
 # splits its list at commas (G3_JOBS holds commas).
-JOB_VARS=(G3_JOBS G3_ARGS G3_DATA_FILE SMOKE_ARGS SMOKE_XLA_FLAGS JAX_COMPILATION_CACHE_DIR)
+JOB_VARS=(G3_JOBS G3_ARGS G3_DATA_FILE SMOKE_ARGS SMOKE_XLA_FLAGS PROF_VARIANTS PROF_ARGS PROF_XLA_FLAGS JAX_COMPILATION_CACHE_DIR)
 ENV_FILE=""
 for v in "${JOB_VARS[@]}"; do
   [ -n "${!v+x}" ] || continue

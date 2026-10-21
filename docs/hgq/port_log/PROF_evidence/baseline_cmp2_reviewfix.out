@@ -1,0 +1,9 @@
+# review fix 2026-10-20: baseline_cmp.sh + baseline_cmp2.py on the final review-fix sources (cli.profilers refactor, profile.py summary)
+ref: 6 npz files {'metrics.csv': 2, 'steps.csv': 8} csv rows
+off: 6 npz, 13710 state arrays bitwise-compared, meta (no wall-clock) diffs [], csv equal True -> EQUAL
+async: 6 npz, 13710 state arrays bitwise-compared, meta (no wall-clock) diffs [], csv equal True -> EQUAL
+sync_pf: 6 npz, 13710 state arrays bitwise-compared, meta (no wall-clock) diffs [], csv equal True -> EQUAL
+# controls (baseline_controls.py on copies of off)
+ref: 6 npz files {'metrics.csv': 2, 'steps.csv': 8} csv rows
+ctl_bit: 6 npz, 13710 state arrays bitwise-compared, meta (no wall-clock) diffs [], csv equal True -> DIFFERENT
+ctl_meta: 6 npz, 13710 state arrays bitwise-compared, meta (no wall-clock) diffs ['beta'], csv equal True -> DIFFERENT

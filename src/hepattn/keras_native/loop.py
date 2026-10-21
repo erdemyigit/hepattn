@@ -67,10 +67,12 @@ import keras
 import numpy as np
 
 from hepattn.keras_native import checkpoint as ckpt
+from hepattn.keras_native import profile
 from hepattn.keras_native.beta_control import BetaPIDController, ramp_beta
 from hepattn.keras_native.checkpoint import CheckpointError
 from hepattn.keras_native.config import RunConfig
-from hepattn.keras_native.data import Batch
+from hepattn.keras_native.data import Batch, prefetch
+from hepattn.keras_native.matching import host_match
 from hepattn.keras_native.metrics import ClicMetrics
 from hepattn.keras_native.objective import matched_loss, permute_outputs
 from hepattn.keras_native.optim import build_optimizer, learning_rate
@@ -79,6 +81,7 @@ from hepattn.keras_native.train_step import TrainState, TrainStep, maskformer_lo
 
 BIT_SUFFIXES = ("b", "f", "i")
 FP32_PRECISIONS = {None, 32, "32", "32-true"}
+_END = object()
 
 
 class DataSource(Protocol):
@@ -104,6 +107,7 @@ class LoopSettings:
     matmul_precision: str | None = "highest"
     donate: bool = True
     pool_layers: bool = True  # ClicMetrics: the hybrid's pooled values (S6a decision 5)
+    prefetch: int = 0  # train batches read ahead in a background thread (data.prefetch); 0: none
 
     @classmethod
     def from_run_config(cls, rc: RunConfig, run_dir: str | Path, **overrides) -> "LoopSettings":
@@ -271,19 +275,26 @@ class Trainer:
         sample: One batch of the train split (builds the model eagerly, plan 3.1).
         train_batches: Full micro-batches of one train epoch (before ``limit_train_batches``).
         host_fn: Optional host matching function (``matching.match``), e.g. a timing wrapper.
+        profiler: Optional ``profile.PhaseProfiler``: ``fit`` records its phases (and, without ``host_fn``, the matching
+            callback's wall time). None: no recording, no added sync.
+        trace: Optional ``profile.JaxTrace``: a ``jax.profiler`` trace of a window of micro-batches.
 
     Raises:
         ValueError: If an epoch holds fewer micro-batches than one accumulation, or the config asks for a precision
             other than fp32 (the user decision: fp32 first).
     """
 
-    def __init__(self, rc: RunConfig, settings: LoopSettings, *, sample: Batch, train_batches: int, host_fn=None) -> None:
+    def __init__(self, rc: RunConfig, settings: LoopSettings, *, sample: Batch, train_batches: int, host_fn=None, profiler=None, trace=None) -> None:
         precision = rc.trainer.get("precision")
         if precision not in FP32_PRECISIONS:
             raise ValueError(f"trainer.precision={precision!r}: the native driver runs fp32 only (generate the config with HGQ_PRECISION=32)")
         if int(rc.trainer.get("devices", 1) or 1) > 1:
             warnings.warn(f"trainer.devices={rc.trainer['devices']}: the native driver uses one device", stacklevel=2)
         self.rc, self.s = rc, settings
+        self.prof = profiler if profiler is not None else profile.NULL
+        self.trace = trace
+        if self.prof.enabled and host_fn is None:  # the function match() would use, timed
+            host_fn = self.prof.time_host_fn(lambda costs, valid, n=rc.matcher_n_jobs: host_match(costs, valid, n_jobs=n))
         self.k = rc.optimizer.accumulate_grad_batches
         n = train_batches if settings.limit_train_batches is None else min(train_batches, settings.limit_train_batches)
         self.steps_per_epoch = n // self.k
@@ -529,15 +540,58 @@ class Trainer:
     def fit(self, train: DataSource, val: DataSource | None = None) -> dict:
         """Train to ``max_epochs`` / ``max_steps`` from the current position. Returns the run summary.
 
-        Raises:
-            RuntimeError: If the train source ends before ``micro_per_epoch`` micro-batches.
+        With a profiler: its phases between ``start`` and ``stop`` (``profile`` module docstring). A train source
+        that ends before ``micro_per_epoch`` micro-batches raises ``RuntimeError`` (in ``_fit``).
         """
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        self._managers()
-        steps_csv, epochs_csv = CsvLog(self.run_dir / "steps.csv"), CsvLog(self.run_dir / "metrics.csv")
-        if self.resumed_from is not None:  # same run directory: drop the rows written after the checkpoint
-            steps_csv.keep(lambda r: r["step"] <= self.global_step)
-            epochs_csv.keep(lambda r: r["epoch"] < self.epoch)  # epoch self.epoch's end hooks have not run
+        try:
+            if not self.prof.enabled:
+                return self._fit(train, val)
+            with self.prof.active():
+                self.prof.start()
+                try:
+                    return self._fit(train, val)
+                finally:
+                    self.prof.stop()
+        finally:
+            if self.trace is not None:  # a window past the end of the run
+                self.trace.stop(self.state)
+
+    def _jit_phase(self, name: str):
+        """Phase ``name`` around a jitted call, labelled ``+compile`` if the call traced (profiler only)."""
+        return _JitPhase(self, name) if self.prof.enabled else profile.NULL.phase(name)
+
+    def _batches(self, source: DataSource, epoch: int, start: int, *, train: bool):
+        """The batches of an epoch: read ahead (``prefetch``, train only) and timed as phase ``data`` (profiler)."""
+        batches = source.epoch(epoch, start)
+        if train and self.s.prefetch > 0:
+            batches = prefetch(batches, self.s.prefetch)
+        return self._timed(batches, train=train) if self.prof.enabled else batches
+
+    def _timed(self, iterable, *, train: bool):
+        it = iter(iterable)
+        try:
+            while True:
+                if train:
+                    self.prof.at(self.micro_step + 1, self.global_step, self.epoch)
+                with self.prof.phase("data"):
+                    item = next(it, _END)
+                if item is _END:
+                    return
+                yield item
+        finally:
+            close = getattr(it, "close", None)
+            if close is not None:
+                close()
+
+    def _fit(self, train: DataSource, val: DataSource | None) -> dict:
+        prof = self.prof
+        with prof.phase("setup"):
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            self._managers()
+            steps_csv, epochs_csv = CsvLog(self.run_dir / "steps.csv"), CsvLog(self.run_dir / "metrics.csv")
+            if self.resumed_from is not None:  # same run directory: drop the rows written after the checkpoint
+                steps_csv.keep(lambda r: r["step"] <= self.global_step)
+                epochs_csv.keep(lambda r: r["epoch"] < self.epoch)  # epoch self.epoch's end hooks have not run
         self._t_log, self._micro_since_log = time.perf_counter(), 0
         # data position (epoch, batch) = the next micro-batch; (e, micro_per_epoch) = epoch e trained, its end hooks due
         while self.epoch < self.s.max_epochs:
@@ -545,33 +599,57 @@ class Trainer:
             if start == 0 and self.global_step >= self.total_steps:
                 break
             if start == 0:
-                self._on_epoch_start(epoch)
+                with prof.phase("epoch_start"):
+                    self._on_epoch_start(epoch)
             if start < self.micro_per_epoch and self.global_step < self.total_steps:
-                for b, batch in enumerate(train.epoch(epoch, start), start=start):
-                    if b >= self.micro_per_epoch:
-                        break
-                    self._train_micro(batch)
-                    self.batch = b + 1
-                    if self.micro_step % self.k:
-                        continue
-                    self.global_step += 1
-                    if self.global_step % self.s.log_every_n_steps == 0:
-                        steps_csv.append(self._log_step(batch, epoch))
-                    if self.step_manager is not None and self.step_manager.policy.step_due(self.global_step):
-                        self.step_manager.save(self.global_step, *self._save_args(), self.meta())  # meta() syncs
-                    if self.global_step >= self.total_steps:
-                        break
+                batches = self._batches(train, epoch, start, train=True)
+                try:
+                    for b, batch in enumerate(batches, start=start):
+                        if b >= self.micro_per_epoch:
+                            break
+                        self._train_micro(batch)
+                        self.batch = b + 1
+                        if self.micro_step % self.k:
+                            continue
+                        self.global_step += 1
+                        if self.global_step % self.s.log_every_n_steps == 0:
+                            with prof.phase("train/log"):
+                                row = self._log_step(batch, epoch)
+                                with prof.phase("csv"):
+                                    steps_csv.append(row)
+                        if self.step_manager is not None and self.step_manager.policy.step_due(self.global_step):
+                            with prof.phase("train/ckpt"):
+                                self._save(self.step_manager.save)
+                        if self.global_step >= self.total_steps:
+                            break
+                finally:
+                    close = getattr(batches, "close", None)  # a generator (prefetch / profiler); HostBatches has none
+                    if close is not None:
+                        close()
             ended = self.batch >= self.micro_per_epoch
             if not ended and self.global_step < self.total_steps:
                 raise RuntimeError(f"epoch {epoch} ended after {self.batch} of {self.micro_per_epoch} micro-batches: the data source is short")
             if ended:
                 self.epoch, self.batch = epoch + 1, 0
-            self._on_epoch_end(epoch, val if ended else None, epochs_csv)
+            with prof.phase("epoch_end"):
+                prof.wait(self.state, "drain")
+                self._on_epoch_end(epoch, val if ended else None, epochs_csv)
             if not ended:  # max_steps inside an epoch: Lightning runs no validation there
                 break
         if self.step_manager is not None and self.step_manager.write_last:
-            self.step_manager.save_last(self.global_step, *self._save_args(), self.meta())
-        return self.summary()
+            with prof.phase("train_end/ckpt_last"):
+                self._save(self.step_manager.save_last)
+        with prof.phase("train_end/drain"):
+            prof.wait(self.state, "wait")
+        with prof.phase("summary"):
+            return self.summary()
+
+    def _save(self, save) -> None:
+        """``save(step, model, optimizer, state, meta)`` of a checkpoint manager; ``meta()`` syncs (EBOPs read-out)."""
+        self.prof.wait(self.state)  # the save copies the state to the host next: blocks on it anyway
+        with self.prof.phase("meta"):
+            meta = self.meta()
+        save(self.global_step, *self._save_args(), meta)
 
     def _on_epoch_start(self, epoch: int) -> None:
         if self.pid is None:
@@ -587,27 +665,42 @@ class Trainer:
     def _train_micro(self, batch: Batch) -> None:
         if self.global_step >= self.total_steps:  # torch OneCycleLR raises here ("Tried to step N times")
             raise RuntimeError(f"optimizer step {self.global_step + 1} exceeds total_steps {self.total_steps}")
+        prof = self.prof
         if self.ramp is not None:
-            self._set_beta(ramp_beta(self.global_step, **self.ramp))
+            with prof.phase("train/beta"):
+                self._set_beta(ramp_beta(self.global_step, **self.ramp))
         ebops_on = self.ebops_active()
+        if self.trace is not None:
+            with prof.phase("trace"):
+                self.trace.before(self.micro_step)
         t0 = time.perf_counter() if self.first_step_s is None else None
-        self.state, out = self.steps.train_step(self.state, (batch.inputs, batch.targets), ebops_on=ebops_on)
+        with self._jit_phase("train/step"):
+            self.state, out = self.steps.train_step(self.state, (batch.inputs, batch.targets), ebops_on=ebops_on)
         if t0 is not None:
-            jax.block_until_ready(out.loss)
+            with prof.phase("train/first_step_wait"):
+                jax.block_until_ready(out.loss)
             self.first_step_s = time.perf_counter() - t0
+        else:
+            prof.block(out.loss, "train/device")
         self.micro_step += 1
         self._micro_since_log += 1
         if ebops_on and self.beta > 0:
             self._reading = (out.penalty, self.beta)
         self._last = (out, ebops_on)
+        if self.trace is not None:
+            with prof.phase("trace"):
+                self.trace.after(self.micro_step, self.state)
 
     def _log_step(self, batch: Batch, epoch: int) -> dict[str, float]:
         """The train row of a logged optimizer step (its last micro-batch); syncs the device."""
+        prof = self.prof
         out, ebops_on = self._last
-        jax.block_until_ready(out.loss)
+        with prof.phase("device_wait"):
+            jax.block_until_ready(out.loss)
         now = time.perf_counter()
         row: dict[str, float] = {"epoch": float(epoch), "step": float(self.global_step)}
-        host = jax.device_get({"losses": _flat_losses(out.losses, "train"), "parts": (out.task_loss, out.penalty, out.regularization, out.loss)})
+        with prof.phase("device_get"):
+            host = jax.device_get({"losses": _flat_losses(out.losses, "train"), "parts": (out.task_loss, out.penalty, out.regularization, out.loss)})
         row.update({k: float(v) for k, v in host["losses"].items()})
         task, penalty, regularization, total = (float(v) for v in host["parts"])
         row["train/loss"] = task
@@ -615,15 +708,20 @@ class Trainer:
         row["train/total_loss"] = total
         row["train/ebops_active"] = float(ebops_on)
         row["train/quant_beta"] = math.nan if self.beta is None else self.beta
-        ebops = self.last_ebops
+        with prof.phase("ebops"):
+            ebops = self.last_ebops
         row["train/ebops"] = math.nan if ebops is None else ebops
         row["train/lr"] = float(self.schedule((self.global_step - 1) * self.k)) if callable(self.schedule) else float(self.schedule)
         row["time/ms_per_micro_batch"] = 1e3 * (now - self._t_log) / max(1, self._micro_since_log)
-        row.update(self.bit_stats("train"))
-        res = self._val(self.state, batch.inputs, batch.targets)
-        metrics = ClicMetrics("train", pool_layers=self.s.pool_layers)
-        metrics.update(res["preds"], batch.targets, event_valid=batch.event_valid)
-        row.update(metrics.compute())
+        with self._jit_phase("bits"):
+            row.update(self.bit_stats("train"))
+        with self._jit_phase("metrics_forward"):
+            res = self._val(self.state, batch.inputs, batch.targets)
+        prof.wait(res, "metrics_device")  # metrics.update reads the predictions next
+        with prof.phase("metrics_host"):
+            metrics = ClicMetrics("train", pool_layers=self.s.pool_layers)
+            metrics.update(res["preds"], batch.targets, event_valid=batch.event_valid)
+            row.update(metrics.compute())
         self.train_logs = row
         self._t_log, self._micro_since_log = time.perf_counter(), 0
         return row
@@ -634,49 +732,62 @@ class Trainer:
         Raises:
             RuntimeError: If the split gives no events.
         """
+        prof = self.prof
         metrics = ClicMetrics("val", pool_layers=self.s.pool_layers)
         sums: dict[str, float] = defaultdict(float)
         events = 0
-        for i, batch in enumerate(val.epoch(0)):
+        for i, batch in enumerate(self._batches(val, 0, 0, train=False)):
             if self.s.limit_val_batches is not None and i >= self.s.limit_val_batches:
                 break
-            res = self._val(self.state, batch.inputs, batch.targets)
+            with self._jit_phase("forward"):
+                res = self._val(self.state, batch.inputs, batch.targets)
+            prof.wait(res, "device")  # the losses are read on the host below
             n = batch.num_real
             task, losses = res["task"], res["losses"]
             if n < self.batch_size:
-                outputs = jax.tree_util.tree_map(lambda x, n=n: x[:n], res["outputs"])
-                targets = {k: v[:n] for k, v in batch.targets.items()}
-                task, losses = self._tail(outputs, targets)
-            terms = jax.device_get({"val/loss": task, "val/quant_ebops_loss": res["regularization"], **_flat_losses(losses, "val")})
+                with self._jit_phase("tail"):
+                    outputs = jax.tree_util.tree_map(lambda x, n=n: x[:n], res["outputs"])
+                    targets = {k: v[:n] for k, v in batch.targets.items()}
+                    task, losses = self._tail(outputs, targets)
+            with prof.phase("device_get"):
+                terms = jax.device_get({"val/loss": task, "val/quant_ebops_loss": res["regularization"], **_flat_losses(losses, "val")})
             for key, value in terms.items():
                 sums[key] += float(value) * n
             events += n
-            metrics.update(res["preds"], batch.targets, event_valid=batch.event_valid)
+            with prof.phase("metrics"):
+                metrics.update(res["preds"], batch.targets, event_valid=batch.event_valid)
         if events == 0:
             raise RuntimeError("the validation split gave no events")
         out = {key: total / events for key, total in sums.items()}
-        out.update(metrics.compute())
+        with prof.phase("metrics_compute"):
+            out.update(metrics.compute())
         ebops = self.last_ebops
         out["val/ebops"] = math.nan if ebops is None else ebops
-        out.update(self.bit_stats("val"))
+        with self._jit_phase("bits"):
+            out.update(self.bit_stats("val"))
+        self.val_events = events
         return out
 
     def _on_epoch_end(self, epoch: int, val: DataSource | None, epochs_csv: CsvLog) -> None:
         """Validation (a complete epoch only), the ``MetricsCsvWriter`` row, then the epoch / last checkpoints."""
+        prof = self.prof
         validated = val is not None and (epoch + 1) % self.s.check_val_every_n_epoch == 0
         if validated:
-            self.last_val = self.validate(val)
-            epochs_csv.append({**self.train_logs, **self.epoch_logs, **self.last_val, "epoch": float(epoch), "step": float(self.global_step)})
-        args = self._save_args()
+            with prof.phase("val"):
+                self.last_val = self.validate(val)
+            with prof.phase("csv"):
+                epochs_csv.append({**self.train_logs, **self.epoch_logs, **self.last_val, "epoch": float(epoch), "step": float(self.global_step)})
         # Lightning ModelCheckpoint._should_save_on_train_epoch_end: with check_val_every_n_epoch != 1 it saves only at
         # a validation end, so an epoch without validation writes no epoch file (it would carry the previous val/loss)
         if self.epoch_manager is not None and (validated or self.s.check_val_every_n_epoch == 1):
             if self.last_val is not None:
-                self.epoch_manager.maybe_save_epoch(epoch, self.global_step, self.last_val, *args, self.meta())
+                with prof.phase("ckpt_epoch"):
+                    self._save(lambda step, *args: self.epoch_manager.maybe_save_epoch(epoch, step, self.last_val, *args))
             else:
                 warnings.warn(f"epoch {epoch}: no validation has run, so no epoch checkpoint (Lightning saves one without val/loss)", stacklevel=2)
         if self.step_manager is not None and self.step_manager.write_last:
-            self.step_manager.save_last(self.global_step, *args, self.meta())
+            with prof.phase("ckpt_last"):
+                self._save(self.step_manager.save_last)
 
     def summary(self) -> dict:
         return {
@@ -710,6 +821,22 @@ class Trainer:
             metrics.update(res["preds"], batch.targets, event_valid=batch.event_valid)
         writer.close()
         return metrics.compute()
+
+
+class _JitPhase:
+    """``Trainer._jit_phase``: a profiler phase that is relabelled ``+compile`` when the trainer's trace counts change."""
+
+    def __init__(self, trainer: Trainer, name: str) -> None:
+        self.trainer, self.phase = trainer, trainer.prof.phase(name)
+
+    def __enter__(self):
+        self.before = sum(self.trainer.compile_counts().values())
+        return self.phase.__enter__()
+
+    def __exit__(self, *exc) -> None:
+        self.phase.__exit__(*exc)
+        if sum(self.trainer.compile_counts().values()) != self.before:
+            self.trainer.prof.mark_compile()
 
 
 def write_json(path: str | Path, obj: Any) -> None:
