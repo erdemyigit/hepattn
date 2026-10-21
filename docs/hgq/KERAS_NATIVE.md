@@ -94,6 +94,18 @@ S7 added hls4ml and da4ml (the versions of the hybrid env) for the export tests:
 uv pip install --python .venv-jax/bin/python "hls4ml==1.3.0" "da4ml==0.6.0"
 ```
 
+They are optional. On 2026-10-21 `hepattn-keras-jax/.venv-jax` does **not** have them (it is
+`keras_native_env.txt` minus `da4ml`, `hls4ml`, `pydigitalwavetools`; `uv pip freeze` diff), and the 12
+`needs_hls4ml` tests of `test_export.py` skip there with "hls4ml not installed". `hepattn-s7/.venv-jax` has the full
+set. To run the export tests with hls4ml from this worktree, use that interpreter with this worktree's `src`:
+
+```bash
+env -u KERAS_BACKEND PYTHONPATH=$PWD/src ../hepattn-s7/.venv-jax/bin/python -m pytest tests/keras_native/test_export.py
+```
+
+On macOS the 5 C-simulation tests still skip (hls4ml's ap_types headers do not build with Apple clang); run them on
+Linux, or use `docs/hgq/port_log/S7_csim.py` ([S7.md](port_log/S7.md)).
+
 The full resolved set is in [keras_native_env.txt](keras_native_env.txt) (`uv pip freeze`). The canonical way to
 recreate the venv is `uv venv --python 3.12.0 .venv-jax && uv pip sync --python .venv-jax/bin/python
 docs/hgq/keras_native_env.txt`. `uv.lock` and the pixi files are not changed. hepattn itself is **not** installed: always put the worktree's `src` first on `PYTHONPATH`.

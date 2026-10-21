@@ -1,14 +1,32 @@
 # Plan: move HGQ2 QAT training to pure Keras on JAX
 
 Status: G1 GO (its trainer gap still OPEN until G3); S1-S4 merged into `keras-jax` on 2026-10-15; retargeted to the org/main float Linformer model (`ac0da8f`)
-on 2026-10-16; S5, S6a, S6b done on 2026-10-20 (Polaris: real-data smoke passed, job 7763621, and G3 passed, job 7763879: recorded in the main worktree's `WORKLOG.hgq.md`, not on this branch; [port_log/README.md](port_log/README.md) still lists both as carried); S7 done on 2026-10-20 (branch `s7/export`) ([RETARGET_ORG_MAIN.md](RETARGET_ORG_MAIN.md), stages R0-R5; see "Status" below). Originally a proposal that waited for G1.
-Date: 2026-10-14. Branch: `keras-jax` (pushed only up to `826bc0a`, after R5; S5 and S6 are not pushed), worktree `hepattn-keras-jax`.
+on 2026-10-16; S5, S6a, S6b done on 2026-10-20 (Polaris: real-data smoke passed, job 7763621, and G3 passed, job 7763879: recorded in the main worktree's `WORKLOG.hgq.md`, not on this branch; [port_log/README.md](port_log/README.md) points there); S7 done on 2026-10-20 and merged into `keras-jax` on 2026-10-21 (`f4aab4a`) ([RETARGET_ORG_MAIN.md](RETARGET_ORG_MAIN.md), stages R0-R5; see "Status" below). Originally a proposal that waited for G1.
+Date: 2026-10-14. Branch: `keras-jax` (pushed up to `f30d650`, after S5/S6; the S7 merge is not pushed), worktree `hepattn-keras-jax`.
 Scope: only the CLIC HGQ2 quantization-aware training, evaluation and export path. The other
 experiments (`atlas_muon`, `trackml`, `tide`, ...) and the float torch model stay on torch and Lightning.
 
 All paths are relative to the `hepattn-keras-jax` worktree unless they start with `SP/`, which means
 `.venv-jax/lib/python3.12/site-packages/` (keras 3.15.0, hgq2 0.1.9, jax 0.11.2, scipy 1.18.1).
 Commits are on `keras-jax` (`git log main..keras-jax`).
+
+## Status update (2026-10-21, S7 merged)
+
+**Done:** S1-S7. `s7/export` (`2b15167`, after two review rounds) is merged into `keras-jax` as `f4aab4a`; the merged
+tree equals `2b15167`. Suites on the merged tree: [port_log/S7-merge.md](port_log/S7-merge.md). G3 and the real-data
+smoke passed on Polaris (jobs 7763879 and 7763621; numbers in the main worktree's `WORKLOG.hgq.md`).
+
+**Open:**
+- **Lindsey Gray's PR #9 float checkpoint:** not received. When it arrives, convert it with `convert_to_native`
+  (`--target-config` = the QAT config, read `max_abs_diff` and `renorm_lane` in the `--report`), then warm-start QAT
+  with `main_jax fit --init-from` ([KERAS_NATIVE.md](KERAS_NATIVE.md)).
+- **G4 (S8):** JAX vs hybrid from the same converted weights and data order (section 4, "S8 / G4").
+- **Beta scan:** the EBOPs setpoints are PROVISIONAL ([BETA_SETPOINTS.md](BETA_SETPOINTS.md),
+  [port_log/S56-critique.md](port_log/S56-critique.md)); the Polaris beta scan is still due.
+- **Loop overhead:** the Polaris smoke spent about 0.3 s per micro-batch outside the 0.16 s train step (data, logging,
+  validation, checkpoints; `WORKLOG.hgq.md`). Being profiled on `prof/loop` (worktree `hepattn-prof`, not merged).
+- Carried: csim by pytest on Linux (the falcon login node kills the process; `S7_csim.py` covers it), the
+  tolerance-0 golden rows on Linux/GPU, the G3 diagnostics job 7764401 (G1 gap, TF32).
 
 ## Status update (2026-10-20, after S7)
 
