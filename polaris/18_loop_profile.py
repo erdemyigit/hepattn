@@ -13,7 +13,8 @@ Variants (``--variants``, default ``DEFAULT_VARIANTS``; each fit is one epoch of
 - ``prod``: the production settings (step checkpoint every 1000 optimizer steps, newest kept; log every 200;
   validation). At the default ``--micro 320`` (80 optimizer steps) neither period is reached, so this is ``pure`` +
   validation + the epoch checkpoint, not the production cadence;
-- ``pure``: no validation, no step checkpoint, no log (the bare loop; the train-end ``last`` checkpoint remains);
+- ``pure``: no validation, no step checkpoint, no log (the bare loop; the epoch-end ``last`` checkpoint remains, outside
+  the loop window);
 - ``pure_det``: ``pure`` with the determinism flag (``pure`` vs ``pure_det`` decides H7: both load warm programs);
 - ``pure_log`` / ``pure_noprof``: ``pure`` with a log row every ``--pert-log-every`` optimizer steps, with and without
   the profiler (perturbation control). ``steps.csv``'s ``time/ms_per_micro_batch`` is the wall time between two log
@@ -30,9 +31,12 @@ Variants (``--variants``, default ``DEFAULT_VARIANTS``; each fit is one epoch of
 
 Results (``--out``, written after every variant): per variant the RESULT summary, the profile summary (phase table)
 and the derived ``s_per_micro`` (wall / micro-batches), ``s_per_micro_excl_compile``, ``s_per_micro_steady`` (without
-the compiles and the first train / validation batch: profile.py) and ``overhead_vs_g3_ms`` (steady rate minus
-``--g3-step-ms``). A variant starts only if the time since the job start (``$PROF_JOB_START``, set by the pbs; else
-this script's start) plus the longest variant so far stays within ``--budget-min``; the rest are recorded as skipped.
+the compiles and the first train / validation batch: profile.py), ``s_per_micro_loop`` (the steady window without
+the work outside the train loop: setup, validation, the epoch-end checkpoints, the train end; profile.py),
+``overhead_vs_g3_ms`` (loop rate minus ``--g3-step-ms``: what the loop adds to the device step) and
+``overhead_steady_vs_g3_ms`` (steady rate minus ``--g3-step-ms``: end to end at the variant's cadence). A variant
+starts only if the time since the job start (``$PROF_JOB_START``, set by the pbs; else this script's start) plus the
+longest variant so far (fits and loaders) stays within ``--budget-min``; the rest are recorded as skipped.
 After each fit its checkpoints are deleted (1.1 GB each at production dims; ``--keep-ckpts`` keeps them); the save
 timings are in the profile.
 
@@ -228,16 +232,18 @@ def log_windows(steps_csv: Path) -> dict | None:
 
 
 def derive(res: dict, g3_step_ms: float) -> dict:
-    """S per micro-batch (with and without the compile phases) and the overhead over the G3 step."""
+    """S per micro-batch (whole fit, without the compiles, steady, loop) and the overheads over the G3 step."""
     summary = res["result"]
     micro = summary["micro_step"]
     prof = res.get("profile")
     if prof is not None:
-        per = prof["s_per_micro_batch_steady"]
+        per, steady = prof["s_per_micro_batch_loop"], prof["s_per_micro_batch_steady"]
         out = {
             "s_per_micro": prof["s_per_micro_batch"],
             "s_per_micro_excl_compile": prof["s_per_micro_batch_excl_compile"],
-            "s_per_micro_steady": per,
+            "s_per_micro_steady": steady,
+            "s_per_micro_loop": per,
+            "outside_loop_s": prof["outside_loop_s"],
             "one_time_s": prof["one_time_s"],
             "groups_ms_per_micro": {},
         }
@@ -246,10 +252,14 @@ def derive(res: dict, g3_step_ms: float) -> dict:
         out["unattributed_frac"] = prof["unattributed_frac"]
         out["steady"] = prof["steady"]
         out["match_callback"] = prof["concurrent"].get("match_callback")
+        for key in ("device_idle_frac_loop", "device_idle_frac"):
+            if key in prof:
+                out[key] = prof[key]
     else:  # no profiler: only the fit wall time (later compiles / cache loads included); see perturbation()
-        per = None
-        out = {"s_per_micro": summary["fit_s"] / micro, "s_per_micro_excl_compile": None, "s_per_micro_steady": None}
+        per = steady = None
+        out = {"s_per_micro": summary["fit_s"] / micro} | dict.fromkeys(("s_per_micro_excl_compile", "s_per_micro_steady", "s_per_micro_loop"))
     out["overhead_vs_g3_ms"] = None if per is None else 1e3 * per - g3_step_ms
+    out["overhead_steady_vs_g3_ms"] = None if steady is None else 1e3 * steady - g3_step_ms
     out["fit_s"] = summary["fit_s"]
     out["cache_misses"] = summary.get("cache_events", {}).get("cache_misses")
     return out
@@ -436,7 +446,8 @@ def smoke_timing(smoke_json: str | Path, run_root: str | Path = "") -> dict:
 
 
 def table(result: dict) -> str:
-    lines = [f"{'variant':16s} {'s/micro':>8s} {'excl.compile':>12s} {'steady':>8s} {'over G3 ms':>10s} {'misses':>6s}  top groups (ms/micro)"]
+    head = f"{'variant':16s} {'s/micro':>8s} {'excl.compile':>12s} {'steady':>8s} {'loop':>8s} {'loop-G3 ms':>10s} {'misses':>6s}"
+    lines = [head + "  top groups (ms/micro)"]
     for name, res in result["variants"].items():
         d = res.get("derived")
         if d is None:
@@ -449,11 +460,12 @@ def table(result: dict) -> str:
         top = ", ".join(f"{g} {ms:.1f}" for g, ms in groups)
         misses = str(d.get("cache_misses"))
         if d["s_per_micro_steady"] is None:
-            lines.append(f"{name:16s} {d['s_per_micro']:8.3f} {'-':>12s} {'-':>8s} {'-':>10s} {misses:>6s}  no profiler: fit_s {d['fit_s']:.1f}")
+            dashes = f"{'-':>12s} {'-':>8s} {'-':>8s} {'-':>10s}"
+            lines.append(f"{name:16s} {d['s_per_micro']:8.3f} {dashes} {misses:>6s}  no profiler: fit_s {d['fit_s']:.1f}")
             continue
         lines.append(
             f"{name:16s} {d['s_per_micro']:8.3f} {d['s_per_micro_excl_compile']:12.3f} {d['s_per_micro_steady']:8.3f} "
-            f"{d['overhead_vs_g3_ms']:10.1f} {misses:>6s}  {top}"
+            f"{d['s_per_micro_loop']:8.3f} {d['overhead_vs_g3_ms']:10.1f} {misses:>6s}  {top}"
         )
     if result.get("skipped"):
         lines.append(f"skipped (budget): {', '.join(result['skipped'])}")

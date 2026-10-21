@@ -17,13 +17,15 @@ What a phase measures under JAX's asynchronous dispatch:
 
 - ``async`` mode (default): no sync is added anywhere the loop would not block anyway. ``train/step`` is the time to
   DISPATCH the train step; it grows only when the device queue is full (back-pressure: the device is the
-  bottleneck). Time the loop spends blocked on device results is in the phases where it already blocks:
-  ``train/log/device_wait`` (``_log_step``'s ``block_until_ready``), ``*/ckpt*/device_wait`` and
-  ``epoch_end/drain``. These two are the only ``wait`` calls the profiler adds; each blocks on values that the next
-  statement reads on the host anyway (the checkpoint copies the whole state to the host; validation and the epoch
-  checkpoint read results computed from the state), so they move a wait into a named phase without changing what
-  overlaps with what, except that the first validation batch is no longer loaded while the device drains (at most once
-  per epoch).
+  bottleneck). Time the loop spends blocked on device results is in the phases where it already blocks
+  (``train/log/device_wait``: ``_log_step``'s ``block_until_ready``) or where the profiler adds a ``wait``. It adds
+  five: ``*/ckpt*/device_wait`` (before each checkpoint save), ``epoch_end/drain``, ``train_end/drain/wait``,
+  ``train/log/metrics_device`` and ``epoch_end/val/device`` (one per validation batch). Each blocks on values that the
+  next statement reads on the host anyway (the checkpoint copies the whole state to the host; the host metrics read
+  the predictions; validation and the epoch checkpoint read results computed from the state), so they move a wait
+  into a named phase without changing what overlaps with what, except: the first validation batch is no longer loaded
+  while the device drains (at most once per epoch), and the wait on a short validation batch comes before the dispatch
+  of its ``tail`` program, not after it (once per validation).
 - ``sync`` mode: additionally ``train/device`` blocks on every train step's loss right after the dispatch, and
   ``data/device_put`` blocks on the transferred batch. Every train step then runs alone, so ``train/step +
   train/device`` is the step's device time inside the real loop and the host phases no longer overlap with it; the
@@ -33,7 +35,13 @@ What a phase measures under JAX's asynchronous dispatch:
 One-time costs and the steady window: ``compile_s`` (every ``+compile`` phase and ``train/first_step_wait``), the first
 train batch (loader worker start) and the first validation batch (validation loader start) happen once per process.
 ``steady_wall_s`` is the wall time without them and ``steady_micro_batches`` the micro-batches without the first
-(its device time is inside ``train/first_step_wait``); ``s_per_micro_batch_steady`` is their ratio.
+(its device time is inside ``train/first_step_wait``); ``s_per_micro_batch_steady`` is their ratio. The steady window
+still holds the work outside the train loop (``is_outside_loop``: setup, epoch start, validation, the epoch-end epoch
+and ``last`` checkpoints, the train end, summary; a full checkpoint is 1.1 GB at production dims). The loop window
+(``loop_wall_s``) is the steady window without their non-compile exclusive time (``outside_loop_s``): the
+micro-batches, the log rows and step checkpoints at their cadence, ``epoch_end/drain`` (device time of steps already
+queued) and the Python between phases. ``s_per_micro_batch_loop`` = ``loop_wall_s / steady_micro_batches`` is the
+rate to compare with a device step; ``s_per_micro_batch_steady`` is the end-to-end rate without one-time costs.
 
 The device-idle fraction is measured only in ``sync`` mode, over the steady window: ``1 - busy / steady_wall_s``, with
 ``busy`` the exclusive time of the non-compile phases from a device dispatch to its result (``DEVICE_PHASES``: train
@@ -43,7 +51,8 @@ upper bound on the device's busy time and the idle fraction a lower bound. Batch
 not in ``busy``: the compute units are idle while the loop waits for a transfer. In ``async`` mode the idle fraction
 is estimated as ``1 - steady_micro_batches * step_ref_s / steady_wall_s`` when a reference step time is given
 (``summary(step_ref_s=...)``, e.g. the median ``train/step + train/device`` of a ``sync`` run or the G3 step). The
-``*_wall`` keys hold the same fractions over the whole wall (one-time costs included: not the steady loop).
+``*_loop`` keys hold the same fractions over the loop window, with ``busy`` restricted to the phases inside it
+(``device_busy_loop_s``); the ``*_wall`` keys over the whole wall (one-time costs included: not the steady loop).
 """
 
 import contextlib
@@ -279,17 +288,32 @@ class PhaseProfiler:
         out["steady_micro_batches"] = steady_micro
         out["s_per_micro_batch_excl_compile"] = (wall - compile_s) / micro if micro else float("nan")
         out["s_per_micro_batch_steady"] = steady_wall / steady_micro if steady_micro > 0 else float("nan")
+        # the first validation batch is inside an outside phase (epoch_end/val/data), so it is not subtracted again
+        outside = sum(p["excl_s"] for path, p in phases.items() if not is_compile(path) and is_outside_loop(path))
+        loop_wall = wall - compile_s - first_train - outside
+        out["outside_loop_s"] = outside
+        out["loop_wall_s"] = loop_wall
+        out["s_per_micro_batch_loop"] = loop_wall / steady_micro if steady_micro > 0 else float("nan")
         out["steady"] = self._steady(by_path)
+
+        def idle(busy_s: float, window_s: float) -> float:
+            return 1 - busy_s / window_s if window_s > 0 else float("nan")
+
         if self.sync:
             # a compile phase's leaf ends in COMPILE_SUFFIX, so it never matches DEVICE_PHASES
-            busy = sum(p["excl_s"] for path, p in phases.items() if path.rsplit("/", 1)[-1] in DEVICE_PHASES)
+            device = {path: p["excl_s"] for path, p in phases.items() if path.rsplit("/", 1)[-1] in DEVICE_PHASES}
+            busy = sum(device.values())
+            busy_loop = sum(s for path, s in device.items() if not is_outside_loop(path))
             out["device_busy_s"] = busy
-            out["device_idle_frac"] = 1 - busy / steady_wall if steady_wall > 0 else float("nan")
-            out["device_idle_frac_wall"] = 1 - busy / wall if wall else float("nan")
+            out["device_busy_loop_s"] = busy_loop
+            out["device_idle_frac"] = idle(busy, steady_wall)
+            out["device_idle_frac_loop"] = idle(busy_loop, loop_wall)
+            out["device_idle_frac_wall"] = idle(busy, wall)
         if step_ref_s is not None and micro:
             out["step_ref_s"] = step_ref_s
-            out["device_idle_frac_est"] = 1 - steady_micro * step_ref_s / steady_wall if steady_wall > 0 else float("nan")
-            out["device_idle_frac_est_wall"] = 1 - micro * step_ref_s / wall
+            out["device_idle_frac_est"] = idle(steady_micro * step_ref_s, steady_wall)
+            out["device_idle_frac_est_loop"] = idle(steady_micro * step_ref_s, loop_wall)
+            out["device_idle_frac_est_wall"] = idle(micro * step_ref_s, wall)
         return out
 
     def _steady(self, by_path: dict[str, list[tuple]]) -> dict[str, Any]:
@@ -311,6 +335,17 @@ def is_compile(path: str) -> bool:
     return path.endswith(COMPILE_SUFFIX) or path == "train/first_step_wait"
 
 
+OUTSIDE_LOOP = frozenset({"setup", "epoch_start", "epoch_end", "train_end", "summary"})  # first path segments
+LOOP_DRAIN = "epoch_end/drain"  # device time of the steps already queued: loop time, though it runs at the epoch end
+
+
+def is_outside_loop(path: str) -> bool:
+    """A phase outside the loop window: setup, epoch start, epoch end (validation, the epoch and ``last`` checkpoints;
+    not the drain), train end, summary.
+    """
+    return path.split("/", 1)[0] in OUTSIDE_LOOP and path != LOOP_DRAIN
+
+
 def group_of(path: str) -> str:
     """The attribution group of a phase path: the first segment, with the train sub-phases split out."""
     head, _, rest = path.partition("/")
@@ -326,7 +361,8 @@ def format_table(summary: dict, *, top: int = 40) -> str:
     lines = [
         f"mode {summary['mode']}  wall {summary['wall_s']:.3f} s  micro-batches {summary['micro_batches']}  "
         f"{1e3 * summary['s_per_micro_batch']:.1f} ms/micro  unattributed {summary['unattributed_s']:.4f} s "
-        f"({100 * summary['unattributed_frac']:.2f}%)",
+        f"({100 * summary['unattributed_frac']:.2f}%)  steady {1e3 * summary['s_per_micro_batch_steady']:.1f} ms/micro  "
+        f"loop {1e3 * summary['s_per_micro_batch_loop']:.1f} ms/micro",
         f"{'phase':48s} {'n':>6s} {'excl_s':>10s} {'%wall':>7s} {'ms/micro':>9s} {'median_ms':>10s}",
     ]
     rows = sorted(summary["phases"].items(), key=lambda kv: -kv[1]["excl_s"])[:top]

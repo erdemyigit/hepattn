@@ -12,12 +12,17 @@ a log row per optimizer step, a step checkpoint every 2 steps, validation every 
 - added syncs: with the profiler off, ``jax.block_until_ready`` runs exactly as often as before the profiler existed
   (the first step + one per logged step); async mode adds only the waits at points that block anyway; sync mode adds
   one per train step after the first and one per device transfer;
-- the phase counts follow the cadence (micro-batches, logs, checkpoints, validation batches);
+- the phase counts follow the cadence (micro-batches, logs, checkpoints, validation batches); the driver sets each
+  micro-batch's position (micro-batch, optimizer step, epoch) on its data and train phases; the trace window [3, 6)
+  starts after 3 dispatched micro-batches and stops after the 6th;
 - exclusive-time accounting on a fake clock; the derived numbers on a fake-clock run (compile time incl. the first-step
-  wait, the steady window without the first train / validation batch, the steady medians after the first optimizer
-  step, the sync-mode device-idle fraction incl. log, checkpoint and validation device phases, the estimate from a
-  reference step); prefetch order, error propagation and thread shutdown;
-- the ``fit`` command writes the phase CSV / JSON and the trace; ``--profile-sync`` makes a sync profiler.
+  wait, the steady window without the first train / validation batch, the loop window without the work outside the
+  train loop (setup, validation, the epoch-end ``last`` checkpoint, the train end; the epoch drain stays), the steady
+  medians after the first optimizer step, the sync-mode device-idle fractions incl. drain, log, checkpoint and
+  validation device phases, the estimates from a reference step); prefetch order, error propagation and thread
+  shutdown;
+- the ``fit`` command writes the phase CSV / JSON and the trace and passes ``--profile-step-ref-ms``;
+  ``--profile-sync`` makes a sync profiler.
 """
 
 import csv
@@ -100,8 +105,20 @@ def runs(rc, tmp_path_factory, cache):  # noqa: ARG001
     out = {"off": run(rc, tmp_path_factory, "off", count=True)}
     out["async"] = run(rc, tmp_path_factory, "async", profiler=profile.PhaseProfiler(), count=True)
     trace_dir = tmp_path_factory.mktemp("trace")
-    out["sync"] = run(rc, tmp_path_factory, "sync", profiler=profile.PhaseProfiler(sync=True), trace=profile.JaxTrace(trace_dir, 3, 6), count=True)
-    out["sync"]["trace_dir"] = trace_dir
+    sync, calls = profile.PhaseProfiler(sync=True), []
+
+    def recorded(kind: str, real):
+        def call(*args, **kwargs):  # the micro-batches dispatched when the trace starts / stops
+            calls.append((kind, sum(e[1].startswith("train/step") for e in sync.events)))
+            return real(*args, **kwargs)
+
+        return call
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(jax.profiler, "start_trace", recorded("start", jax.profiler.start_trace))
+        mp.setattr(jax.profiler, "stop_trace", recorded("stop", jax.profiler.stop_trace))
+        out["sync"] = run(rc, tmp_path_factory, "sync", profiler=sync, trace=profile.JaxTrace(trace_dir, 3, 6), count=True)
+    out["sync"] |= {"trace_dir": trace_dir, "trace_calls": calls}
     out["prefetch"] = run(rc, tmp_path_factory, "prefetch", prefetch=2)
     return out
 
@@ -174,6 +191,22 @@ def test_phase_counts_follow_the_cadence(runs):
     assert runs["async"]["trainer"].prof.summary()["concurrent"]["match_callback"]["n"] >= MICRO
 
 
+def test_driver_sets_the_data_position(runs):
+    """Every train micro-batch's phases carry its position: micro-batch i (from 1), optimizer step (i - 1) // K."""
+    prof = runs["async"]["trainer"].prof
+    expect = [(i, (i - 1) // K, (i - 1) // MICRO_PER_EPOCH) for i in range(1, MICRO + 1)]
+    steps = [e for e in prof.events if e[1] in {"train/step", "train/step" + profile.COMPILE_SUFFIX}]
+    assert [e[5:] for e in steps] == expect
+    # the data phase that loads a micro-batch (the last one before its step) carries the same position
+    data = [e for e in prof.events if e[1] == "data"]
+    assert [[d for d in data if d[0] < e[0]][-1][5:] for e in steps] == expect  # events are in seq order
+    # PeriodicEBOPs: optimizer step 0 compiles the ebops-on program (micro-batch 1), step 1 the ebops-off one (K + 1)
+    compiled = [e[5] for e in steps if e[1].endswith(profile.COMPILE_SUFFIX)]
+    assert compiled == [1, K + 1]
+    # steady medians: the micro-batches after optimizer step 0, without the compiling micro-batch K + 1
+    assert prof.summary()["steady"]["train/step"]["n"] == MICRO - K - 1
+
+
 def test_syncs_added_by_each_mode(runs):
     off, on, sync = (runs[m]["blocks"] for m in ("off", "async", "sync"))
     # the driver without the profiler: the first step (compile) and one block per logged step, as before profile.py
@@ -191,6 +224,8 @@ def test_sync_run_wrote_a_trace(runs):
     files = list(runs["sync"]["trace_dir"].rglob("*.xplane.pb"))
     assert files, sorted(runs["sync"]["trace_dir"].rglob("*"))
     assert runs["sync"]["trainer"].trace.done
+    # window [3, 6): the trace starts after 3 micro-batches were dispatched and stops after the 6th
+    assert runs["sync"]["trace_calls"] == [("start", 3), ("stop", 6)]
 
 
 def test_control_a_phase_left_out_breaks_the_sum(rc, tmp_path_factory, runs):  # noqa: ARG001  (after the cache fill)
@@ -234,7 +269,12 @@ class FakeClock:
 
 
 def synthetic_run(*, sync: bool) -> profile.PhaseProfiler:
-    """4 micro-batches (accumulation 2) on a fake clock, the phases as the driver opens them; quarter seconds (exact)."""
+    """4 micro-batches (accumulation 2) on a fake clock, the phases as the driver opens them; quarter seconds (exact).
+
+    One epoch: setup, epoch start, the micro-batches (the first ``data`` holds the loader start in ``data/loader``),
+    a log row and a step checkpoint, the epoch end (drain, validation of a full and a short batch with a compiling
+    first forward, the ``last`` checkpoint), the train end (a no-op ``last`` save, the drain) and the summary.
+    """
     clock = FakeClock()
     p = profile.PhaseProfiler(sync=sync, clock=clock)
 
@@ -246,9 +286,12 @@ def synthetic_run(*, sync: bool) -> profile.PhaseProfiler:
 
     with p.active():
         p.start()
-        ph("setup", 1.0)
+        ph("setup", 1.0), ph("epoch_start", 0.25)
         p.at(1, 0, 0)  # optimizer step 0: loader start, the compiling first step, its wait
-        ph("data", 5.0), ph("train/step", 10.0, compiled=True), ph("train/first_step_wait", 3.0)
+        with p.phase("data"):
+            ph("loader", 4.5)
+            clock.t += 0.5
+        ph("train/step", 10.0, compiled=True), ph("train/first_step_wait", 3.0)
         p.at(2, 0, 0)
         ph("data", 0.5), ph("train/step", 0.25), ph("train/device", 1.0)
         p.at(3, 1, 0)  # optimizer step 1: the second train program compiles
@@ -256,12 +299,24 @@ def synthetic_run(*, sync: bool) -> profile.PhaseProfiler:
         p.at(4, 1, 0)
         ph("data", 0.75), ph("train/step", 0.5), ph("train/device", 1.0)
         with p.phase("train/log"):
-            ph("metrics_forward", 0.5), ph("metrics_device", 0.5), ph("csv", 0.25)
+            ph("bits", 0.25), ph("metrics_forward", 0.5), ph("metrics_device", 0.5), ph("csv", 0.25)
         with p.phase("train/ckpt"):
             ph("device_wait", 0.25), ph("meta", 0.25), ph("host_copy", 0.5), ph("npz_write", 2.0)
-        with p.phase("epoch_end"), p.phase("val"):
-            ph("data", 2.0), ph("forward", 0.5), ph("device", 4.0), ph("device_get", 0.25)
-            ph("data", 0.5), ph("forward", 0.25), ph("device", 1.0)
+        with p.phase("epoch_end"):
+            ph("drain", 0.5)
+            with p.phase("val"):
+                with p.phase("data"):
+                    ph("loader", 1.5)
+                    clock.t += 0.5
+                ph("forward", 0.5, compiled=True), ph("device", 4.0), ph("device_get", 0.25)
+                ph("data", 0.5), ph("forward", 0.25), ph("device", 1.0), ph("tail", 0.25), ph("device_get", 0.25)
+            with p.phase("ckpt_last"):
+                ph("device_wait", 0.25), ph("meta", 0.25), ph("host_copy", 0.5), ph("npz_write", 2.0), ph("sha256", 0.5)
+        with p.phase("train_end/ckpt_last"):
+            ph("device_wait", 0.25), ph("meta", 0.25)
+        with p.phase("train_end/drain"):
+            ph("wait", 0.25)
+        ph("summary", 0.25)
         clock.t += 0.25  # outside every phase
         p.stop()
     return p
@@ -269,33 +324,49 @@ def synthetic_run(*, sync: bool) -> profile.PhaseProfiler:
 
 def test_derived_numbers_on_a_fake_clock():
     s = synthetic_run(sync=True).summary(step_ref_s=1.0)
-    wall = 1.0 + (5 + 10 + 3) + (0.5 + 0.25 + 1) + (0.25 + 7 + 1) + (0.75 + 0.5 + 1) + 1.25 + 3.0 + 8.5 + 0.25
+    micro_batches = (5 + 10 + 3) + (0.5 + 0.25 + 1) + (0.25 + 7 + 1) + (0.75 + 0.5 + 1)
+    log, step_ckpt, drain = 1.5, 3.0, 0.5
+    val, ckpt_last, train_end = (2.0 + 0.5 + 4 + 0.25) + (0.5 + 0.25 + 1 + 0.25 + 0.25), 3.5, 0.5 + 0.25
+    wall = 1.0 + 0.25 + micro_batches + log + step_ckpt + drain + val + ckpt_last + train_end + 0.25 + 0.25
     assert (s["wall_s"], s["unattributed_s"], s["micro_batches"]) == (wall, 0.25, 4)
-    # one-time costs: both compiling steps and the first step's wait; the first train and validation batch
-    assert s["compile_s"] == s["groups_s"][profile.COMPILE_GROUP] == 10 + 3 + 7
-    assert s["one_time_s"] == {"compile": 20.0, "first_train_batch": 5.0, "first_val_batch": 2.0}
-    steady_wall = wall - 20 - 5 - 2
+    # one-time costs: both compiling steps, the first step's wait and validation's compiling forward; the first train
+    # batch (duration: its loader start is a child phase) and the first validation batch
+    assert s["compile_s"] == s["groups_s"][profile.COMPILE_GROUP] == 10 + 3 + 7 + 0.5
+    assert s["one_time_s"] == {"compile": 20.5, "first_train_batch": 5.0, "first_val_batch": 2.0}
+    steady_wall = wall - 20.5 - 5 - 2
     assert (s["steady_wall_s"], s["steady_micro_batches"]) == (steady_wall, 3)  # the first micro-batch is in the wait
     assert s["s_per_micro_batch"] == wall / 4
-    assert s["s_per_micro_batch_excl_compile"] == (wall - 20) / 4
+    assert s["s_per_micro_batch_excl_compile"] == (wall - 20.5) / 4
     assert s["s_per_micro_batch_steady"] == steady_wall / 3
+    # outside the loop window (non-compile): setup, epoch start, validation (its first batch included, its compiling
+    # forward not), the epoch-end last checkpoint, the train end, the summary; epoch_end/drain stays in the loop
+    outside = 1.0 + 0.25 + (val - 0.5) + ckpt_last + train_end + 0.25
+    loop_wall = wall - 20.5 - 5 - outside
+    assert loop_wall == (0.5 + 0.25 + 1) + (0.25 + 1) + (0.75 + 0.5 + 1) + log + step_ckpt + drain + 0.25  # by hand
+    assert (s["outside_loop_s"], s["loop_wall_s"]) == (outside, loop_wall)
+    assert s["s_per_micro_batch_loop"] == loop_wall / 3
     # medians of the micro-batches after the first optimizer step (step 1: micro-batches 3 and 4; 3 compiled)
     assert s["steady"] == {
         "data": {"n": 2, "median_ms": 500.0, "mean_ms": 500.0},
         "train/step": {"n": 1, "median_ms": 500.0, "mean_ms": 500.0},
         "train/device": {"n": 2, "median_ms": 1000.0, "mean_ms": 1000.0},
     }
-    # busy: train dispatch + wait, the log row's forward + wait, the checkpoint's wait / read-outs, validation's
-    # forward / wait / read-out; not the compiles, the loader, the npz write or the csv
-    busy = (0.25 + 0.5) + 3 * 1.0 + (0.5 + 0.5) + (0.25 + 0.25 + 0.5) + (0.5 + 0.25) + (4.0 + 1.0) + 0.25
-    assert s["device_busy_s"] == busy
+    # busy: train dispatch + wait, the log row's bits / forward / wait, the step checkpoint's wait / read-outs, the
+    # epoch drain; outside the loop: validation's forward / wait / tail / read-outs, the last checkpoints' wait /
+    # read-outs, the train-end drain. Not the compiles, the loaders, the npz writes, the hashes or the csv
+    busy_loop = (0.25 + 0.5) + 3 * 1.0 + (0.25 + 0.5 + 0.5) + (0.25 + 0.25 + 0.5) + 0.5
+    busy_outside = (4.0 + 0.25 + 0.25 + 1.0 + 0.25 + 0.25) + (0.25 + 0.25 + 0.5) + (0.25 + 0.25) + 0.25
+    busy = busy_loop + busy_outside
+    assert (s["device_busy_s"], s["device_busy_loop_s"]) == (busy, busy_loop)
     assert s["device_idle_frac"] == pytest.approx(1 - busy / steady_wall, rel=1e-15)
+    assert s["device_idle_frac_loop"] == pytest.approx(1 - busy_loop / loop_wall, rel=1e-15)
     assert s["device_idle_frac_wall"] == pytest.approx(1 - busy / wall, rel=1e-15)
     assert s["device_idle_frac_est"] == pytest.approx(1 - 3 * 1.0 / steady_wall, rel=1e-15)
+    assert s["device_idle_frac_est_loop"] == pytest.approx(1 - 3 * 1.0 / loop_wall, rel=1e-15)
     assert s["device_idle_frac_est_wall"] == pytest.approx(1 - 4 * 1.0 / wall, rel=1e-15)
     a = synthetic_run(sync=False).summary()
-    assert a["mode"] == "async" and "device_busy_s" not in a and "device_idle_frac_est" not in a
-    assert a["s_per_micro_batch_steady"] == s["s_per_micro_batch_steady"]
+    assert a["mode"] == "async" and not {"device_busy_s", "device_idle_frac_loop", "device_idle_frac_est"} & a.keys()
+    assert (a["s_per_micro_batch_steady"], a["s_per_micro_batch_loop"]) == (s["s_per_micro_batch_steady"], s["s_per_micro_batch_loop"])
 
 
 def test_cli_profiler_flags():
@@ -359,6 +430,7 @@ def test_fit_command_writes_the_profile(tmp_path, cache):  # noqa: ARG001
     out = tmp_path / "phases.csv"
     argv = ["fit", "--config", str(TINY), "--run-dir", str(tmp_path / "run"), "--dummy-data", "--max-epochs", "1", "--compile-cache", ""]
     argv += ["--profile-phases", str(out), "--prefetch", "1", "--jax-trace", str(tmp_path / "trace"), "--jax-trace-window", "1:2"]
+    argv += ["--profile-step-ref-ms", "250"]
     args = cli.build_parser().parse_args(argv)
     summary = cli.fit(args, clic_data)
     with out.open(newline="") as f:
@@ -369,6 +441,9 @@ def test_fit_command_writes_the_profile(tmp_path, cache):  # noqa: ARG001
     report = summary["profile"]
     assert report["mode"] == "async"
     assert report["micro_batches"] == MICRO_PER_EPOCH and report["unattributed_frac"] < profile.PROFILE_TOLERANCE
+    # --profile-step-ref-ms: the async idle estimates from the reference step
+    assert report["step_ref_s"] == 0.25
+    assert report["device_idle_frac_est_loop"] == pytest.approx(1 - report["steady_micro_batches"] * 0.25 / report["loop_wall_s"])
     assert (tmp_path / "phases.csv.json").is_file()
     assert list((tmp_path / "trace").rglob("*.xplane.pb"))
     assert summary["settings"]["prefetch"] == 1

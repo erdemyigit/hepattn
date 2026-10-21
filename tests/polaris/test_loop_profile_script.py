@@ -3,12 +3,14 @@
 - ``smoke-timing`` (hypothesis H0): run B trains only the micro-batches after its resume point, the one-time costs are
   everything outside ``fit`` plus the first (compiling) step, and the log windows come from ``steps.csv``;
 - an unprofiled variant reports only its fit rate (no compile-free number, no overhead over G3); a profiled one's
-  overhead over G3 uses the steady rate (no compiles, no first train / validation batch);
+  overhead over G3 uses the loop rate (no compiles, no first batches, no work outside the train loop), the steady
+  overhead the steady rate; the log windows after the first are all the windows but the first;
 - the perturbation is the ratio of the median log windows after the first of ``pure_log`` and ``pure_noprof`` (not the
   whole-fit ``fit_s`` ratio), valid only with ``MIN_WINDOWS`` windows in each; ``report`` merges partial JSONs;
 - ``run_fit`` builds each variant's command and ``XLA_FLAGS`` (the H7 pairs differ only in the determinism flag; the
-  perturbation pair only in ``--profile-phases``) and deletes the checkpoints after the fit;
-- the budget: a variant starts only if the time since the job start plus the longest variant so far fits.
+  perturbation pair only in ``--profile-phases``), passes the period overrides and deletes the checkpoints after the
+  fit; ``run_loader`` never gets the determinism flag;
+- the budget: a variant starts only if the time since the job start plus the longest variant so far (loaders too) fits.
 """
 
 import csv
@@ -40,7 +42,8 @@ def write_smoke(tmp_path: pathlib.Path) -> pathlib.Path:
     with (tmp_path / "run_a/steps.csv").open("w", newline="") as f:
         w = csv.DictWriter(f, ["step", "time/ms_per_micro_batch"])
         w.writeheader()
-        w.writerows({"step": 10 * (i + 1), "time/ms_per_micro_batch": v} for i, v in enumerate([5000.0, 200.0, 210.0, 190.0]))
+        # asymmetric after the first: dropping one more window changes the median, the mean and the max
+        w.writerows({"step": 10 * (i + 1), "time/ms_per_micro_batch": v} for i, v in enumerate([5000.0, 100.0, 200.0, 600.0]))
     return path
 
 
@@ -57,16 +60,17 @@ def test_smoke_timing_splits_one_time_costs(lp, tmp_path):
     assert a["log_windows"] == {
         "n": 4,
         "first_ms": 5000.0,
-        "median_ms": 205.0,
+        "median_ms": 400.0,
         "median_ms_after_first": 200.0,
-        "mean_ms_after_first": 200.0,
-        "max_ms_after_first": 210.0,
+        "mean_ms_after_first": 300.0,
+        "max_ms_after_first": 600.0,
     }
     assert "log_windows" not in b  # no steps.csv for run B here
 
 
 def profile_summary(**kw) -> dict:
-    out = {"s_per_micro_batch": 2.5, "s_per_micro_batch_excl_compile": 0.5, "s_per_micro_batch_steady": 0.25}
+    out = {"s_per_micro_batch": 2.5, "s_per_micro_batch_excl_compile": 0.5, "s_per_micro_batch_steady": 0.25, "s_per_micro_batch_loop": 0.2}
+    out |= {"outside_loop_s": 0.8}
     out |= {"one_time_s": {"compile": 32.0, "first_train_batch": 4.0, "first_val_batch": 0.0}, "groups_s": {"train/step": 4.0}}
     return out | {"unattributed_frac": 0.0, "steady": {}, "concurrent": {}} | kw
 
@@ -74,15 +78,22 @@ def profile_summary(**kw) -> dict:
 def test_unprofiled_variant_and_steady_overhead(lp):
     noprof = lp.derive({"result": {"micro_step": 16, "fit_s": 32.0, "cache_events": {"cache_misses": 0}}}, 161.6)
     assert noprof["s_per_micro"] == 2.0 and noprof["cache_misses"] == 0
-    assert noprof["s_per_micro_excl_compile"] is None and noprof["s_per_micro_steady"] is None and noprof["overhead_vs_g3_ms"] is None
+    assert all(noprof[k] is None for k in ("s_per_micro_excl_compile", "s_per_micro_steady", "s_per_micro_loop", "overhead_vs_g3_ms"))
+    assert noprof["overhead_steady_vs_g3_ms"] is None
     profiled = lp.derive({"result": {"micro_step": 16, "fit_s": 40.0}, "profile": profile_summary()}, 161.6)
-    # the overhead uses the steady rate (0.25 s), not the rate without compiles only (0.5 s)
-    assert profiled["overhead_vs_g3_ms"] == pytest.approx(250.0 - 161.6)
-    assert (profiled["s_per_micro_excl_compile"], profiled["s_per_micro_steady"]) == (0.5, 0.25)
+    # the overhead uses the loop rate (0.2 s: no validation, epoch-end checkpoint, setup), not the steady rate (0.25 s)
+    # or the rate without compiles only (0.5 s); the steady overhead is kept for the end-to-end comparison
+    assert profiled["overhead_vs_g3_ms"] == pytest.approx(200.0 - 161.6)
+    assert profiled["overhead_steady_vs_g3_ms"] == pytest.approx(250.0 - 161.6)
+    assert (profiled["s_per_micro_excl_compile"], profiled["s_per_micro_steady"], profiled["s_per_micro_loop"]) == (0.5, 0.25, 0.2)
+    assert profiled["outside_loop_s"] == 0.8 and "device_idle_frac_loop" not in profiled
+    synced = lp.derive({"result": {"micro_step": 16, "fit_s": 40.0}, "profile": profile_summary(device_idle_frac_loop=0.125)}, 161.6)
+    assert synced["device_idle_frac_loop"] == 0.125
     assert profiled["groups_ms_per_micro"] == {"train/step": 250.0}
     assert profiled["cache_misses"] is None
     text = lp.table({"variants": {"pure_noprof": {"derived": noprof}, "pure": {"derived": profiled}}})
-    assert "     0  no profiler: fit_s 32.0" in text and "88.4" in text  # cache misses column: 0
+    assert "     0  no profiler: fit_s 32.0" in text  # cache misses column: 0
+    assert "   0.250    0.200       38.4" in text  # steady, loop, loop - G3
 
 
 def windows(median_after_first: float, n: int) -> dict:
@@ -149,7 +160,7 @@ def fake_driver(calls: list, steps_ms: list[float]):
 def test_run_fit_builds_each_variant(lp, tmp_path, monkeypatch):
     monkeypatch.setenv("XLA_FLAGS", "--base_flag=1")
     calls = []
-    monkeypatch.setattr(lp, "subprocess", types.SimpleNamespace(run=fake_driver(calls, [900.0, 200.0, 190.0, 210.0])))
+    monkeypatch.setattr(lp, "subprocess", types.SimpleNamespace(run=fake_driver(calls, [900.0, 100.0, 200.0, 600.0])))
     args = lp.parse_args(["--run-root", str(tmp_path), "--python", "py", "--compile-cache", "cache"])
     det = "--base_flag=1 --xla_gpu_deterministic_ops=true"
     res = {}
@@ -192,6 +203,17 @@ def test_run_fit_builds_each_variant(lp, tmp_path, monkeypatch):
     assert all(r["ckpt_bytes_deleted"] == 1000 for r in res.values())
     assert not list(tmp_path.glob("*/ckpts"))
     assert res["pure_log"]["log_windows"]["median_ms_after_first"] == 200.0
+    # the overrides reach the commands: perturbation log period, smoke checkpoint / log periods
+    calls.clear()
+    base = ["--run-root", str(tmp_path / "o"), "--python", "py"]
+    over = lp.parse_args([*base, "--pert-log-every", "3", "--smoke-ckpt-every", "7", "--smoke-log-every", "5"])
+    for name in ("pure_log", "pure_noprof", "smoke", "smoke_nodet", "prod"):
+        lp.run_fit(over, pathlib.Path("cfg.yaml"), tmp_path / "o", name)
+    periods = {}
+    for c, _ in calls:
+        periods[pathlib.Path(c[c.index("--run-dir") + 1]).name] = (c[c.index("--log-every-n-steps") + 1], c[c.index("--ckpt-every-n-steps") + 1])
+    never = str(lp.NEVER)
+    assert periods == {"pure_log": ("3", never), "pure_noprof": ("3", never), "smoke": ("5", "7"), "smoke_nodet": ("5", "7"), "prod": ("200", "1000")}
     keep = lp.parse_args(["--run-root", str(tmp_path / "k"), "--python", "py", "--keep-ckpts"])
     assert "ckpt_bytes_deleted" not in lp.run_fit(keep, pathlib.Path("cfg.yaml"), tmp_path / "k", "pure")
     assert (tmp_path / "k/pure/ckpts/last.npz").is_file()
@@ -214,3 +236,38 @@ def test_budget_counts_from_the_job_start_and_the_longest_variant(lp, tmp_path, 
     # this script's start (0 + 240 + 240 <= 600) or ignoring the longest variant (390 <= 600) would start smoke_nodet.
     assert list(result["variants"]) == ["smoke"] and result["skipped"] == ["smoke_nodet", "pure"]
     assert lp.fits_budget(300.0, 300.0, 10) and not lp.fits_budget(300.0, 300.5, 10)
+
+
+def test_budget_counts_loader_variants(lp, tmp_path, monkeypatch):
+    now = [150.0]
+
+    def fake_loader(args, config, root, workers):  # noqa: ARG001
+        now[0] += 240.0
+        return {"median_ms": 1.0, "first_batch_s": 10.0}
+
+    monkeypatch.setattr(lp, "make_config", lambda _args, root: root / "config.yaml")
+    monkeypatch.setattr(lp, "run_loader", fake_loader)
+    monkeypatch.setattr(lp, "run_fit", lambda *_: pytest.fail("the budget should skip the fit"))
+    args = lp.parse_args(["--run-root", str(tmp_path), "--variants", "loader8,pure", "--budget-min", "10", "--job-start", "0"])
+    lp.main(args, clock=lambda: now[0])
+    result = json.loads((tmp_path / "loop_profile.json").read_text())
+    # loader8 ends at 390 s and is the longest so far: 390 + 240 > 600, so pure does not start
+    assert list(result["variants"]) == ["loader8"] and result["skipped"] == ["pure"]
+
+
+def test_loader_runs_without_the_determinism_flag(lp, tmp_path, monkeypatch):
+    monkeypatch.setenv("XLA_FLAGS", "--base_flag=1")
+    calls = []
+
+    def run(cmd, env, **_):
+        calls.append((cmd, env["XLA_FLAGS"]))
+        out = pathlib.Path(cmd[cmd.index("--out") + 1])
+        out.write_text(json.dumps({"workers": int(cmd[cmd.index("--workers") + 1]), "median_ms": 1.5}))
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(lp, "subprocess", types.SimpleNamespace(run=run))
+    args = lp.parse_args(["--run-root", str(tmp_path), "--python", "py", "--loader-batches", "5"])
+    assert lp.run_loader(args, pathlib.Path("cfg.yaml"), tmp_path, 8) == {"workers": 8, "median_ms": 1.5}
+    ((cmd, flags),) = calls
+    assert flags == "--base_flag=1"  # the loader is host work: the run's own flags, never --det-flags
+    assert cmd[cmd.index("--batches") + 1] == "5" and cmd[cmd.index("--num-train") + 1] == str(6 * 32)
