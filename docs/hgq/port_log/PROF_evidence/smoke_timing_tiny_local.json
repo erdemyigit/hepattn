@@ -1,0 +1,50 @@
+{
+ "run_a": {
+  "micro_batches": 48,
+  "wall_s": 76.27805216700654,
+  "fit_s": 42.39722512499429,
+  "build_s": 27.504803542018635,
+  "first_step_s": 18.513476458989317,
+  "outside_fit_s": 33.88082704201224,
+  "s_per_micro_wall": 1.5891260868126362,
+  "s_per_micro_fit": 0.8832755234373811,
+  "s_per_micro_fit_excl_first_step": 0.5081648652341484,
+  "one_time_s_per_micro": 1.091547989604199,
+  "cache_events": {
+   "cache_hits": 0,
+   "cache_misses": 4,
+   "requests": 1391
+  },
+  "log_windows": {
+   "n": 12,
+   "first_ms": 4642.352791750454,
+   "median_ms": 41.756682247068966,
+   "mean_ms_after_first": 390.47199336280096,
+   "max_ms_after_first": 3791.9385624991264
+  }
+ },
+ "run_b": {
+  "micro_batches": 24,
+  "wall_s": 103.38895608301391,
+  "fit_s": 40.936507125006756,
+  "build_s": 39.509302291000495,
+  "first_step_s": 11.797168958000839,
+  "outside_fit_s": 62.45244895800715,
+  "s_per_micro_wall": 4.307873170125579,
+  "s_per_micro_fit": 1.7056877968752815,
+  "s_per_micro_fit_excl_first_step": 1.2669277463915616,
+  "one_time_s_per_micro": 3.0937340798336663,
+  "cache_events": {
+   "cache_hits": 4,
+   "cache_misses": 0,
+   "requests": 1473
+  },
+  "log_windows": {
+   "n": 6,
+   "first_ms": 2990.967479250685,
+   "median_ms": 63.52551037343801,
+   "mean_ms_after_first": 864.9843270482961,
+   "max_ms_after_first": 4117.288916495454
+  }
+ }
+}

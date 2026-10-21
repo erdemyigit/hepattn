@@ -20,7 +20,11 @@ matching callback 17.2 ms.
   figure is the process wall time divided by the micro-batches. No GPU time is needed to decide this:
   `18_loop_profile.py smoke-timing` on the smoke's JSON (Polaris commands, step 1).
 - H7 (determinism flag) and the other device-side hypotheses need the A100 run. `18_loop_profile` runs the H7 pairs
-  first. Not submitted. The branch is not pushed.
+  first, then the perturbation pair. Not submitted. The branch is not pushed.
+- Review fix (same day, "Review fix" below): the derived numbers now exclude one-time costs (steady window), the
+  sync-mode idle fraction counts every device phase, the perturbation compares steady log windows, the budget counts
+  from the job start, and the derived numbers, the variant commands and the budget have tests (26 more mutants
+  killed; 49 of 49 in all).
 
 ## The profiler
 
@@ -39,6 +43,10 @@ matching callback 17.2 ms.
 - A jitted call that traced is relabelled `<path>+compile`. `summary()["groups_s"]` puts every compile phase (and
   `train/first_step_wait`) in group `compile`, so the other groups are steady-state costs.
   `s_per_micro_batch_excl_compile` = (wall minus the compile phases) / micro-batches.
+- Steady window: `one_time_s` = the compile phases, the first train batch (loader worker start: 10-20 s with 4-8
+  workers on real events) and the first validation batch (validation loader start). `steady_wall_s` = wall minus
+  these; `steady_micro_batches` = micro-batches minus the first (its device time is in `train/first_step_wait`);
+  `s_per_micro_batch_steady` = their ratio. 18_loop_profile's `overhead_vs_g3_ms` uses this rate.
 - The matching callback runs in another thread. Its wall time per call is a concurrent counter (`match_callback`),
   not a phase. Only the thread that activated the profiler records phases.
 - Off: `profile.NULL`. `phase()` returns one shared `nullcontext`; `wait()` / `block()` return their argument. No clock
@@ -47,7 +55,15 @@ matching callback 17.2 ms.
   checkpoint save, `epoch_end/drain`, `train_end/drain`, before the host metrics of a logged step and of each
   validation batch). `train/step` is the dispatch time; it grows only under back-pressure.
 - `sync` mode (`--profile-sync`) also blocks after every train step (`train/device`) and every device transfer
-  (`data/device_put_wait`). `device_idle_frac = 1 - busy / wall` is then a lower bound on the idle fraction.
+  (`data/device_put_wait`). `device_idle_frac = 1 - busy / steady_wall_s`, with `busy` the exclusive time of every
+  non-compile phase from a device dispatch to its result (`profile.DEVICE_PHASES`: train step + `train/device`, the
+  log row's `bits`, `metrics_forward`, `metrics_device`, `device_wait`, `device_get`, validation's `forward`,
+  `device`, `tail`, `device_get`, the checkpoint's `device_wait`, `meta`, `host_copy`, the drains). In sync mode
+  every dispatch is followed by its wait inside one of these, so `busy` is an upper bound on the device's busy time
+  and the idle fraction a lower bound. Transfer waits are idle compute (not in `busy`). `device_idle_frac_wall` is the
+  same over the whole wall (one-time costs in it: in a short fit it is dominated by them, e.g. 0.991 in the tiny
+  `pure_sync` run where the compiles were 12.8 of 13.1 s). `async` mode: `device_idle_frac_est = 1 -
+  steady_micro_batches * step_ref / steady_wall_s` with `--profile-step-ref-ms`.
 - `--jax-trace DIR --jax-trace-window A:B`: a `jax.profiler` trace of micro-batches [A, B).
 - `--prefetch N` (`data.prefetch`): the train batches are read ahead in a thread; `data` is then the queue wait.
 - Outputs: `<csv>` (one row per phase), `<csv>.json` (summary), `summary.json["profile"]`, a table on stdout.
@@ -90,10 +106,69 @@ written). The baselines p00 (test_profile.py) and p00b (test_loop_profile_script
 | p16 / p17 | the CLI ignores `--profile-phases` / `--prefetch` | test_fit_command_writes_the_profile |
 | p18 | compile phases counted in the steady groups | test_phases_sum_to_the_wall_time[async] |
 | p19 / p20 | smoke-timing: run B counted from step 0 / first step not a one-time cost | test_smoke_timing_splits_one_time_costs |
-| p21 / p22 / p23 | an unprofiled variant gets a compile-including rate / perturbation ratio inverted / perturbation valid with a cold compile | test_unprofiled_variant_and_perturbation |
+| p21 / p22 / p23 | an unprofiled variant gets a compile-including rate / perturbation ratio inverted / perturbation valid with a cold compile (review fix: p22 / p23 now target the log-window ratio) | test_unprofiled_variant_and_steady_overhead, test_perturbation_compares_steady_log_windows (review fix) |
 
 Evidence: `mutations_p00-p17.json`, `mutations_rerun_p00_p07_p18.json` (after the `compile` group change),
 `mutations_p00b_p19-p23.json`.
+
+## Review fix (2026-10-20)
+
+Each review finding was checked against the code first; all were confirmed. What changed:
+
+| finding | fix |
+|---|---|
+| the derived numbers (`s_per_micro_batch_excl_compile`, steady medians, idle fractions, compile incl. `train/first_step_wait`) had no test: 5 reviewer mutants survived | `test_derived_numbers_on_a_fake_clock`: a 4-micro-batch run on a fake clock in quarter seconds; every derived number is checked against hand arithmetic. Mutants m01-m12 (the reviewer's m1, m2, m3, m5, m6 and 6 more) are killed |
+| the idle fraction was over the whole wall (compiles included: 0.991 in the tiny `pure_sync`) | `device_idle_frac` is over `steady_wall_s` (no compiles, no first train / validation batch); the raw value is `device_idle_frac_wall` |
+| sync-mode `busy` left out validation's `device`, the log row's forward / wait and the checkpoint read-outs | `busy` = every phase in `profile.DEVICE_PHASES` (leaf names); compile phases never match (their leaf ends in `+compile`) |
+| the perturbation `fit_s(pure) / fit_s(pure_noprof)` was dominated by compiles and cache loads | new pair `pure_log` / `pure_noprof` (log every `--pert-log-every` 8 optimizer steps); ratio of the median log windows after the first; `valid` needs 3 windows after the first in each; `fit_s_ratio` kept for reference |
+| H5 decision rule could not separate a sync from back-pressure | H5 bullet rewritten (steady rate vs device step, dispatch times by micro-batch, trace gaps) |
+| evidence files ignored by `.gitignore` | `git add -f` of the 5 files |
+| `overhead_vs_g3_ms` included the loader / validation start; `prod` described as the production cadence | overhead uses `s_per_micro_batch_steady`; `prod` described as `pure` + validation + epoch checkpoint at 320 micro-batches |
+| the identity assert in `test_phases_sum_to_the_wall_time` | removed (comment says why) |
+| `pure_noprof` 9th of 12; the documented second job had no `pure` | the perturbation pair runs right after the H7 pairs; `report` merges JSONs, so the pair can come from two jobs |
+| budget clock started after the prelude and ignored the next variant's length; a killed job has no `table` | `PROF_JOB_START` (pbs) starts the clock; a variant starts only if elapsed + the longest variant so far <= `--budget-min` 55; `report` rebuilds the table from a partial JSON |
+| variant commands, the budget and `--profile-sync` had no test (5 reviewer mutants survived) | `test_run_fit_builds_each_variant` (argv and `XLA_FLAGS` of every variant through a fake `subprocess.run`), `test_budget_counts_from_the_job_start_and_the_longest_variant` (fake clock), `test_cli_profiler_flags` (`cli.profilers`, factored out of `cli.fit`) |
+| zsh-only check line; `WORK_ROOT` not set | `bash -c` check; `WORK_ROOT` from the keras-jax `env.sh` |
+| no cache state in the table; which H7 pair decides | `misses` column; `pure` vs `pure_det` decides, the smoke pair supports |
+| ~10-15 GB of checkpoints per job | each fit's `ckpts/` is deleted after the fit (`ckpt_bytes_deleted` recorded; `--keep-ckpts`); cleanup step 4 |
+
+The new budget test caught a bug in the first draft of this fix: `--job-start 0` (falsy) fell back to "now"; the default is now None.
+
+Verification of the fix (`PROF_evidence/test_runs.txt`, `mutations_review_all.json`, `baseline_cmp2_reviewfix.out`,
+the end of `lp_tiny_table.txt`):
+
+- Full `tests/keras_native`: 844 passed, 16 skipped (hls4ml / real data, as before; 842 + the 2 new tests). It ran
+  before the last edit of `profile.py` (the `is_compile` filter in `busy` removed as redundant); `test_profile.py` on
+  the final code is the mutation baseline p00: 14 passed. `tests/polaris/test_loop_profile_script.py`: 6 passed.
+- Mutations on the final code, all in one run: the baselines p00, p00b, p00c pass and all 49 mutants are killed:
+  p01-p23 (p21-p23 rewritten for the new perturbation) and the 26 new ones below.
+- Profiler off / async / sync + prefetch 2 are still bitwise EQUAL to the S7 run (13710 state arrays in 6
+  checkpoints, metadata, CSVs); the controls ctl_bit and ctl_meta give DIFFERENT.
+- `--tiny` run of smoke, smoke_nodet, pure, pure_det, pure_log, pure_noprof, pure_sync, prod, loader0 (fresh run root,
+  9 min 49 s): all completed. `pure_sync`: `device_idle_frac` 0.531 over the 0.339 s steady window,
+  `device_idle_frac_wall` 0.991 (compiles 17.64 of 17.98 s). Perturbation: 3 windows after the first in each run,
+  13.4 / 14.6 ms per micro-batch = 0.922 (tiny CPU, 4 micro-batches per window: noise; it checks the plumbing). Every
+  fit's `ckpts/` was deleted (4.5-13.6 MB each here). `report` of two partial JSONs (all variants but `pure_noprof`,
+  without `table` / `perturbation`; `pure_noprof` alone) gives the same perturbation. Cache: smoke and smoke_nodet
+  missed 4 programs each (different `XLA_FLAGS`), every later fit missed 0.
+
+| mutant | what it breaks | killed by |
+|---|---|---|
+| m01 / m11 / m12 | `forward` + `tail` / `host_copy` / `metrics_device` left out of `busy` | test_derived_numbers_on_a_fake_clock |
+| m02 | steady medians include the first optimizer step (`>=`) | same |
+| m03 | idle estimate without the micro-batch factor | same |
+| m05 | `s_per_micro_batch_excl_compile` = wall / micro | same |
+| m06 | `train/first_step_wait` not a compile | same |
+| m07 / m08 / m09 | idle over the whole wall / first validation batch counted as steady / steady count includes the first micro-batch | same |
+| m10 | compile phases counted as busy (suffix stripped) | same |
+| c01 | `--profile-sync` ignored by the CLI | test_cli_profiler_flags |
+| k01 / k02 / k04 | determinism flag never set / `smoke_nodet` gets it / `pure_noprof` profiled | test_run_fit_builds_each_variant |
+| s06 / s07 | checkpoints not deleted / perturbation pair without log rows | same |
+| k03 / s01 / s02 | budget check off / ignores the next variant's length / counts from the script start | test_budget_counts_from_the_job_start_and_the_longest_variant |
+| s03 / s04 | perturbation from whole fits / valid with too few windows | test_perturbation_compares_steady_log_windows |
+| s05 / s10 | overhead from the compile-only rate / no cache misses in the table | test_unprofiled_variant_and_steady_overhead |
+| s08 / s09 | `report` keeps the earlier file's variant / lists a variant that ran later as skipped | test_report_merges_partial_results |
+
 
 ## Local check of every 18_loop_profile variant (`--tiny`)
 
@@ -104,14 +179,15 @@ sessions' test suites running at the same time). Two fixes came out of it:
 
 - `pure_noprof` reported `(fit_s - first_step_s) / (micro - 1)` as its compile-free rate. That rate keeps every later
   compile (0.39 s vs 0.016 s per micro-batch for the profiled `pure`). Now an unprofiled variant reports only
-  `fit_s / micro`. The perturbation is `fit_s(pure) / fit_s(pure_noprof)`, and the table marks it NOT VALID if either
-  run missed the compilation cache.
+  `fit_s / micro`. The perturbation was `fit_s(pure) / fit_s(pure_noprof)`, marked NOT VALID if either run missed the
+  compilation cache (superseded by the review fix: steady log windows).
 - The summary groups mixed compile phases into the steady groups (`epoch_end/val` held its forward compile). Now
   they are in group `compile`.
 
 A final `--tiny` run of the finished script (`smoke_nodet`, `pure`, `pure_noprof` on a fresh run root; end of
-`lp_tiny_table.txt`) shows the `compile` group and a valid perturbation ratio (1.049; `pure` and `pure_noprof` both
-hit the programs `smoke_nodet` compiled). `bash -n` passes on `18_loop_profile.pbs` and `submit.sh`.
+`lp_tiny_table.txt`) shows the `compile` group and a perturbation ratio of 1.049 that the first version marked valid
+(`pure` and `pure_noprof` both hit the programs `smoke_nodet` compiled). The review showed that this whole-fit ratio
+measures little: 15.0 of the 15.3 s of `pure` were compiles. `bash -n` passes on `18_loop_profile.pbs` and `submit.sh`.
 
 The cache key includes `XLA_FLAGS` (jax 0.11.2 `_src/cache_key.py` hashes the flags). In the tiny run, `smoke` (with
 the flag) missed 3 programs, `smoke_nodet` then missed 4, and `pure_det` hit the programs that `smoke` compiled.
@@ -135,7 +211,7 @@ average 5.0-20.6, median 7.5: `cpu_load_during_prod_runs.txt`), so the times are
 | loader alone, REAL events (`train_clic_fix.root` of the main checkout, 49 batches) | 0 workers 20.3 ms/batch; 4 workers 1.5 ms (mean 5.6, p90 19.6; first batch 9.8 s); 8 workers 1.9 ms (mean 3.7, p90 11.1; first batch 19.8 s) | the worker start sends the loaded data set to every worker |
 | main-thread `data` inside the fits (8 workers, dummy) | 35-44 ms median per micro-batch | the workers compete with the CPU step for the 10 cores; the loader-only rows are the A100-host case |
 | build / first step | build 53-96 s; first step 187 s (cache miss), 93-101 s (cache hit) | a cache hit still costs ~95 s here (tracing and lowering run before the cache lookup) |
-| profiler perturbation | not measurable here | `pure` ran first with a cold cache (2 misses) and `pure_noprof` hit: the ratio 1.57 is NOT VALID |
+| profiler perturbation | not measurable here | `pure` ran first with a cold cache (2 misses) and `pure_noprof` hit: the whole-fit ratio 1.57 is not the perturbation (review fix) |
 
 ## Attribution at the smoke cadence
 
@@ -162,24 +238,37 @@ steps, a step checkpoint every 50 steps (all kept), validation of 1000 events pe
   `steps.csv` log windows (median `time/ms_per_micro_batch`). If `s_per_micro_fit_excl_first_step` and the median log
   window are near 0.16-0.20 s, H0 explains most of the gap and the steady loop is fine.
 - **H1 loader / host batch preparation: the loader keeps up (decided on the CPU, above).** Open: main-thread `data`
-  work (~1 ms of conversion and `device_put` per batch here) that serialises with the step. A100: `pure` vs
-  `pure_prefetch`, and `device_idle_frac` of `pure_sync`.
+  work (~1 ms of conversion and `device_put` per batch here) that serialises with the step. A100: the steady rate
+  (`s_per_micro_steady`) of `pure` vs `pure_prefetch`, the `steady` `data` median, and `device_idle_frac` of
+  `pure_sync` (over the steady window; `device_idle_frac_wall` includes the compiles and is not the answer).
 - **H2 checkpoints: small at SSD speed (0.022 s per micro-batch); the speed of /eagle is not known.** A100 run:
   `train/ckpt/{npz_write,sha256}` in `smoke` (a step save every 50 steps) vs `pure`. Side finding: each checkpoint is
   1.11 GB, so the smoke wrote ~10 GB (all kept).
 - **H3 validation + host metrics: small (host 1.5 s per 1000 events).** The A100 run gives `epoch_end/val/forward`.
 - **H4 logging every 10 steps: small (host 0.31 s per row).**
 - **H5 hidden per-micro-batch host sync: OPEN (A100).** Without the profiler the driver calls `block_until_ready`
-  exactly `1 + logged steps` times (test_syncs_added_by_each_mode). An implicit sync (a `float()` of a device value)
-  would show as a `train/step` dispatch time close to the device step time in `pure` (async). On the CPU the dispatch
+  exactly `1 + logged steps` times (test_syncs_added_by_each_mode). The `train/step` dispatch time of `pure` alone
+  cannot decide H5: `pure` has no log, checkpoint or validation, so the host runs ahead until the device queue is full
+  and then every dispatch waits about one device step anyway (back-pressure: PJRT's `compute_semaphore_` "limit[s]
+  how many programs can be enqueued on the compute stream by the host ahead of the device",
+  https://github.com/openxla/xla/blob/main/xla/pjrt/se/local_device_state.h). A sync and back-pressure give the same
+  steady `train/step`. Decide H5 by (a) `s_per_micro_steady` of `pure` against the device step (`train/step +
+  train/device` of `pure_sync`, or G3's 161.6 ms): no hidden sync and no other host cost means they are equal; a
+  hidden sync adds the host time per micro-batch (`data`, `train/beta`, dispatch) to the device step; (b) the
+  `train/step` durations by micro-batch in `pure`'s `phases.csv`: back-pressure starts only after the in-flight queue
+  fills (the first several steady dispatches are short), a sync makes every dispatch from micro-batch 2 on as long
+  as a step; (c) the `pure_trace` timeline: gaps between the train programs on the GPU stream. On the CPU the dispatch
   is synchronous, so the CPU cannot decide this.
 - **H6 Python overhead: the unattributed time is 0.005-0.032% of the wall in every run.** The per-micro-batch Python
   phases (`train/beta`, the dispatch) need the A100 run.
 - **H7 the smoke ran with `XLA_FLAGS=--xla_gpu_deterministic_ops=true`, G3 without: OPEN (A100 only).**
   `16_jax_smoke.pbs:53` sets the flag by default; `17_g3_step.pbs` sets none. OpenXLA: deterministic scatter "can lead
   to substantial runtime throughput loss" (https://openxla.org/xla/determinism). The CPU build ignores GPU flags, so
-  only the A100 decides: `smoke` vs `smoke_nodet` and `pure` vs `pure_det` (first in the default order). The flag also
-  changes the compilation-cache key (above).
+  only the A100 decides: `pure` vs `pure_det` decides H7 (both bare loops, both load warm programs: check the `misses`
+  column of the table is 0 for both); `smoke` vs `smoke_nodet` is supporting evidence only, because `smoke` (with the
+  flag) may load the 16_jax_smoke programs from the cache while `smoke_nodet` compiles, and a cache miss changes more
+  than the compile time (the review's tiny CPU run under load ~30: `pure` with 2 misses 0.213 s/micro without compiles,
+  `pure_det` with 6 hits 0.078; not reproduced here). The flag also changes the compilation-cache key (above).
 - **H8 (new) the host matching callback competes with the main thread (GIL): OPEN (A100 only).** The matching runs in
   a `pure_callback` on a host thread while the main thread converts batches and logs. G3 measured the callback alone
   (17.2 ms). The A100 run records `concurrent.match_callback` in every variant: compare `pure` (async), `pure_sync`
@@ -191,35 +280,51 @@ The branch is not pushed. First, on this Mac:
 
     git -C /Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-prof push origin prof/loop
 
-Then on a Polaris login node (steps 1 and 2 need no GPU):
+Then on a Polaris login node (steps 1 and 3 need no GPU). Use bash: `polaris/repo_dir.sh` finds its clone through
+`BASH_SOURCE`, so the check below prints the wrong directory in zsh.
 
+    # WORK_ROOT from the keras-jax clone's env.sh (env.sh.example: /eagle/${PBS_PROJECT}/hepattn-hgq); edit KJ
+    KJ=/eagle/<project>/hepattn-hgq/hepattn-keras-jax
+    export WORK_ROOT="$(bash -c "source $KJ/polaris/env.sh; echo \$WORK_ROOT")"; echo "$WORK_ROOT"
     # a clone of prof/loop that reuses the keras-jax env (no dependency change since keras-jax f30d650)
-    cd $WORK_ROOT
+    cd "$WORK_ROOT"
     git clone -q --branch prof/loop https://github.com/erdemyigit/hepattn.git hepattn-prof-loop
-    ln -s $WORK_ROOT/hepattn-keras-jax/.venv-jax hepattn-prof-loop/.venv-jax
+    ln -s "$WORK_ROOT/hepattn-keras-jax/.venv-jax" hepattn-prof-loop/.venv-jax
     cp hepattn-keras-jax/polaris/env.sh hepattn-prof-loop/polaris/env.sh
     cd hepattn-prof-loop
-    (source polaris/env.sh; source polaris/repo_dir.sh; echo "$HEPATTN_DIR")   # must print $WORK_ROOT/hepattn-prof-loop
+    bash -c 'source polaris/env.sh; source polaris/repo_dir.sh; echo "$HEPATTN_DIR"'   # must print $WORK_ROOT/hepattn-prof-loop
     #   if it does not: remove the HEPATTN_BRANCH / HEPATTN_DIR lines from this copy of env.sh
 
     # 1. H0, from the smoke's own results
-    .venv-jax/bin/python polaris/18_loop_profile.py smoke-timing $WORK_ROOT/hepattn-keras-jax/logs/jax_smoke_7763621*.json
+    .venv-jax/bin/python polaris/18_loop_profile.py smoke-timing "$WORK_ROOT"/hepattn-keras-jax/logs/jax_smoke_7763621*.json
 
-    # 2. the A100 profile (debug queue, 1 h; the H7 pairs run first)
+    # 2. the A100 profile (debug queue, 1 h). Order: the H7 pairs, the perturbation pair (pure_log, pure_noprof),
+    #    loader8, prod, pure_sync, pure_prefetch, pure_trace, loader4, loader16. A variant starts only if the time since
+    #    the job start plus the longest variant so far is within 55 min.
     bash polaris/submit.sh 18_loop_profile.pbs
-    #   a second job for what the 52 min budget skipped, for example:
-    #   PROF_VARIANTS=pure_sync,pure_prefetch,pure_noprof,pure_trace,loader4,loader16 bash polaris/submit.sh 18_loop_profile.pbs
-    #   shorter fits: PROF_ARGS="--micro 200"
+    #   a second job for what the budget skipped (the table lists them), for example:
+    #   PROF_VARIANTS=pure_sync,pure_prefetch,pure_trace,loader4,loader16 bash polaris/submit.sh 18_loop_profile.pbs
+    #   shorter fits: PROF_ARGS="--micro 200" (keep >= 4 x accumulation x --pert-log-every micro-batches for 3 windows)
 
-    # 3. the results (written after every variant)
-    .venv-jax/bin/python -c "import json,sys; r=json.load(open(sys.argv[1])); print(r['table']); print(r.get('perturbation'))" logs/loop_profile_<jobid>.json
+    # 3. the results: the table and the perturbation of one or more JSONs (a job killed at the walltime has no
+    #    'table' key; `report` rebuilds it; a later file's variant replaces an earlier one's)
+    .venv-jax/bin/python polaris/18_loop_profile.py report logs/loop_profile_<jobid>.json [logs/loop_profile_<jobid2>.json]
 
-`pure_noprof` follows `pure`, and both load the train programs that `smoke_nodet` compiled, so the perturbation
-ratio is valid there (the table says NOT VALID otherwise).
+    # 4. clean up: each fit's checkpoints are deleted after the fit (--keep-ckpts keeps them); what remains is
+    #    the run directories, the jax trace and the compile cache entries
+    du -sh "$WORK_ROOT"/loop_profile_<jobid>; rm -rf "$WORK_ROOT"/loop_profile_<jobid>/*/ckpts
+
+The perturbation is the median log window after the first of `pure_log` over `pure_noprof` (both log every
+`--pert-log-every` 8 optimizer steps: 9 windows after the first at 320 micro-batches). A window is the wall time
+between two log rows over its micro-batches, synced at both ends, so it holds no compile, no loader start and no log
+row. The earlier ratio `fit_s(pure) / fit_s(pure_noprof)` included the compiles and cache loads in both runs (15.0 of
+the 15.3 s `fit_s` of the tiny `pure`), which pulls it toward 1; it is kept as `fit_s_ratio` for reference only. If
+the two runs land in different jobs, `report` of both JSONs computes it.
 
 ## Evidence index (`PROF_evidence/`)
 
-`test_runs.txt`, `baseline_cmp.sh`, `baseline_cmp2.py`, `baseline_controls.py`, `baseline_cmp2.out`, `mutations_*.json`, `lp_tiny_table.txt`,
+`test_runs.txt`, `baseline_cmp.sh`, `baseline_cmp2.py`, `baseline_controls.py`, `baseline_cmp2.out`,
+`baseline_cmp2_reviewfix.out`, `mutations_*.json` (`mutations_review_all.json`: every mutant on the review-fix code), `lp_tiny_table.txt`,
 `prod_cpu_phase_tables.txt` (all production-dim phase tables, the loader runs, the RESULT fields, the re-derived
 perturbation), `cpu_load_during_prod_runs.txt`, `smoke_timing_tiny_local.json` (`smoke-timing` on a local
 `16_jax_smoke.py --tiny` result).

@@ -1,0 +1,84 @@
+[
+ {
+  "mutant": "p00b",
+  "file": null,
+  "what": "baseline: the unmutated copy passes the script tests",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": false,
+  "failed": [],
+  "summary": "2 passed in 0.03s",
+  "seconds": 0
+ },
+ {
+  "mutant": "p19",
+  "file": "polaris/18_loop_profile.py",
+  "what": "run B counted from step 0",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_smoke_timing_splits_one_time_costs"
+  ],
+  "summary": "1 failed in 0.04s",
+  "seconds": 0
+ },
+ {
+  "mutant": "p20",
+  "file": "polaris/18_loop_profile.py",
+  "what": "first-step compile not a one-time cost",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_smoke_timing_splits_one_time_costs"
+  ],
+  "summary": "1 failed in 0.04s",
+  "seconds": 0
+ },
+ {
+  "mutant": "p21",
+  "file": "polaris/18_loop_profile.py",
+  "what": "unprofiled variant gets a compile-including 'excl' rate",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_unprofiled_variant_and_perturbation"
+  ],
+  "summary": "1 failed, 1 passed in 0.04s",
+  "seconds": 0
+ },
+ {
+  "mutant": "p22",
+  "file": "polaris/18_loop_profile.py",
+  "what": "perturbation ratio inverted",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_unprofiled_variant_and_perturbation"
+  ],
+  "summary": "1 failed, 1 passed in 0.04s",
+  "seconds": 0
+ },
+ {
+  "mutant": "p23",
+  "file": "polaris/18_loop_profile.py",
+  "what": "perturbation valid despite a cold compile",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_unprofiled_variant_and_perturbation"
+  ],
+  "summary": "1 failed, 1 passed in 0.04s",
+  "seconds": 0
+ }
+]

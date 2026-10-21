@@ -18,3 +18,21 @@ smoke_nodet         3.290        0.065      -96.8  compile 3225.5, train/log 21.
 pure                0.955        0.018     -144.0  compile 937.5, train/step 8.3, epoch_end/ckpt_last 6.4, data 2.2, epoch_start 0.5, train_end 0.1
 pure_noprof         0.910            -          -  no profiler: fit_s 14.6
 profiler perturbation: fit_s pure 15.3 / pure_noprof 14.6 = 1.049
+
+##### review fix 2026-10-20: --tiny --variants smoke,smoke_nodet,pure,pure_det,pure_log,pure_noprof,pure_sync,prod,loader0 (fresh run root, 9:49 wall)
+variant           s/micro excl.compile   steady over G3 ms misses  top groups (ms/micro)
+smoke               3.358        0.059    0.062      -99.3      4  compile 3299.4, train/ckpt 16.8, train/log 14.8, train/step 12.4, epoch_end/ckpt_epoch 9.2, data 2.8
+smoke_nodet         3.506        0.059    0.063      -98.6      4  compile 3446.7, train/ckpt 17.1, train/log 15.6, train/step 12.7, epoch_end/ckpt_epoch 8.6, data 2.7
+pure                1.300        0.021    0.022     -139.1      0  compile 1279.0, train/step 9.7, epoch_end/ckpt_last 8.3, data 2.5, epoch_start 0.5, train_end 0.1
+pure_det            1.281        0.023    0.024     -137.7      0  compile 1257.9, train/step 10.1, epoch_end/ckpt_last 9.1, data 2.6, epoch_start 0.6, train_end 0.1
+pure_log            1.484        0.035    0.037     -124.6      0  compile 1449.6, train/log 12.7, train/step 9.9, epoch_end/ckpt_last 8.8, data 2.7, epoch_start 0.5
+pure_noprof         1.407            -        -          -      0  no profiler: fit_s 22.5
+pure_sync           1.124        0.021    0.023     -139.0      0  compile 1102.2, train/step 9.4, epoch_end/ckpt_last 8.6, data 2.6, epoch_start 0.5, train_end 0.1
+prod                1.485        0.036    0.038     -124.1      0  compile 1448.8, train/step 11.5, epoch_end/ckpt_epoch 9.0, epoch_end/ckpt_last 8.6, data 3.1, epoch_end/val 2.6
+loader0          loader: 1.8 ms/batch median, first batch 0.0 s
+profiler perturbation (steady log windows): pure_log 13.4 / pure_noprof 14.6 ms per micro-batch = 0.922 (whole-fit fit_s ratio 1.055, not the perturbation)
+pure_sync profile: wall_s 17.977 compile_s 17.636 first_train_batch 0.0027 steady_wall_s 0.339 steady_micro_batches 15 device_busy_s 0.159 device_idle_frac 0.531 (steady window) device_idle_frac_wall 0.991 unattributed_frac 7.7e-05
+ckpt_bytes_deleted: smoke 13611636, smoke_nodet 13611636, pure 4517079, pure_det 4517079, pure_log 4531633, pure_noprof 4531633, pure_sync 4517079, prod 9067296; no */ckpts left
+log windows (n incl. first): pure_log 4, pure_noprof 4, smoke 4, smoke_nodet 4
+report part_a.json (all but pure_noprof, no table/perturbation keys) + part_b.json (pure_noprof only):
+profiler perturbation (steady log windows): pure_log 13.4 / pure_noprof 14.6 ms per micro-batch = 0.922 (whole-fit fit_s ratio 1.055, not the perturbation)

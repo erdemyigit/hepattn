@@ -1,0 +1,46 @@
+[
+ {
+  "mutant": "p00",
+  "file": null,
+  "what": "baseline: the unmutated copy passes",
+  "tests": [
+   "tests/keras_native/test_profile.py"
+  ],
+  "killed": false,
+  "failed": [],
+  "summary": "12 passed in 205.88s (0:03:25)",
+  "seconds": 214
+ },
+ {
+  "mutant": "p07",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "summary sums durations",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock or sum_to_the_wall"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phases_sum_to_the_wall_time[async]"
+  ],
+  "summary": "1 failed, 9 deselected in 122.59s (0:02:02)",
+  "seconds": 134
+ },
+ {
+  "mutant": "p18",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "compile phases not grouped",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "sum_to_the_wall"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phases_sum_to_the_wall_time[async]"
+  ],
+  "summary": "1 failed, 10 deselected in 123.39s (0:02:03)",
+  "seconds": 134
+ }
+]
