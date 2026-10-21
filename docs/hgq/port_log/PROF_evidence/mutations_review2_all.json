@@ -1,0 +1,1216 @@
+[
+ {
+  "mutant": "p00",
+  "file": null,
+  "what": "baseline: the unmutated copy passes",
+  "tests": [
+   "tests/keras_native/test_profile.py"
+  ],
+  "killed": false,
+  "failed": [],
+  "summary": "15 passed in 223.24s (0:03:43)",
+  "seconds": 236
+ },
+ {
+  "mutant": "p00b",
+  "file": null,
+  "what": "baseline: the unmutated copy passes the script tests",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": false,
+  "failed": [],
+  "summary": "8 passed in 0.07s",
+  "seconds": 0
+ },
+ {
+  "mutant": "p01",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "NULL.wait syncs (profiler off adds a block per epoch end)",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "syncs_added"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_syncs_added_by_each_mode"
+  ],
+  "summary": "1 failed, 14 deselected in 134.80s (0:02:14)",
+  "seconds": 146
+ },
+ {
+  "mutant": "p02",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "profiled matching callback changes the matching",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "do_not_change_the_run"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_profiler_and_prefetch_do_not_change_the_run"
+  ],
+  "summary": "1 failed, 14 deselected in 135.40s (0:02:15)",
+  "seconds": 151
+ },
+ {
+  "mutant": "p03",
+  "file": "src/hepattn/keras_native/data.py",
+  "what": "prefetch reorders items",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "prefetch_order"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_prefetch_order_errors_and_shutdown"
+  ],
+  "summary": "1 failed, 14 deselected in 2.81s",
+  "seconds": 5
+ },
+ {
+  "mutant": "p04",
+  "file": "src/hepattn/keras_native/data.py",
+  "what": "prefetch drops the error",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "prefetch_order"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_prefetch_order_errors_and_shutdown"
+  ],
+  "summary": "1 failed, 14 deselected in 2.45s",
+  "seconds": 5
+ },
+ {
+  "mutant": "p05",
+  "file": "src/hepattn/keras_native/data.py",
+  "what": "prefetch close leaves the thread running",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "prefetch_order"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_prefetch_order_errors_and_shutdown"
+  ],
+  "summary": "1 failed, 14 deselected in 2.31s",
+  "seconds": 5
+ },
+ {
+  "mutant": "p06",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "exclusive time = duration",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_exclusive_times_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 13 deselected in 2.06s",
+  "seconds": 4
+ },
+ {
+  "mutant": "p07",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "summary sums durations",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock or sum_to_the_wall"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phases_sum_to_the_wall_time[async]"
+  ],
+  "summary": "1 failed, 11 deselected in 138.03s (0:02:18)",
+  "seconds": 154
+ },
+ {
+  "mutant": "p08",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "other threads record phases",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "null_profiler"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_null_profiler_is_inert"
+  ],
+  "summary": "1 failed, 14 deselected in 2.84s",
+  "seconds": 5
+ },
+ {
+  "mutant": "p09",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "async mode syncs every step",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "syncs_added or cadence"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phase_counts_follow_the_cadence"
+  ],
+  "summary": "1 failed, 13 deselected in 144.71s (0:02:24)",
+  "seconds": 156
+ },
+ {
+  "mutant": "p10",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "+compile label lost",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "cadence"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phase_counts_follow_the_cadence"
+  ],
+  "summary": "1 failed, 14 deselected in 147.07s (0:02:27)",
+  "seconds": 164
+ },
+ {
+  "mutant": "p11",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "train/ckpt phase missing",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "cadence"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phase_counts_follow_the_cadence"
+  ],
+  "summary": "1 failed, 14 deselected in 152.60s (0:02:32)",
+  "seconds": 166
+ },
+ {
+  "mutant": "p12",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "data phase missing",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "cadence"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phase_counts_follow_the_cadence"
+  ],
+  "summary": "1 failed, 14 deselected in 152.21s (0:02:32)",
+  "seconds": 173
+ },
+ {
+  "mutant": "p13",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "epoch_end/drain wait missing",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "syncs_added"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_syncs_added_by_each_mode"
+  ],
+  "summary": "1 failed, 14 deselected in 127.97s (0:02:07)",
+  "seconds": 139
+ },
+ {
+  "mutant": "p14",
+  "file": "src/hepattn/keras_native/checkpoint.py",
+  "what": "ckpt npz_write phase missing",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "cadence"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phase_counts_follow_the_cadence"
+  ],
+  "summary": "1 failed, 14 deselected in 122.40s (0:02:02)",
+  "seconds": 133
+ },
+ {
+  "mutant": "p15",
+  "file": "src/hepattn/keras_native/data.py",
+  "what": "sync mode misses transfer waits",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "syncs_added"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_syncs_added_by_each_mode"
+  ],
+  "summary": "1 failed, 14 deselected in 122.77s (0:02:02)",
+  "seconds": 133
+ },
+ {
+  "mutant": "p16",
+  "file": "src/hepattn/keras_native/cli.py",
+  "what": "CLI ignores --profile-phases",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fit_command"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_fit_command_writes_the_profile"
+  ],
+  "summary": "1 failed, 14 deselected in 68.90s (0:01:08)",
+  "seconds": 73
+ },
+ {
+  "mutant": "p17",
+  "file": "src/hepattn/keras_native/cli.py",
+  "what": "CLI ignores --prefetch",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fit_command"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_fit_command_writes_the_profile"
+  ],
+  "summary": "1 failed, 14 deselected in 70.00s (0:01:09)",
+  "seconds": 75
+ },
+ {
+  "mutant": "p18",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "compile phases not grouped",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "sum_to_the_wall"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_phases_sum_to_the_wall_time[async]"
+  ],
+  "summary": "1 failed, 13 deselected in 133.07s (0:02:13)",
+  "seconds": 143
+ },
+ {
+  "mutant": "p19",
+  "file": "polaris/18_loop_profile.py",
+  "what": "run B counted from step 0",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_smoke_timing_splits_one_time_costs"
+  ],
+  "summary": "1 failed in 0.06s",
+  "seconds": 0
+ },
+ {
+  "mutant": "p20",
+  "file": "polaris/18_loop_profile.py",
+  "what": "first-step compile not a one-time cost",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_smoke_timing_splits_one_time_costs"
+  ],
+  "summary": "1 failed in 0.05s",
+  "seconds": 0
+ },
+ {
+  "mutant": "p21",
+  "file": "polaris/18_loop_profile.py",
+  "what": "unprofiled variant gets a compile-including 'excl' rate",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_unprofiled_variant_and_steady_overhead"
+  ],
+  "summary": "1 failed, 1 passed in 0.06s",
+  "seconds": 0
+ },
+ {
+  "mutant": "p22",
+  "file": "polaris/18_loop_profile.py",
+  "what": "perturbation ratio inverted",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_perturbation_compares_steady_log_windows"
+  ],
+  "summary": "1 failed, 2 passed in 0.05s",
+  "seconds": 0
+ },
+ {
+  "mutant": "p23",
+  "file": "polaris/18_loop_profile.py",
+  "what": "perturbation valid with too few log windows",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_perturbation_compares_steady_log_windows"
+  ],
+  "summary": "1 failed, 2 passed in 0.05s",
+  "seconds": 0
+ },
+ {
+  "mutant": "p00c",
+  "file": null,
+  "what": "baseline: the fast profile tests pass",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock or cli_profiler"
+  ],
+  "killed": false,
+  "failed": [],
+  "summary": "3 passed, 12 deselected in 2.58s",
+  "seconds": 5
+ },
+ {
+  "mutant": "m01",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "validation / log forward and tail left out of busy",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.14s",
+  "seconds": 4
+ },
+ {
+  "mutant": "m02",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "steady medians include the first optimizer step",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.27s",
+  "seconds": 4
+ },
+ {
+  "mutant": "m03",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "idle estimate without the micro-batch factor",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.22s",
+  "seconds": 4
+ },
+ {
+  "mutant": "m05",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "compile not subtracted",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.21s",
+  "seconds": 4
+ },
+ {
+  "mutant": "m06",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "first-step wait not a compile",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.27s",
+  "seconds": 4
+ },
+ {
+  "mutant": "m07",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "idle fraction over the whole wall (one-time costs in it)",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.22s",
+  "seconds": 4
+ },
+ {
+  "mutant": "m08",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "validation loader start counted as steady",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.10s",
+  "seconds": 4
+ },
+ {
+  "mutant": "m09",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "steady count includes the first micro-batch",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.12s",
+  "seconds": 4
+ },
+ {
+  "mutant": "m10",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "compile phases counted as busy",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.08s",
+  "seconds": 4
+ },
+ {
+  "mutant": "m11",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "checkpoint host copy left out of busy",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.19s",
+  "seconds": 4
+ },
+ {
+  "mutant": "m12",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "log-row device wait left out of busy",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.12s",
+  "seconds": 4
+ },
+ {
+  "mutant": "c01",
+  "file": "src/hepattn/keras_native/cli.py",
+  "what": "--profile-sync ignored",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "cli_profiler"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_cli_profiler_flags"
+  ],
+  "summary": "1 failed, 14 deselected in 2.06s",
+  "seconds": 4
+ },
+ {
+  "mutant": "k01",
+  "file": "polaris/18_loop_profile.py",
+  "what": "determinism flag never set (H7 a no-op)",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_run_fit_builds_each_variant"
+  ],
+  "summary": "1 failed, 4 passed in 0.07s",
+  "seconds": 0
+ },
+ {
+  "mutant": "k02",
+  "file": "polaris/18_loop_profile.py",
+  "what": "smoke_nodet gets the flag",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_run_fit_builds_each_variant"
+  ],
+  "summary": "1 failed, 4 passed in 0.06s",
+  "seconds": 0
+ },
+ {
+  "mutant": "k03",
+  "file": "polaris/18_loop_profile.py",
+  "what": "budget check off",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_budget_counts_from_the_job_start_and_the_longest_variant"
+  ],
+  "summary": "1 failed, 5 passed in 0.07s",
+  "seconds": 0
+ },
+ {
+  "mutant": "k04",
+  "file": "polaris/18_loop_profile.py",
+  "what": "pure_noprof profiled",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_run_fit_builds_each_variant"
+  ],
+  "summary": "1 failed, 4 passed in 0.07s",
+  "seconds": 0
+ },
+ {
+  "mutant": "s01",
+  "file": "polaris/18_loop_profile.py",
+  "what": "budget ignores the next variant's length",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_budget_counts_from_the_job_start_and_the_longest_variant"
+  ],
+  "summary": "1 failed, 5 passed in 0.07s",
+  "seconds": 0
+ },
+ {
+  "mutant": "s02",
+  "file": "polaris/18_loop_profile.py",
+  "what": "budget counts from the script start",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_budget_counts_from_the_job_start_and_the_longest_variant"
+  ],
+  "summary": "1 failed, 5 passed in 0.07s",
+  "seconds": 0
+ },
+ {
+  "mutant": "s03",
+  "file": "polaris/18_loop_profile.py",
+  "what": "perturbation from whole fits again",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_perturbation_compares_steady_log_windows"
+  ],
+  "summary": "1 failed, 2 passed in 0.06s",
+  "seconds": 0
+ },
+ {
+  "mutant": "s04",
+  "file": "polaris/18_loop_profile.py",
+  "what": "perturbation valid with too few windows",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_perturbation_compares_steady_log_windows"
+  ],
+  "summary": "1 failed, 2 passed in 0.05s",
+  "seconds": 0
+ },
+ {
+  "mutant": "s05",
+  "file": "polaris/18_loop_profile.py",
+  "what": "overhead includes the first batches (review 2: the snippet follows the loop-rate change)",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_unprofiled_variant_and_steady_overhead"
+  ],
+  "summary": "1 failed, 1 passed in 0.05s",
+  "seconds": 0
+ },
+ {
+  "mutant": "s06",
+  "file": "polaris/18_loop_profile.py",
+  "what": "checkpoints not deleted",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_run_fit_builds_each_variant"
+  ],
+  "summary": "1 failed, 4 passed in 0.06s",
+  "seconds": 0
+ },
+ {
+  "mutant": "s07",
+  "file": "polaris/18_loop_profile.py",
+  "what": "perturbation pair without log rows",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_run_fit_builds_each_variant"
+  ],
+  "summary": "1 failed, 4 passed in 0.06s",
+  "seconds": 0
+ },
+ {
+  "mutant": "s08",
+  "file": "polaris/18_loop_profile.py",
+  "what": "report keeps the earlier file's variant",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_report_merges_partial_results"
+  ],
+  "summary": "1 failed, 3 passed in 0.05s",
+  "seconds": 0
+ },
+ {
+  "mutant": "s09",
+  "file": "polaris/18_loop_profile.py",
+  "what": "report lists a variant that ran later as skipped",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_report_merges_partial_results"
+  ],
+  "summary": "1 failed, 3 passed in 0.05s",
+  "seconds": 0
+ },
+ {
+  "mutant": "s10",
+  "file": "polaris/18_loop_profile.py",
+  "what": "table without the cache misses",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_unprofiled_variant_and_steady_overhead"
+  ],
+  "summary": "1 failed, 1 passed in 0.05s",
+  "seconds": 0
+ },
+ {
+  "mutant": "p00d",
+  "file": null,
+  "what": "baseline: the fast profile tests pass (review 2)",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock or cli_profiler"
+  ],
+  "killed": false,
+  "failed": [],
+  "summary": "3 passed, 12 deselected in 2.27s",
+  "seconds": 4
+ },
+ {
+  "mutant": "v01",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "the epoch-end last checkpoint stays in the loop window",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.24s",
+  "seconds": 4
+ },
+ {
+  "mutant": "v02",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "the epoch drain (queued steps) leaves the loop window",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.24s",
+  "seconds": 4
+ },
+ {
+  "mutant": "v03",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "outside-loop compiles subtracted twice",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.32s",
+  "seconds": 5
+ },
+ {
+  "mutant": "v04",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "the first validation batch subtracted twice",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.11s",
+  "seconds": 4
+ },
+ {
+  "mutant": "v05",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "loop busy time includes validation / last-checkpoint device phases",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.06s",
+  "seconds": 4
+ },
+ {
+  "mutant": "v06",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "loop idle fraction over the steady window",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.16s",
+  "seconds": 4
+ },
+ {
+  "mutant": "v07",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "loop rate = steady rate",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.20s",
+  "seconds": 4
+ },
+ {
+  "mutant": "v08",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "loop idle estimate over the steady window",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock or fit_command"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 12 deselected in 2.17s",
+  "seconds": 4
+ },
+ {
+  "mutant": "v09",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "setup counted in the loop window",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.18s",
+  "seconds": 4
+ },
+ {
+  "mutant": "v10",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "the train end counted in the loop window",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.30s",
+  "seconds": 4
+ },
+ {
+  "mutant": "v11",
+  "file": "polaris/18_loop_profile.py",
+  "what": "overhead vs G3 from the steady rate (outside-loop work in it)",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_unprofiled_variant_and_steady_overhead"
+  ],
+  "summary": "1 failed, 1 passed in 0.06s",
+  "seconds": 0
+ },
+ {
+  "mutant": "v12",
+  "file": "polaris/18_loop_profile.py",
+  "what": "table loop column shows the steady rate",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_unprofiled_variant_and_steady_overhead"
+  ],
+  "summary": "1 failed, 1 passed in 0.06s",
+  "seconds": 0
+ },
+ {
+  "mutant": "v13",
+  "file": "polaris/18_loop_profile.py",
+  "what": "derive drops the loop idle fraction",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_unprofiled_variant_and_steady_overhead"
+  ],
+  "summary": "1 failed, 1 passed in 0.06s",
+  "seconds": 0
+ },
+ {
+  "mutant": "v14",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "the driver starts the trace one micro-batch late",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "wrote_a_trace"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_sync_run_wrote_a_trace"
+  ],
+  "summary": "1 failed, 14 deselected in 161.66s (0:02:41)",
+  "seconds": 173
+ },
+ {
+  "mutant": "v15",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "the driver stops the trace one micro-batch early",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "wrote_a_trace"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_sync_run_wrote_a_trace"
+  ],
+  "summary": "1 failed, 14 deselected in 119.65s (0:01:59)",
+  "seconds": 131
+ },
+ {
+  "mutant": "q01",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "micro-batch position off by one",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "data_position"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_driver_sets_the_data_position"
+  ],
+  "summary": "1 failed, 14 deselected in 120.04s (0:02:00)",
+  "seconds": 129
+ },
+ {
+  "mutant": "q02",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "optimizer-step position shifted (steady medians include the first step)",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "data_position"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_driver_sets_the_data_position"
+  ],
+  "summary": "1 failed, 14 deselected in 116.54s (0:01:56)",
+  "seconds": 125
+ },
+ {
+  "mutant": "q03",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "trace window starts one micro-batch late",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "wrote_a_trace"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_sync_run_wrote_a_trace"
+  ],
+  "summary": "1 failed, 14 deselected in 110.99s (0:01:50)",
+  "seconds": 120
+ },
+ {
+  "mutant": "q04",
+  "file": "src/hepattn/keras_native/cli.py",
+  "what": "--profile-step-ref-ms ignored",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fit_command"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_fit_command_writes_the_profile"
+  ],
+  "summary": "1 failed, 14 deselected in 61.53s (0:01:01)",
+  "seconds": 65
+ },
+ {
+  "mutant": "q05",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "first train batch by exclusive time (loader start leaks)",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.01s",
+  "seconds": 4
+ },
+ {
+  "mutant": "q06",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "drains left out of busy",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.06s",
+  "seconds": 4
+ },
+ {
+  "mutant": "q07",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "bits / tail left out of busy",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.02s",
+  "seconds": 4
+ },
+ {
+  "mutant": "q08",
+  "file": "polaris/18_loop_profile.py",
+  "what": "log windows drop the second window too",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_smoke_timing_splits_one_time_costs"
+  ],
+  "summary": "1 failed in 0.05s",
+  "seconds": 0
+ },
+ {
+  "mutant": "q09",
+  "file": "polaris/18_loop_profile.py",
+  "what": "budget ignores loader variants",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_budget_counts_loader_variants"
+  ],
+  "summary": "1 failed, 6 passed in 0.08s",
+  "seconds": 0
+ },
+ {
+  "mutant": "q10",
+  "file": "polaris/18_loop_profile.py",
+  "what": "--pert-log-every ignored",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_run_fit_builds_each_variant"
+  ],
+  "summary": "1 failed, 4 passed in 0.07s",
+  "seconds": 0
+ },
+ {
+  "mutant": "q11",
+  "file": "polaris/18_loop_profile.py",
+  "what": "loader runs with the determinism flag",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_loader_runs_without_the_determinism_flag"
+  ],
+  "summary": "1 failed, 7 passed in 0.07s",
+  "seconds": 0
+ },
+ {
+  "mutant": "q12",
+  "file": "polaris/18_loop_profile.py",
+  "what": "--smoke-ckpt-every ignored",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_run_fit_builds_each_variant"
+  ],
+  "summary": "1 failed, 4 passed in 0.07s",
+  "seconds": 0
+ }
+]

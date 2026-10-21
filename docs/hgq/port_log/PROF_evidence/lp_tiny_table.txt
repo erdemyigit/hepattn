@@ -36,3 +36,16 @@ ckpt_bytes_deleted: smoke 13611636, smoke_nodet 13611636, pure 4517079, pure_det
 log windows (n incl. first): pure_log 4, pure_noprof 4, smoke 4, smoke_nodet 4
 report part_a.json (all but pure_noprof, no table/perturbation keys) + part_b.json (pure_noprof only):
 profiler perturbation (steady log windows): pure_log 13.4 / pure_noprof 14.6 ms per micro-batch = 0.922 (whole-fit fit_s ratio 1.055, not the perturbation)
+
+## review 2 fix (2026-10-21): --tiny smoke,pure,pure_sync,pure_log,pure_noprof,loader0 (fresh run root)
+variant           s/micro excl.compile   steady     loop loop-G3 ms misses  top groups (ms/micro)
+smoke               2.359        0.055    0.058    0.048     -113.2      4  compile 2304.1, train/log 16.4, train/ckpt 13.4, train/step 13.3, epoch_end/ckpt_epoch 6.9, data 2.3
+pure                1.950        0.019    0.020    0.013     -148.7      2  compile 1930.6, train/step 9.9, epoch_end/ckpt_last 6.4, data 2.2, epoch_start 0.4, train_end 0.1
+pure_sync           0.857        0.017    0.017    0.010     -151.2      0  compile 840.9, train/step 7.8, epoch_end/ckpt_last 6.2, data 2.0, epoch_start 0.4, train_end 0.1
+pure_log            1.184        0.026    0.027    0.020     -141.7      1  compile 1158.1, train/log 9.3, train/step 7.5, epoch_end/ckpt_last 6.2, data 2.0, epoch_start 0.4
+pure_noprof         1.024            -        -        -          -      0  no profiler: fit_s 16.4
+loader0          loader: 1.4 ms/batch median, first batch 0.0 s
+profiler perturbation (steady log windows): pure_log 10.4 / pure_noprof 10.1 ms per micro-batch = 1.034 (whole-fit fit_s ratio 1.156, not the perturbation)
+pure {'steady_wall_s': 0.3027, 'outside_loop_s': 0.1096, 'loop_wall_s': 0.1931, 'unattributed_frac': 0.0} ckpt_bytes_deleted 4517079
+pure_sync {'steady_wall_s': 0.2624, 'outside_loop_s': 0.1065, 'loop_wall_s': 0.1559, 'device_idle_frac': 0.5041, 'device_idle_frac_loop': 0.2001, 'unattributed_frac': 0.0001} ckpt_bytes_deleted 4517079
+smoke {'steady_wall_s': 0.8712, 'outside_loop_s': 0.1473, 'loop_wall_s': 0.7262, 'unattributed_frac': 0.0001} ckpt_bytes_deleted 13611636
