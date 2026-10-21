@@ -348,6 +348,10 @@ steps, a step checkpoint every 50 steps (all kept), validation of 1000 events pe
 
 ## Polaris commands
 
+After the merge into `keras-jax` (`6c46fef`, [PROF-merge.md](PROF-merge.md)), run from the keras-jax clone instead
+(no second clone): [KERAS_NATIVE.md](../KERAS_NATIVE.md), "Profiling the driver". The commands below are for a
+separate clone of `prof/loop`, as before the merge.
+
 The branch is not pushed. First, on this Mac:
 
     git -C /Users/eertorer/Desktop/CMS_Group/LightweightTransformers4RECO/hepattn-prof push origin prof/loop

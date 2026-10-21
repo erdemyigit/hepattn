@@ -4,7 +4,7 @@
 JAX (plan: [KERAS_JAX_PLAN.md](KERAS_JAX_PLAN.md); stage logs: [port_log/](port_log/README.md)).
 No module in it imports torch. `hepattn/keras/` (the hybrid, torch backend) stays the parity oracle.
 
-## Modules (state after S7)
+## Modules (state after S7 and PROF)
 
 | Stage | Modules | Tests (`tests/keras_native/`) |
 |---|---|---|
@@ -18,6 +18,7 @@ No module in it imports torch. `hepattn/keras/` (the hybrid, torch backend) stay
 | S6a | `config.py`, `checkpoint.py`, `data.py`, `metrics.py`, `predict_writer.py` (+ `experiments/clic/native_data.py`, the torch data half) | `test_config.py`, `test_checkpoint.py`, `test_data.py`, `test_metrics.py`, `test_predict_writer.py`, `test_resume_cross_lane.py`, `test_data_real.py` (`requiresdata`) |
 | S6b | `loop.py` (`Trainer`), `cli.py` (+ `experiments/clic/main_jax.py`, the entry point) | `test_loop.py`, `test_cli.py` |
 | S7 | `export.py` (functional assembly, export forms, hls4ml); `loop.Trainer.warm_start` (`main_jax fit --init-from`); + `experiments/clic/convert_to_native.py` (the converter: imports torch, so outside this package) | `test_convert.py`, `test_convert_fit.py`, `test_export.py` (`s7_fixtures/`); hybrid side: `tests/keras/test_clic_clis.py` |
+| PROF | `profile.py` (opt-in phase profiler; phases in `loop.py`, `data.py` (+ `data.prefetch`), `checkpoint.py`; options in `cli.py`); + `polaris/18_loop_profile.{py,pbs}` | `test_profile.py`; `tests/polaris/test_loop_profile_script.py` |
 
 `matching.py` imports `jax` directly (`jax.pure_callback`, `jax.lax.stop_gradient`), so the matched loss
 (`objective.match_layers` / `matched_loss`) runs only on the JAX backend. Every other module uses `keras.ops` only.
@@ -191,6 +192,49 @@ environment to a job, so `submit.sh` writes the set knobs (`G3_JOBS`, `G3_ARGS`,
 The DataLoader workers (`data.num_workers`, 8 in the Polaris config) are spawned; keep `main_jax` as the entry point
 (its `__main__` guard is what a spawned worker re-imports). What differs from the Lightning run is listed in
 [port_log/S6b.md](port_log/S6b.md) (deviations).
+
+## Profiling the driver (PROF)
+
+`keras_native/profile.py` times the phases of the fit loop (data, train step, log row, checkpoints, validation; the
+phase list, the steady and loop windows and the hypotheses are in [port_log/PROF.md](port_log/PROF.md)). It is off by
+default: then `phase()` is one shared `nullcontext`, no clock is read and no sync is added (a profiler-off fit is
+bitwise equal to one without the profiler, [port_log/PROF-merge.md](port_log/PROF-merge.md)).
+
+```bash
+# phases of a fit: one CSV row per phase, <csv>.json the summary (also in summary.json["profile"]), a table on stdout
+PYTHONPATH=$PWD/src .venv-jax/bin/python -m hepattn.experiments.clic.main_jax fit \
+  --config polaris_hgq.yaml --run-dir $WORK_ROOT/runs/p1 --profile-phases $WORK_ROOT/runs/p1/phases.csv
+#   --profile-sync               also block after every train step and transfer: device time per step, device_idle_frac
+#   --profile-step-ref-ms 161.6  async mode: the device-idle estimate from a reference step time (G3 at batch 32)
+#   --jax-trace DIR --jax-trace-window 10:20   jax.profiler trace of micro-batches [10, 20)
+#   --prefetch 2                 read train batches ahead in a thread (not a profiler option; also without profiling)
+
+# local check of every 18_loop_profile variant (CPU, test dims, dummy events)
+env -u KERAS_BACKEND PYTHONPATH=$PWD/src .venv-jax/bin/python polaris/18_loop_profile.py --tiny --run-root /tmp/lp --out /tmp/lp.json
+```
+
+Rates to read in the summary: `s_per_micro_batch_steady` (end to end at the run's cadence, without compiles and
+loader starts) and `s_per_micro_batch_loop` (the train loop only, without validation, epoch-end checkpoints, setup and
+the train end; compare it with a device step). `device_idle_frac_loop` (sync) and `device_idle_frac_est_loop` (async,
+with `--profile-step-ref-ms`) are the idle fractions over the loop window.
+
+On Polaris, `polaris/18_loop_profile.pbs` runs short profiled fits on real events in variants that isolate the phases
+(the determinism-flag pairs `smoke`/`smoke_nodet` and `pure`/`pure_det` first, then the perturbation pair
+`pure_log`/`pure_noprof`, then the loader alone and the rest; a variant starts only if it fits in 55 min of the 1 h
+job). Knobs through `submit.sh`: `PROF_VARIANTS`, `PROF_ARGS`, `PROF_XLA_FLAGS`, `JAX_COMPILATION_CACHE_DIR`. From the
+keras-jax clone, after this branch is pushed (bash; run the pull only while no job runs from the clone):
+
+```bash
+KJ=/eagle/<project>/hepattn-hgq/hepattn-keras-jax; cd "$KJ"
+git fetch -q origin && git pull -q --ff-only && git log --oneline -1
+bash -c 'source polaris/env.sh; source polaris/repo_dir.sh; echo "$HEPATTN_DIR"'   # must print this clone ($KJ)
+.venv-jax/bin/python polaris/18_loop_profile.py smoke-timing logs/jax_smoke_7763621*.json   # H0, no GPU
+bash polaris/submit.sh 18_loop_profile.pbs                                                  # A100, debug queue, 1 h
+PROF_VARIANTS=pure_sync,pure_prefetch,pure_trace,loader4,loader16 bash polaris/submit.sh 18_loop_profile.pbs  # what the budget skipped
+.venv-jax/bin/python polaris/18_loop_profile.py report logs/loop_profile_<jobid>.json [logs/loop_profile_<jobid2>.json]
+WORK_ROOT="$(bash -c 'source polaris/env.sh; echo $WORK_ROOT')"
+du -sh "$WORK_ROOT"/loop_profile_<jobid>; rm -rf "$WORK_ROOT"/loop_profile_<jobid>/*/ckpts
+```
 
 ## Converting a Lightning checkpoint (S7)
 

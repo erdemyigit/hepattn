@@ -1,0 +1,134 @@
+[
+ {
+  "mutant": "p00",
+  "file": null,
+  "what": "baseline: the unmutated copy passes",
+  "tests": [
+   "tests/keras_native/test_profile.py"
+  ],
+  "killed": false,
+  "failed": [],
+  "summary": "15 passed in 236.21s (0:03:56)",
+  "seconds": 245
+ },
+ {
+  "mutant": "p00b",
+  "file": null,
+  "what": "baseline: the unmutated copy passes the script tests",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": false,
+  "failed": [],
+  "summary": "8 passed in 0.06s",
+  "seconds": 0
+ },
+ {
+  "mutant": "p01",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "NULL.wait syncs (profiler off adds a block per epoch end)",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "syncs_added"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_syncs_added_by_each_mode"
+  ],
+  "summary": "1 failed, 14 deselected in 119.66s (0:01:59)",
+  "seconds": 130
+ },
+ {
+  "mutant": "p02",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "profiled matching callback changes the matching",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "do_not_change_the_run"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_profiler_and_prefetch_do_not_change_the_run"
+  ],
+  "summary": "1 failed, 14 deselected in 123.49s (0:02:03)",
+  "seconds": 134
+ },
+ {
+  "mutant": "p00d",
+  "file": null,
+  "what": "baseline: the fast profile tests pass (review 2)",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock or cli_profiler"
+  ],
+  "killed": false,
+  "failed": [],
+  "summary": "3 passed, 12 deselected in 2.55s",
+  "seconds": 5
+ },
+ {
+  "mutant": "v01",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "the epoch-end last checkpoint stays in the loop window",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "fake_clock"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_derived_numbers_on_a_fake_clock"
+  ],
+  "summary": "1 failed, 1 passed, 13 deselected in 2.09s",
+  "seconds": 4
+ },
+ {
+  "mutant": "q01",
+  "file": "src/hepattn/keras_native/loop.py",
+  "what": "micro-batch position off by one",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "data_position"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_driver_sets_the_data_position"
+  ],
+  "summary": "1 failed, 14 deselected in 124.40s (0:02:04)",
+  "seconds": 134
+ },
+ {
+  "mutant": "q03",
+  "file": "src/hepattn/keras_native/profile.py",
+  "what": "trace window starts one micro-batch late",
+  "tests": [
+   "tests/keras_native/test_profile.py",
+   "-k",
+   "wrote_a_trace"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/keras_native/test_profile.py::test_sync_run_wrote_a_trace"
+  ],
+  "summary": "1 failed, 14 deselected in 121.90s (0:02:01)",
+  "seconds": 133
+ },
+ {
+  "mutant": "q08",
+  "file": "polaris/18_loop_profile.py",
+  "what": "log windows drop the second window too",
+  "tests": [
+   "tests/polaris/test_loop_profile_script.py"
+  ],
+  "killed": true,
+  "failed": [
+   "FAILED tests/polaris/test_loop_profile_script.py::test_smoke_timing_splits_one_time_costs"
+  ],
+  "summary": "1 failed in 0.06s",
+  "seconds": 0
+ }
+]

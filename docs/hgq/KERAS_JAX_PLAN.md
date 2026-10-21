@@ -1,14 +1,27 @@
 # Plan: move HGQ2 QAT training to pure Keras on JAX
 
 Status: G1 GO (its trainer gap still OPEN until G3); S1-S4 merged into `keras-jax` on 2026-10-15; retargeted to the org/main float Linformer model (`ac0da8f`)
-on 2026-10-16; S5, S6a, S6b done on 2026-10-20 (Polaris: real-data smoke passed, job 7763621, and G3 passed, job 7763879: recorded in the main worktree's `WORKLOG.hgq.md`, not on this branch; [port_log/README.md](port_log/README.md) points there); S7 done on 2026-10-20 and merged into `keras-jax` on 2026-10-21 (`f4aab4a`) ([RETARGET_ORG_MAIN.md](RETARGET_ORG_MAIN.md), stages R0-R5; see "Status" below). Originally a proposal that waited for G1.
-Date: 2026-10-14. Branch: `keras-jax` (pushed up to `f30d650`, after S5/S6; the S7 merge is not pushed), worktree `hepattn-keras-jax`.
+on 2026-10-16; S5, S6a, S6b done on 2026-10-20 (Polaris: real-data smoke passed, job 7763621, and G3 passed, job 7763879: recorded in the main worktree's `WORKLOG.hgq.md`, not on this branch; [port_log/README.md](port_log/README.md) points there); S7 done on 2026-10-20 and merged into `keras-jax` on 2026-10-21 (`f4aab4a`); the loop profiler `prof/loop` merged on 2026-10-21 (`6c46fef`) ([RETARGET_ORG_MAIN.md](RETARGET_ORG_MAIN.md), stages R0-R5; see "Status" below). Originally a proposal that waited for G1.
+Date: 2026-10-14. Branch: `keras-jax` (pushed up to `f30d650`, after S5/S6; the S7 and PROF merges are not pushed), worktree `hepattn-keras-jax`.
 Scope: only the CLIC HGQ2 quantization-aware training, evaluation and export path. The other
 experiments (`atlas_muon`, `trackml`, `tide`, ...) and the float torch model stay on torch and Lightning.
 
 All paths are relative to the `hepattn-keras-jax` worktree unless they start with `SP/`, which means
 `.venv-jax/lib/python3.12/site-packages/` (keras 3.15.0, hgq2 0.1.9, jax 0.11.2, scipy 1.18.1).
 Commits are on `keras-jax` (`git log main..keras-jax`).
+
+## Status update (2026-10-21, PROF merged)
+
+**Done:** the opt-in phase profiler of the native driver (`prof/loop` at `d813090`, after two review rounds,
+[port_log/PROF.md](port_log/PROF.md)) is merged into `keras-jax` as `6c46fef`. Only the port-log README conflicted
+(adjacent table rows). Every other file of the merged tree equals one side. Suites on the merged tree and the
+profiler-off check: [port_log/PROF-merge.md](port_log/PROF-merge.md). How to profile, and the Polaris commands for
+`18_loop_profile`: [KERAS_NATIVE.md](KERAS_NATIVE.md), "Profiling the driver".
+
+**Open:** as in the S7 status below, with the loop overhead item changed: the profiler is merged and verified on the
+Mac CPU, but there are no A100 numbers yet. Next: push `keras-jax` (the user's decision), then on Polaris
+`18_loop_profile.py smoke-timing` on the smoke JSON (H0, no GPU) and one `18_loop_profile.pbs` job (H7 determinism
+flag first, then the perturbation pair and the rest; PROF.md "Hypotheses: status").
 
 ## Status update (2026-10-21, S7 merged)
 
