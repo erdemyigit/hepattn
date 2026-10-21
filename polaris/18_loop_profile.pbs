@@ -16,11 +16,14 @@
 # Where the native driver's ~0.3 s per micro-batch beyond the 161.6 ms G3 step goes (docs/hgq/port_log/PROF.md):
 # short profiled fits (main_jax fit --profile-phases) on real CLIC events, one A100, fp32, batch 32 x accumulation 4,
 # one epoch of 320 micro-batches each, in variants that isolate the phases (smoke cadence with and without the
-# determinism XLA flag of 16_jax_smoke.pbs, production cadence, the bare loop async / sync / prefetch / unprofiled /
-# traced) and the train loader alone with 4 / 8 / 16 workers. polaris/18_loop_profile.py lists the variants (the
-# default order runs the determinism-flag pairs smoke / smoke_nodet and pure / pure_det first, hypothesis H7); a
-# variant starts only while the job is below --budget-min (52 min). Results: logs/loop_profile_<jobid>.json, written
-# after every variant; the jax.profiler trace of pure_trace: $WORK_ROOT/loop_profile_<jobid>/jax_trace.
+# determinism XLA flag of 16_jax_smoke.pbs, the production settings, the bare loop async / sync / prefetch / traced,
+# the perturbation pair pure_log / pure_noprof) and the train loader alone with 4 / 8 / 16 workers.
+# polaris/18_loop_profile.py lists the variants (the default order runs the determinism-flag pairs smoke / smoke_nodet
+# and pure / pure_det first, hypothesis H7, then the perturbation pair). A variant starts only if the time since this
+# job started (PROF_JOB_START below) plus the longest variant so far is within --budget-min (55 min). Results:
+# logs/loop_profile_<jobid>.json, written after every variant (`18_loop_profile.py report <json>` prints the table of a
+# partial one); the jax.profiler trace of pure_trace: $WORK_ROOT/loop_profile_<jobid>/jax_trace. Each fit's
+# checkpoints are deleted after the fit (--keep-ckpts keeps them).
 #
 # ONE-TIME SETUP on a login node (compute nodes may not reach PyPI). .venv-jax is the env of 14_backend_spike.pbs;
 # this adds what the keras_native suite needs (the S1 set of docs/hgq/KERAS_NATIVE.md) with the CUDA 12 jax and a
@@ -40,6 +43,7 @@
 #     "masked-linformer @ https://github.com/compressed-maskformer-reco/masked-linformer/archive/dce2e151e9d25cefd85454b3dffd5c83ec217097.tar.gz"
 # $REPO must hold this branch (keras_native/profile.py); the env imports hepattn from $REPO/src through PYTHONPATH.
 set -uo pipefail
+export PROF_JOB_START="$(date +%s)"   # 18_loop_profile.py's budget clock starts here, before the prelude
 cd "${PBS_O_WORKDIR:-$PWD}"
 source polaris/env.sh
 # the job knobs set in the submit shell (polaris/submit.sh writes them to a file: qsub passes no environment)

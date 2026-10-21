@@ -57,7 +57,7 @@ case "$BASE" in
   # jax-precision:32,hybrid-tf32:16: ~10 programs at ~2 min each on an A100 + 1 Lightning run) need their own
   # submission within the 1 h debug walltime
   17_g3_step.pbs)       DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
-  # ~11 profiled fits of 320 micro-batches (compile-cache hits after the first of each XLA-flag set) + 3 loader runs
+  # default: 10 fits of 320 micro-batches (9 profiled; compile-cache hits after the first of each XLA-flag set) + 3 loader runs
   18_loop_profile.pbs)  DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
   *)            DEF_QUEUE="${QUEUE_DEBUG:-debug}";      DEF_WALL="${WALLTIME_SMOKE:-00:20:00}" ;;
 esac

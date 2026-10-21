@@ -30,10 +30,20 @@ What a phase measures under JAX's asynchronous dispatch:
   wall time grows by the overlap that ``async`` mode had. Compare the two modes (and a run without the profiler) to
   get the perturbation.
 
-The device-idle fraction is measured only in ``sync`` mode (``1 - busy / wall`` with ``busy`` the time from each train
-or validation dispatch to its result: an upper bound on the busy time, so the idle fraction is a lower bound). In
-``async`` mode it is estimated as ``1 - micro_batches * step_ref_s / wall`` when a reference step time is given
-(``summary(step_ref_s=...)``, e.g. the median ``train/step + train/device`` of a ``sync`` run or the G3 step).
+One-time costs and the steady window: ``compile_s`` (every ``+compile`` phase and ``train/first_step_wait``), the first
+train batch (loader worker start) and the first validation batch (validation loader start) happen once per process.
+``steady_wall_s`` is the wall time without them and ``steady_micro_batches`` the micro-batches without the first
+(its device time is inside ``train/first_step_wait``); ``s_per_micro_batch_steady`` is their ratio.
+
+The device-idle fraction is measured only in ``sync`` mode, over the steady window: ``1 - busy / steady_wall_s``, with
+``busy`` the exclusive time of the non-compile phases from a device dispatch to its result (``DEVICE_PHASES``: train
+step and its wait, the log row's and validation's forward and waits, the checkpoint waits and read-outs, the drains).
+In ``sync`` mode every dispatch of device work is followed by its wait inside one of these phases, so ``busy`` is an
+upper bound on the device's busy time and the idle fraction a lower bound. Batch transfers (``data/device_put*``) are
+not in ``busy``: the compute units are idle while the loop waits for a transfer. In ``async`` mode the idle fraction
+is estimated as ``1 - steady_micro_batches * step_ref_s / steady_wall_s`` when a reference step time is given
+(``summary(step_ref_s=...)``, e.g. the median ``train/step + train/device`` of a ``sync`` run or the G3 step). The
+``*_wall`` keys hold the same fractions over the whole wall (one-time costs included: not the steady loop).
 """
 
 import contextlib
@@ -52,6 +62,11 @@ PROFILE_TOLERANCE = 0.01  # largest unattributed fraction of the wall time the t
 _NULL_CONTEXT = contextlib.nullcontext()
 COMPILE_SUFFIX = "+compile"
 COMPILE_GROUP = "compile"  # summary()["groups_s"]: every compile phase (any path), apart from the steady-state groups
+# leaf names of the phases from a device dispatch to its result (module docstring); compile phases are excluded
+DEVICE_PHASES = frozenset({
+    "step", "device", "device_wait", "device_get", "metrics_forward", "metrics_device", "bits", "forward", "tail", "meta",
+    "host_copy", "drain", "wait",
+})  # fmt: skip
 EVENT_FIELDS = ("seq", "path", "start_s", "dur_s", "excl_s", "micro_step", "global_step", "epoch")
 
 
@@ -254,17 +269,27 @@ class PhaseProfiler:
             },
         }
         compile_s = sum(p["excl_s"] for path, p in phases.items() if is_compile(path))
+        first_train = by_path["data"][0][3] if by_path.get("data") else 0.0
+        first_val = by_path["epoch_end/val/data"][0][3] if by_path.get("epoch_end/val/data") else 0.0
+        steady_wall = wall - compile_s - first_train - first_val
+        steady_micro = micro - len(by_path.get("train/first_step_wait", ()))
         out["compile_s"] = compile_s
+        out["one_time_s"] = {"compile": compile_s, "first_train_batch": first_train, "first_val_batch": first_val}
+        out["steady_wall_s"] = steady_wall
+        out["steady_micro_batches"] = steady_micro
         out["s_per_micro_batch_excl_compile"] = (wall - compile_s) / micro if micro else float("nan")
+        out["s_per_micro_batch_steady"] = steady_wall / steady_micro if steady_micro > 0 else float("nan")
         out["steady"] = self._steady(by_path)
-        busy = sum(phases.get(p, {}).get("total_s", 0.0) for p in ("train/step", "train/device"))
         if self.sync:
-            busy += sum(v["total_s"] for k, v in phases.items() if k.endswith(("val/forward", "val/device_get")))
+            # a compile phase's leaf ends in COMPILE_SUFFIX, so it never matches DEVICE_PHASES
+            busy = sum(p["excl_s"] for path, p in phases.items() if path.rsplit("/", 1)[-1] in DEVICE_PHASES)
             out["device_busy_s"] = busy
-            out["device_idle_frac"] = 1 - busy / wall if wall else float("nan")
+            out["device_idle_frac"] = 1 - busy / steady_wall if steady_wall > 0 else float("nan")
+            out["device_idle_frac_wall"] = 1 - busy / wall if wall else float("nan")
         if step_ref_s is not None and micro:
             out["step_ref_s"] = step_ref_s
-            out["device_idle_frac_est"] = 1 - micro * step_ref_s / wall
+            out["device_idle_frac_est"] = 1 - steady_micro * step_ref_s / steady_wall if steady_wall > 0 else float("nan")
+            out["device_idle_frac_est_wall"] = 1 - micro * step_ref_s / wall
         return out
 
     def _steady(self, by_path: dict[str, list[tuple]]) -> dict[str, Any]:

@@ -194,6 +194,15 @@ def _first(source) -> object:
     return next(iter(source.epoch(0, 0)))
 
 
+def profilers(args: argparse.Namespace) -> tuple:
+    """The ``PhaseProfiler`` (``--profile-phases``, ``--profile-sync``) and ``JaxTrace`` (``--jax-trace``) of a fit, or None."""
+    from hepattn.keras_native import profile  # noqa: PLC0415
+
+    profiler = profile.PhaseProfiler(sync=args.profile_sync) if args.profile_phases else None
+    trace = profile.JaxTrace(args.jax_trace, *profile.parse_window(args.jax_trace_window)) if args.jax_trace else None
+    return profiler, trace
+
+
 def fit(args: argparse.Namespace, data_factory: DataFactory) -> dict:
     """The ``fit`` command. Returns the run summary (also written to ``summary.json``).
 
@@ -224,10 +233,7 @@ def fit(args: argparse.Namespace, data_factory: DataFactory) -> dict:
     dummy = True if args.dummy_data else None
     train = data_factory(rc, "train", seed=settings.seed, dummy_data=dummy)
     val = data_factory(rc, "val", seed=settings.seed, dummy_data=dummy) if rc.data.valid_path or dummy else None
-    from hepattn.keras_native import profile  # noqa: PLC0415
-
-    profiler = profile.PhaseProfiler(sync=args.profile_sync) if args.profile_phases else None
-    trace = profile.JaxTrace(args.jax_trace, *profile.parse_window(args.jax_trace_window)) if args.jax_trace else None
+    profiler, trace = profilers(args)
     t0 = time.perf_counter()
     trainer = loop.Trainer(rc, settings, sample=_first(train), train_batches=train.num_batches, profiler=profiler, trace=trace)
     build_s = time.perf_counter() - t0
@@ -271,6 +277,8 @@ def fit(args: argparse.Namespace, data_factory: DataFactory) -> dict:
         report["val_events"] = getattr(trainer, "val_events", None)
         events_csv = profiler.write_events(args.profile_phases)
         loop.write_json(events_csv.with_name(events_csv.name + ".json"), report)
+        from hepattn.keras_native import profile  # noqa: PLC0415
+
         print(profile.format_table(report), flush=True)
         summary["profile"] = {k: v for k, v in report.items() if k != "phases"} | {"events_csv": str(events_csv)}
     loop.write_json(run_dir / "summary.json", summary)

@@ -10,12 +10,18 @@ Variants (``--variants``, default ``DEFAULT_VARIANTS``; each fit is one epoch of
   the epoch end, ``XLA_FLAGS`` + ``--det-flags`` (16_jax_smoke.pbs sets ``--xla_gpu_deterministic_ops=true``;
   17_g3_step.pbs does not);
 - ``smoke_nodet``: ``smoke`` without the determinism flag;
-- ``prod``: the production cadence: step checkpoint every 1000 (newest kept), log every 200, validation;
+- ``prod``: the production settings (step checkpoint every 1000 optimizer steps, newest kept; log every 200;
+  validation). At the default ``--micro 320`` (80 optimizer steps) neither period is reached, so this is ``pure`` +
+  validation + the epoch checkpoint, not the production cadence;
 - ``pure``: no validation, no step checkpoint, no log (the bare loop; the train-end ``last`` checkpoint remains);
-- ``pure_det``: ``pure`` with the determinism flag;
+- ``pure_det``: ``pure`` with the determinism flag (``pure`` vs ``pure_det`` decides H7: both load warm programs);
+- ``pure_log`` / ``pure_noprof``: ``pure`` with a log row every ``--pert-log-every`` optimizer steps, with and without
+  the profiler (perturbation control). ``steps.csv``'s ``time/ms_per_micro_batch`` is the wall time between two log
+  rows over the micro-batches between them (synced at both ends, the log row itself outside). The windows after the
+  first hold no compile (both train programs compile in the first two optimizer steps) and no one-time cost, so
+  ``perturbation`` = median window of ``pure_log`` / median window of ``pure_noprof`` is the profiler's cost on the
+  steady loop;
 - ``pure_sync``: ``pure`` with ``--profile-sync`` (every step blocks: its device time inside the loop);
-- ``pure_noprof``: ``pure`` without the profiler (perturbation control: ``perturbation`` = ``fit_s`` of ``pure`` over
-  ``pure_noprof``; both load the same programs from the compilation cache);
 - ``pure_prefetch``: ``pure`` with ``--prefetch 2`` (batches read ahead in a thread);
 - ``pure_trace``: ``pure`` with a ``jax.profiler`` trace of micro-batches ``--trace-window`` (GPU timeline; the trace
   start / stop is phase ``trace``, so its s/micro is not comparable with the other variants);
@@ -23,13 +29,18 @@ Variants (``--variants``, default ``DEFAULT_VARIANTS``; each fit is one epoch of
   ``--loader-batches`` batches after the first (worker start).
 
 Results (``--out``, written after every variant): per variant the RESULT summary, the profile summary (phase table)
-and the derived ``s_per_micro`` (wall / micro-batches), ``s_per_micro_excl_compile`` and the overhead over
-``--g3-step-ms``. Variants run while the elapsed time is below ``--budget-min``; the rest are recorded as skipped.
+and the derived ``s_per_micro`` (wall / micro-batches), ``s_per_micro_excl_compile``, ``s_per_micro_steady`` (without
+the compiles and the first train / validation batch: profile.py) and ``overhead_vs_g3_ms`` (steady rate minus
+``--g3-step-ms``). A variant starts only if the time since the job start (``$PROF_JOB_START``, set by the pbs; else
+this script's start) plus the longest variant so far stays within ``--budget-min``; the rest are recorded as skipped.
+After each fit its checkpoints are deleted (1.1 GB each at production dims; ``--keep-ckpts`` keeps them); the save
+timings are in the profile.
 
     python polaris/18_loop_profile.py --run-root $WORK_ROOT/loop_profile --data-dir $DATA_ROOT --out logs/loop_profile.json
     python polaris/18_loop_profile.py --tiny --run-root /tmp/lp --out /tmp/lp.json             # local check (CPU, dummy)
     python polaris/18_loop_profile.py --dummy-data --micro 16 ...                               # production dims, dummy
     python polaris/18_loop_profile.py smoke-timing logs/jax_smoke_<jobid>.json                  # H0 from a smoke JSON
+    python polaris/18_loop_profile.py report logs/loop_profile_<a>.json [logs/loop_profile_<b>.json]  # table, merged
 """
 
 import argparse
@@ -37,6 +48,7 @@ import csv
 import json
 import math
 import os
+import shutil
 import statistics
 import subprocess
 import sys
@@ -50,8 +62,10 @@ from jax_common import REPO, generate_config, shrink_config
 
 TINY = {"dim": 16, "heads": 2, "enc_layers": 1, "dec_layers": 1, "linformer_k": 8, "nodes": 64, "queries": 16}
 NEVER = 10**8
-# H7 pairs first (determinism flag on / off), so a walltime cut still leaves that comparison complete
-DEFAULT_VARIANTS = "smoke,smoke_nodet,pure,pure_det,loader8,prod,pure_sync,pure_prefetch,pure_noprof,pure_trace,loader4,loader16"
+PERT = -1  # log period placeholder: --pert-log-every
+MIN_WINDOWS = 3  # log windows after the first that the perturbation needs in each run
+# H7 pairs first (determinism flag on / off), then the perturbation pair, so a walltime cut leaves both comparisons
+DEFAULT_VARIANTS = "smoke,smoke_nodet,pure,pure_det,pure_log,pure_noprof,loader8,prod,pure_sync,pure_prefetch,pure_trace,loader4,loader16"
 FIT_VARIANTS = {
     # name: (step ckpt every, log every, validate, determinism flag, extra driver args, profiled)
     "smoke": (50, 10, True, True, [], True),
@@ -59,8 +73,9 @@ FIT_VARIANTS = {
     "prod": (1000, 200, True, False, [], True),
     "pure": (NEVER, NEVER, False, False, [], True),
     "pure_det": (NEVER, NEVER, False, True, [], True),
+    "pure_log": (NEVER, PERT, False, False, [], True),
+    "pure_noprof": (NEVER, PERT, False, False, [], False),
     "pure_sync": (NEVER, NEVER, False, False, ["--profile-sync"], True),
-    "pure_noprof": (NEVER, NEVER, False, False, [], False),
     "pure_prefetch": (NEVER, NEVER, False, False, ["--prefetch", "2"], True),
     "pure_trace": (NEVER, NEVER, False, False, [], True),
 }
@@ -72,6 +87,8 @@ def parse_args(argv=None):
     st = sub.add_parser("smoke-timing", help="one-time costs vs steady micro-batch time of a 16_jax_smoke result (no GPU)")
     st.add_argument("smoke_json", help="logs/jax_smoke_<jobid>.json")
     st.add_argument("--run-root", default="", help="the smoke's run root (default: its --run-root from the JSON)")
+    rp = sub.add_parser("report", help="table and perturbation of one or more result JSONs (partial ones too), merged")
+    rp.add_argument("results", nargs="+", help="logs/loop_profile_<jobid>.json; a later file's variant replaces an earlier one's")
     lo = sub.add_parser("loader", help="(internal) time the train loader alone in this process")
     lo.add_argument("--config", required=True)
     lo.add_argument("--workers", type=int, required=True)
@@ -97,8 +114,12 @@ def parse_args(argv=None):
     p.add_argument("--trace-window", default="40:48")
     p.add_argument("--smoke-ckpt-every", type=int, default=None, help="override the smoke variants' checkpoint period")
     p.add_argument("--smoke-log-every", type=int, default=None)
+    p.add_argument("--pert-log-every", type=int, default=8, help="log period (optimizer steps) of pure_log / pure_noprof")
     p.add_argument("--g3-step-ms", type=float, default=161.6, help="G3 step median (job 7763879, batch 32)")
-    p.add_argument("--budget-min", type=float, default=52.0, help="start no variant after this many minutes")
+    p.add_argument("--budget-min", type=float, default=55.0, help="minutes since the job start that the next variant must end within")
+    start = os.environ.get("PROF_JOB_START")
+    p.add_argument("--job-start", type=float, default=float(start) if start else None, help="epoch seconds (default: now)")
+    p.add_argument("--keep-ckpts", action="store_true", help="keep each fit's checkpoints (default: delete after the fit)")
     p.add_argument("--compile-cache", default=os.environ.get("JAX_COMPILATION_CACHE_DIR", ""))
     p.add_argument("--python", default=sys.executable)
     p.add_argument("--out", default="")
@@ -139,6 +160,8 @@ def run_fit(args, config: Path, root: Path, name: str) -> dict:
     if name.startswith("smoke"):
         ckpt_every = args.smoke_ckpt_every or ckpt_every
         log_every = args.smoke_log_every or log_every
+    if log_every == PERT:
+        log_every = args.pert_log_every
     run_dir = root / name
     base_flags = os.environ.get("XLA_FLAGS", "")
     xla_flags = f"{base_flags} {args.det_flags}".strip() if det else base_flags
@@ -168,7 +191,40 @@ def run_fit(args, config: Path, root: Path, name: str) -> dict:
     phases = run_dir / "phases.csv.json"
     if phases.is_file():
         res["profile"] = json.loads(phases.read_text())
+    windows = log_windows(run_dir / "steps.csv")
+    if windows:
+        res["log_windows"] = windows
+    if not args.keep_ckpts:
+        res["ckpt_bytes_deleted"] = delete_ckpts(run_dir / "ckpts")
     return res
+
+
+def delete_ckpts(directory: Path) -> int:
+    """Delete a fit's checkpoint directory; returns the bytes it held."""
+    if not directory.is_dir():
+        return 0
+    size = sum(f.stat().st_size for f in directory.rglob("*") if f.is_file())
+    shutil.rmtree(directory)
+    return size
+
+
+def log_windows(steps_csv: Path) -> dict | None:
+    """``time/ms_per_micro_batch`` of a ``steps.csv``: the first window (compiles, first batch) and the ones after it."""
+    if not steps_csv.is_file():
+        return None
+    with steps_csv.open(newline="") as f:
+        ms = [float(r["time/ms_per_micro_batch"]) for r in csv.DictReader(f) if r.get("time/ms_per_micro_batch")]
+    if not ms:
+        return None
+    rest = ms[1:]
+    return {
+        "n": len(ms),
+        "first_ms": ms[0],
+        "median_ms": statistics.median(ms),
+        "median_ms_after_first": statistics.median(rest) if rest else math.nan,
+        "mean_ms_after_first": statistics.fmean(rest) if rest else math.nan,
+        "max_ms_after_first": max(rest) if rest else math.nan,
+    }
 
 
 def derive(res: dict, g3_step_ms: float) -> dict:
@@ -177,8 +233,14 @@ def derive(res: dict, g3_step_ms: float) -> dict:
     micro = summary["micro_step"]
     prof = res.get("profile")
     if prof is not None:
-        per = prof["s_per_micro_batch_excl_compile"]
-        out = {"s_per_micro": prof["s_per_micro_batch"], "s_per_micro_excl_compile": per, "groups_ms_per_micro": {}}
+        per = prof["s_per_micro_batch_steady"]
+        out = {
+            "s_per_micro": prof["s_per_micro_batch"],
+            "s_per_micro_excl_compile": prof["s_per_micro_batch_excl_compile"],
+            "s_per_micro_steady": per,
+            "one_time_s": prof["one_time_s"],
+            "groups_ms_per_micro": {},
+        }
         for group, seconds in prof["groups_s"].items():
             out["groups_ms_per_micro"][group] = 1e3 * seconds / micro
         out["unattributed_frac"] = prof["unattributed_frac"]
@@ -186,9 +248,10 @@ def derive(res: dict, g3_step_ms: float) -> dict:
         out["match_callback"] = prof["concurrent"].get("match_callback")
     else:  # no profiler: only the fit wall time (later compiles / cache loads included); see perturbation()
         per = None
-        out = {"s_per_micro": summary["fit_s"] / micro, "s_per_micro_excl_compile": None}
+        out = {"s_per_micro": summary["fit_s"] / micro, "s_per_micro_excl_compile": None, "s_per_micro_steady": None}
     out["overhead_vs_g3_ms"] = None if per is None else 1e3 * per - g3_step_ms
     out["fit_s"] = summary["fit_s"]
+    out["cache_misses"] = summary.get("cache_events", {}).get("cache_misses")
     return out
 
 
@@ -254,7 +317,7 @@ def run_loader(args, config: Path, root: Path, workers: int) -> dict:
     return json.loads(out.read_text())
 
 
-def main(args) -> int:
+def main(args, clock=time.time) -> int:
     root = Path(args.run_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     if not args.compile_cache:
@@ -264,22 +327,24 @@ def main(args) -> int:
         args.micro, args.num_val, args.loader_batches = min(args.micro, 16), min(args.num_val, 10), min(args.loader_batches, 8)
         args.smoke_ckpt_every, args.smoke_log_every = args.smoke_ckpt_every or 2, args.smoke_log_every or 1
         args.trace_window = "4:8"
+        args.pert_log_every = 1  # 4 optimizer steps: 3 log windows after the first
     out = Path(args.out) if args.out else root / "loop_profile.json"
     result: dict = {"args": vars(args), "variants": {}, "skipped": [], "started": time.strftime("%Y-%m-%d %H:%M:%S")}
 
     def save() -> None:
         out.write_text(json.dumps(result, indent=1, default=str))
 
+    job_start = clock() if args.job_start is None else args.job_start
     config = make_config(args, root)
     result["config"] = str(config)
     save()
-    t_start = time.perf_counter()
+    longest = 0.0
     for name in [v.strip() for v in args.variants.split(",") if v.strip()]:
-        if (time.perf_counter() - t_start) / 60 > args.budget_min:
+        if not fits_budget(clock() - job_start, longest, args.budget_min):
             result["skipped"].append(name)
             save()
             continue
-        t = time.perf_counter()
+        t = clock()
         if name.startswith("loader"):
             res = run_loader(args, config, root, int(name[len("loader") :]))
         elif name in FIT_VARIANTS:
@@ -288,7 +353,8 @@ def main(args) -> int:
                 res["derived"] = derive(res, args.g3_step_ms)
         else:
             raise SystemExit(f"unknown variant {name!r} (fits: {sorted(FIT_VARIANTS)}, loader<N>)")
-        res["elapsed_s"] = time.perf_counter() - t
+        res["elapsed_s"] = clock() - t
+        longest = max(longest, res["elapsed_s"])
         result["variants"][name] = res
         save()
         brief = res.get("derived") or {k: res.get(k) for k in ("median_ms", "mean_ms", "first_batch_s", "error")}
@@ -301,23 +367,31 @@ def main(args) -> int:
     return 0
 
 
-def perturbation(result: dict) -> dict | None:
-    """The profiler's cost: ``fit_s`` of ``pure`` (profiled) over ``pure_noprof``.
+def fits_budget(elapsed_s: float, longest_s: float, budget_min: float) -> bool:
+    """Start the next variant only if it ends within the budget, assuming it takes as long as the longest so far."""
+    return elapsed_s + longest_s <= 60 * budget_min
 
-    ``valid`` only if neither run missed the persistent compilation cache: a cold compile (minutes) inside one
-    ``fit_s`` and a cache load inside the other would swamp the profiler's cost.
+
+def perturbation(result: dict) -> dict | None:
+    """The profiler's cost on the steady loop: median log window after the first of ``pure_log`` over ``pure_noprof``.
+
+    ``valid`` if each run has at least ``MIN_WINDOWS`` windows after the first. ``fit_s_ratio`` (whole fits: compile,
+    cache loads and loader start included in both) is kept for reference; it is not the perturbation.
     """
     runs = result["variants"]
-    if not all("result" in runs.get(name, {}) for name in ("pure", "pure_noprof")):
+    if not all("result" in runs.get(name, {}) for name in ("pure_log", "pure_noprof")):
         return None
-    on, off = runs["pure"]["result"], runs["pure_noprof"]["result"]
-    misses = [r.get("cache_events", {}).get("cache_misses") for r in (on, off)]
+    on, off = runs["pure_log"], runs["pure_noprof"]
+    w_on, w_off = on.get("log_windows") or {}, off.get("log_windows") or {}
+    n = [max(0, w.get("n", 0) - 1) for w in (w_on, w_off)]
+    valid = min(n) >= MIN_WINDOWS
     return {
-        "pure_fit_s": on["fit_s"],
-        "pure_noprof_fit_s": off["fit_s"],
-        "ratio": on["fit_s"] / off["fit_s"],
-        "cache_misses": misses,
-        "valid": misses == [0, 0],
+        "pure_log_ms": w_on.get("median_ms_after_first"),
+        "pure_noprof_ms": w_off.get("median_ms_after_first"),
+        "ratio": w_on["median_ms_after_first"] / w_off["median_ms_after_first"] if valid else None,
+        "windows_after_first": n,
+        "valid": valid,
+        "fit_s_ratio": on["result"]["fit_s"] / off["result"]["fit_s"],
     }
 
 
@@ -354,24 +428,15 @@ def smoke_timing(smoke_json: str | Path, run_root: str | Path = "") -> dict:
             "one_time_s_per_micro": (wall - fit + first) / micro,
             "cache_events": res.get("cache_events"),
         }
-        steps = root / run / "steps.csv"
-        if steps.is_file():
-            with steps.open(newline="") as f:
-                ms = [float(r["time/ms_per_micro_batch"]) for r in csv.DictReader(f) if r.get("time/ms_per_micro_batch")]
-            if ms:
-                row["log_windows"] = {
-                    "n": len(ms),
-                    "first_ms": ms[0],
-                    "median_ms": statistics.median(ms),
-                    "mean_ms_after_first": statistics.fmean(ms[1:]) if len(ms) > 1 else math.nan,
-                    "max_ms_after_first": max(ms[1:]) if len(ms) > 1 else math.nan,
-                }
+        windows = log_windows(root / run / "steps.csv")
+        if windows:
+            row["log_windows"] = windows
         out[run] = row
     return out
 
 
 def table(result: dict) -> str:
-    lines = [f"{'variant':16s} {'s/micro':>8s} {'excl.compile':>12s} {'over G3 ms':>10s}  top groups (ms/micro)"]
+    lines = [f"{'variant':16s} {'s/micro':>8s} {'excl.compile':>12s} {'steady':>8s} {'over G3 ms':>10s} {'misses':>6s}  top groups (ms/micro)"]
     for name, res in result["variants"].items():
         d = res.get("derived")
         if d is None:
@@ -382,22 +447,51 @@ def table(result: dict) -> str:
             continue
         groups = sorted(d.get("groups_ms_per_micro", {}).items(), key=lambda kv: -kv[1])[:6]
         top = ", ".join(f"{g} {ms:.1f}" for g, ms in groups)
-        if d["s_per_micro_excl_compile"] is None:
-            lines.append(f"{name:16s} {d['s_per_micro']:8.3f} {'-':>12s} {'-':>10s}  no profiler: fit_s {d['fit_s']:.1f}")
+        misses = str(d.get("cache_misses"))
+        if d["s_per_micro_steady"] is None:
+            lines.append(f"{name:16s} {d['s_per_micro']:8.3f} {'-':>12s} {'-':>8s} {'-':>10s} {misses:>6s}  no profiler: fit_s {d['fit_s']:.1f}")
             continue
-        lines.append(f"{name:16s} {d['s_per_micro']:8.3f} {d['s_per_micro_excl_compile']:12.3f} {d['overhead_vs_g3_ms']:10.1f}  {top}")
-    if result.get("perturbation"):
-        p = result["perturbation"]
-        verdict = "" if p["valid"] else f" (NOT VALID: compilation-cache misses {p['cache_misses']})"
         lines.append(
-            f"profiler perturbation: fit_s pure {p['pure_fit_s']:.1f} / pure_noprof {p['pure_noprof_fit_s']:.1f} = {p['ratio']:.3f}{verdict}"
+            f"{name:16s} {d['s_per_micro']:8.3f} {d['s_per_micro_excl_compile']:12.3f} {d['s_per_micro_steady']:8.3f} "
+            f"{d['overhead_vs_g3_ms']:10.1f} {misses:>6s}  {top}"
         )
+    if result.get("skipped"):
+        lines.append(f"skipped (budget): {', '.join(result['skipped'])}")
+    p = result.get("perturbation")
+    if p:
+        if p["valid"]:
+            lines.append(
+                f"profiler perturbation (steady log windows): pure_log {p['pure_log_ms']:.1f} / pure_noprof {p['pure_noprof_ms']:.1f} ms "
+                f"per micro-batch = {p['ratio']:.3f} (whole-fit fit_s ratio {p['fit_s_ratio']:.3f}, not the perturbation)"
+            )
+        else:
+            lines.append(f"profiler perturbation: NOT VALID (log windows after the first: {p['windows_after_first']}, need {MIN_WINDOWS} each)")
     return "\n".join(lines)
+
+
+def report(paths: list[str]) -> dict:
+    """Merge the variants of result JSONs (partial ones too: a job killed at the walltime), then table and perturbation."""
+    merged: dict = {"variants": {}, "skipped": [], "sources": {}}
+    for path in paths:
+        r = json.loads(Path(path).read_text())
+        for name, res in r.get("variants", {}).items():
+            merged["variants"][name] = res
+            merged["sources"][name] = str(path)
+        merged["skipped"] += [n for n in r.get("skipped", []) if n not in merged["skipped"]]
+    merged["skipped"] = [n for n in merged["skipped"] if n not in merged["variants"]]
+    merged["perturbation"] = perturbation(merged)
+    merged["table"] = table(merged)
+    return merged
 
 
 if __name__ == "__main__":
     a = parse_args()
     if a.command == "smoke-timing":
         print(json.dumps(smoke_timing(a.smoke_json, a.run_root), indent=1))
+        sys.exit(0)
+    if a.command == "report":
+        rep = report(a.results)
+        print(rep["table"])
+        print(json.dumps(rep["perturbation"], indent=1))
         sys.exit(0)
     sys.exit(loader_only(a) if a.command == "loader" else main(a))

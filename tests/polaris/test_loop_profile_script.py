@@ -2,14 +2,20 @@
 
 - ``smoke-timing`` (hypothesis H0): run B trains only the micro-batches after its resume point, the one-time costs are
   everything outside ``fit`` plus the first (compiling) step, and the log windows come from ``steps.csv``;
-- an unprofiled variant reports only its fit rate (no compile-free number, no overhead over G3), and the perturbation
-  ratio compares the ``fit_s`` of ``pure`` and ``pure_noprof``; the table prints both kinds of rows.
+- an unprofiled variant reports only its fit rate (no compile-free number, no overhead over G3); a profiled one's
+  overhead over G3 uses the steady rate (no compiles, no first train / validation batch);
+- the perturbation is the ratio of the median log windows after the first of ``pure_log`` and ``pure_noprof`` (not the
+  whole-fit ``fit_s`` ratio), valid only with ``MIN_WINDOWS`` windows in each; ``report`` merges partial JSONs;
+- ``run_fit`` builds each variant's command and ``XLA_FLAGS`` (the H7 pairs differ only in the determinism flag; the
+  perturbation pair only in ``--profile-phases``) and deletes the checkpoints after the fit;
+- the budget: a variant starts only if the time since the job start plus the longest variant so far fits.
 """
 
 import csv
 import importlib.util
 import json
 import pathlib
+import types
 
 import pytest
 
@@ -48,28 +54,163 @@ def test_smoke_timing_splits_one_time_costs(lp, tmp_path):
     assert a["one_time_s_per_micro"] == pytest.approx((120.0 + 218.0) / 1188)
     assert a["s_per_micro_fit_excl_first_step"] == pytest.approx((480.0 - 218.0) / 1187)
     assert a["s_per_micro_wall"] == pytest.approx(a["one_time_s_per_micro"] + (480.0 - 218.0) / 1188)
-    assert a["log_windows"] == {"n": 4, "first_ms": 5000.0, "median_ms": 205.0, "mean_ms_after_first": 200.0, "max_ms_after_first": 210.0}
+    assert a["log_windows"] == {
+        "n": 4,
+        "first_ms": 5000.0,
+        "median_ms": 205.0,
+        "median_ms_after_first": 200.0,
+        "mean_ms_after_first": 200.0,
+        "max_ms_after_first": 210.0,
+    }
     assert "log_windows" not in b  # no steps.csv for run B here
 
 
-def test_unprofiled_variant_and_perturbation(lp):
-    noprof = lp.derive({"result": {"micro_step": 16, "fit_s": 32.0}}, 161.6)
-    assert noprof["s_per_micro"] == 2.0
-    assert noprof["s_per_micro_excl_compile"] is None and noprof["overhead_vs_g3_ms"] is None
-    prof = {"s_per_micro_batch": 2.5, "s_per_micro_batch_excl_compile": 0.5, "groups_s": {"train/step": 4.0}, "unattributed_frac": 0.0}
-    prof |= {"steady": {}, "concurrent": {}}
-    profiled = lp.derive({"result": {"micro_step": 16, "fit_s": 40.0}, "profile": prof}, 161.6)
-    assert profiled["overhead_vs_g3_ms"] == pytest.approx(500.0 - 161.6)
+def profile_summary(**kw) -> dict:
+    out = {"s_per_micro_batch": 2.5, "s_per_micro_batch_excl_compile": 0.5, "s_per_micro_batch_steady": 0.25}
+    out |= {"one_time_s": {"compile": 32.0, "first_train_batch": 4.0, "first_val_batch": 0.0}, "groups_s": {"train/step": 4.0}}
+    return out | {"unattributed_frac": 0.0, "steady": {}, "concurrent": {}} | kw
+
+
+def test_unprofiled_variant_and_steady_overhead(lp):
+    noprof = lp.derive({"result": {"micro_step": 16, "fit_s": 32.0, "cache_events": {"cache_misses": 0}}}, 161.6)
+    assert noprof["s_per_micro"] == 2.0 and noprof["cache_misses"] == 0
+    assert noprof["s_per_micro_excl_compile"] is None and noprof["s_per_micro_steady"] is None and noprof["overhead_vs_g3_ms"] is None
+    profiled = lp.derive({"result": {"micro_step": 16, "fit_s": 40.0}, "profile": profile_summary()}, 161.6)
+    # the overhead uses the steady rate (0.25 s), not the rate without compiles only (0.5 s)
+    assert profiled["overhead_vs_g3_ms"] == pytest.approx(250.0 - 161.6)
+    assert (profiled["s_per_micro_excl_compile"], profiled["s_per_micro_steady"]) == (0.5, 0.25)
     assert profiled["groups_ms_per_micro"] == {"train/step": 250.0}
-    warm = {"cache_events": {"cache_misses": 0}}
-    pure = {"result": {"fit_s": 40.0, **warm}, "derived": profiled}
-    result = {"variants": {"pure": pure, "pure_noprof": {"result": {"fit_s": 32.0, **warm}, "derived": noprof}}}
-    result["perturbation"] = lp.perturbation(result)
-    assert result["perturbation"]["ratio"] == pytest.approx(40.0 / 32.0) and result["perturbation"]["valid"]
-    text = lp.table(result)
-    assert "no profiler: fit_s 32.0" in text and "= 1.250" in text and "NOT VALID" not in text
-    # a cold compile in one of the two runs makes the ratio meaningless
-    result["variants"]["pure"]["result"]["cache_events"] = {"cache_misses": 2}
-    result["perturbation"] = lp.perturbation(result)
-    assert not result["perturbation"]["valid"] and "NOT VALID" in lp.table(result)
-    assert lp.perturbation({"variants": {"pure": result["variants"]["pure"]}}) is None
+    assert profiled["cache_misses"] is None
+    text = lp.table({"variants": {"pure_noprof": {"derived": noprof}, "pure": {"derived": profiled}}})
+    assert "     0  no profiler: fit_s 32.0" in text and "88.4" in text  # cache misses column: 0
+
+
+def windows(median_after_first: float, n: int) -> dict:
+    return {"n": n, "first_ms": 9000.0, "median_ms_after_first": median_after_first}
+
+
+def test_perturbation_compares_steady_log_windows(lp):
+    on = {"result": {"fit_s": 100.0}, "log_windows": windows(210.0, 10)}
+    off = {"result": {"fit_s": 50.0}, "log_windows": windows(200.0, 10)}
+    result = {"variants": {"pure_log": on, "pure_noprof": off}}
+    p = lp.perturbation(result)
+    # the steady ratio (1.05), not the whole-fit ratio (2.0: one-time costs of different size in the two runs)
+    assert p["valid"] and p["ratio"] == pytest.approx(210.0 / 200.0) and p["fit_s_ratio"] == 2.0
+    assert p["windows_after_first"] == [9, 9]
+    result["perturbation"] = p
+    assert "= 1.050" in lp.table(result) and "NOT VALID" not in lp.table(result)
+    # too few windows after the first in one run: not valid
+    off["log_windows"] = windows(200.0, lp.MIN_WINDOWS)
+    p = lp.perturbation(result)
+    assert not p["valid"] and p["ratio"] is None and p["windows_after_first"] == [9, lp.MIN_WINDOWS - 1]
+    result["perturbation"] = p
+    assert "NOT VALID" in lp.table(result)
+    del off["log_windows"]
+    assert not lp.perturbation(result)["valid"]
+    # the old pair (pure without log rows) does not give a perturbation
+    assert lp.perturbation({"variants": {"pure": on, "pure_noprof": off}}) is None
+
+
+def test_report_merges_partial_results(lp, tmp_path):
+    # job 1 was killed after pure_log (no table, no perturbation); job 2 re-ran pure_log and ran pure_noprof
+    a = {"variants": {"pure_log": {"result": {"fit_s": 100.0}, "log_windows": windows(210.0, 10)}}, "skipped": ["pure_noprof", "pure_sync"]}
+    b = {"variants": {"pure_log": {"result": {"fit_s": 90.0}, "log_windows": windows(220.0, 10)}}, "skipped": ["pure_sync"]}
+    b["variants"]["pure_noprof"] = {"result": {"fit_s": 50.0}, "log_windows": windows(200.0, 10)}
+    paths = []
+    for name, r in (("a", a), ("b", b)):
+        paths.append(tmp_path / f"{name}.json")
+        paths[-1].write_text(json.dumps(r))
+    merged = lp.report([str(x) for x in paths])
+    assert merged["perturbation"]["ratio"] == pytest.approx(220.0 / 200.0)  # the later file's pure_log
+    assert merged["sources"] == {"pure_log": str(paths[1]), "pure_noprof": str(paths[1])}
+    assert merged["skipped"] == ["pure_sync"] and "skipped (budget): pure_sync" in merged["table"]  # pure_noprof ran in b
+    assert lp.report([str(paths[0])])["perturbation"] is None
+
+
+def fake_driver(calls: list, steps_ms: list[float]):
+    """``subprocess.run`` of a fit: records the command and XLA_FLAGS, writes a checkpoint and steps.csv, prints RESULT."""
+
+    def run(cmd, env, **_):
+        calls.append((cmd, env["XLA_FLAGS"]))
+        run_dir = pathlib.Path(cmd[cmd.index("--run-dir") + 1])
+        (run_dir / "ckpts").mkdir(parents=True)
+        (run_dir / "ckpts/last.npz").write_bytes(b"x" * 1000)
+        if steps_ms:
+            with (run_dir / "steps.csv").open("w", newline="") as f:
+                w = csv.DictWriter(f, ["step", "time/ms_per_micro_batch"])
+                w.writeheader()
+                w.writerows({"step": i, "time/ms_per_micro_batch": v} for i, v in enumerate(steps_ms))
+        result = {"micro_step": 320, "fit_s": 100.0}
+        return types.SimpleNamespace(returncode=0, stdout="noise\nRESULT " + json.dumps(result) + "\n", stderr="")
+
+    return run
+
+
+def test_run_fit_builds_each_variant(lp, tmp_path, monkeypatch):
+    monkeypatch.setenv("XLA_FLAGS", "--base_flag=1")
+    calls = []
+    monkeypatch.setattr(lp, "subprocess", types.SimpleNamespace(run=fake_driver(calls, [900.0, 200.0, 190.0, 210.0])))
+    args = lp.parse_args(["--run-root", str(tmp_path), "--python", "py", "--compile-cache", "cache"])
+    det = "--base_flag=1 --xla_gpu_deterministic_ops=true"
+    res = {}
+    for name in lp.FIT_VARIANTS:
+        res[name] = lp.run_fit(args, pathlib.Path("cfg.yaml"), tmp_path, name)
+    got = {}
+    for cmd, flags in calls:
+        name = pathlib.Path(cmd[cmd.index("--run-dir") + 1]).name
+
+        def opt(key, cmd=cmd):
+            return cmd[cmd.index(key) + 1] if key in cmd else None
+
+        got[name] = {
+            "flags": flags,
+            "profiled": "--profile-phases" in cmd,
+            "sync": "--profile-sync" in cmd,
+            "prefetch": opt("--prefetch"),
+            "trace": "--jax-trace" in cmd,
+            "log": opt("--log-every-n-steps"),
+            "ckpt": opt("--ckpt-every-n-steps"),
+            "keep": opt("--ckpt-save-top-k"),
+            "val": opt("--check-val-every-n-epoch") == "1",
+        }
+    never = str(lp.NEVER)
+    plain = {"flags": "--base_flag=1", "profiled": True, "sync": False, "prefetch": None, "trace": False}
+    bare = plain | {"log": never, "ckpt": never, "keep": "1", "val": False}
+    assert got == {
+        "smoke": plain | {"flags": det, "log": "10", "ckpt": "50", "keep": "-1", "val": True},
+        "smoke_nodet": plain | {"log": "10", "ckpt": "50", "keep": "-1", "val": True},
+        "prod": plain | {"log": "200", "ckpt": "1000", "keep": "1", "val": True},
+        "pure": bare,
+        "pure_det": bare | {"flags": det},
+        "pure_log": bare | {"log": "8"},
+        "pure_noprof": bare | {"log": "8", "profiled": False},
+        "pure_sync": bare | {"sync": True},
+        "pure_prefetch": bare | {"prefetch": "2"},
+        "pure_trace": bare | {"trace": True},
+    }
+    # the checkpoints are deleted after each fit (their bytes recorded); the log windows are read first
+    assert all(r["ckpt_bytes_deleted"] == 1000 for r in res.values())
+    assert not list(tmp_path.glob("*/ckpts"))
+    assert res["pure_log"]["log_windows"]["median_ms_after_first"] == 200.0
+    keep = lp.parse_args(["--run-root", str(tmp_path / "k"), "--python", "py", "--keep-ckpts"])
+    assert "ckpt_bytes_deleted" not in lp.run_fit(keep, pathlib.Path("cfg.yaml"), tmp_path / "k", "pure")
+    assert (tmp_path / "k/pure/ckpts/last.npz").is_file()
+
+
+def test_budget_counts_from_the_job_start_and_the_longest_variant(lp, tmp_path, monkeypatch):
+    now = [150.0]  # the job started at 0; the prelude took 150 s
+    durations = {"smoke": 240.0, "smoke_nodet": 60.0, "pure": 60.0}
+
+    def fake_fit(args, config, root, name):  # noqa: ARG001
+        now[0] += durations[name]
+        return {"result": {"micro_step": 320, "fit_s": durations[name]}}
+
+    monkeypatch.setattr(lp, "make_config", lambda _args, root: root / "config.yaml")
+    monkeypatch.setattr(lp, "run_fit", fake_fit)
+    args = lp.parse_args(["--run-root", str(tmp_path), "--variants", "smoke,smoke_nodet,pure", "--budget-min", "10", "--job-start", "0"])
+    lp.main(args, clock=lambda: now[0])
+    result = json.loads((tmp_path / "loop_profile.json").read_text())
+    # smoke ends at 390 s; 390 + 240 (the longest so far) > 600: smoke_nodet and pure do not start. Counting from
+    # this script's start (0 + 240 + 240 <= 600) or ignoring the longest variant (390 <= 600) would start smoke_nodet.
+    assert list(result["variants"]) == ["smoke"] and result["skipped"] == ["smoke_nodet", "pure"]
+    assert lp.fits_budget(300.0, 300.0, 10) and not lp.fits_budget(300.0, 300.5, 10)

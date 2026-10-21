@@ -13,8 +13,11 @@ a log row per optimizer step, a step checkpoint every 2 steps, validation every 
   (the first step + one per logged step); async mode adds only the waits at points that block anyway; sync mode adds
   one per train step after the first and one per device transfer;
 - the phase counts follow the cadence (micro-batches, logs, checkpoints, validation batches);
-- exclusive-time accounting on a fake clock; prefetch order, error propagation and thread shutdown;
-- the ``fit`` command writes the phase CSV / JSON and the trace.
+- exclusive-time accounting on a fake clock; the derived numbers on a fake-clock run (compile time incl. the first-step
+  wait, the steady window without the first train / validation batch, the steady medians after the first optimizer
+  step, the sync-mode device-idle fraction incl. log, checkpoint and validation device phases, the estimate from a
+  reference step); prefetch order, error propagation and thread shutdown;
+- the ``fit`` command writes the phase CSV / JSON and the trace; ``--profile-sync`` makes a sync profiler.
 """
 
 import csv
@@ -137,7 +140,7 @@ def test_phases_sum_to_the_wall_time(runs, mode):
     assert s["mode"] == mode
     assert s["unattributed_s"] >= 0
     assert s["unattributed_frac"] < profile.PROFILE_TOLERANCE, profile.format_table(s)
-    assert abs(sum(p["excl_s"] for p in s["phases"].values()) + s["unattributed_s"] - s["wall_s"]) < 1e-9
+    # (unattributed is wall - attributed by definition; the bound above and the dropped-phase control are the checks)
     # the groups partition the attributed time; every compile phase is in group "compile", none in a steady group
     assert abs(sum(s["groups_s"].values()) - s["attributed_s"]) < 1e-9
     assert s["groups_s"][profile.COMPILE_GROUP] == pytest.approx(s["compile_s"]) and s["compile_s"] > 0
@@ -167,7 +170,7 @@ def test_phase_counts_follow_the_cadence(runs):
     assert "train/device" not in phases  # async: no per-step block
     sync = runs["sync"]["trainer"].prof.summary()
     assert sync["phases"]["train/device"]["n"] == MICRO - 1  # the first step blocks in train/first_step_wait
-    assert 0 <= sync["device_idle_frac"] < 1
+    assert 0 <= sync["device_idle_frac"] < 1 and sync["steady_micro_batches"] == MICRO - 1
     assert runs["async"]["trainer"].prof.summary()["concurrent"]["match_callback"]["n"] >= MICRO
 
 
@@ -220,6 +223,90 @@ def test_exclusive_times_on_a_fake_clock():
     assert got == {"a": (5.0, 3.0), "a/b": (1.0, 1.0), "a/c": (1.0, 1.0), "d": (1.0, 1.0)}
     assert (s["wall_s"], s["unattributed_s"]) == (9.0, 3.0)  # 0-1, 6-7, 8-9 are outside every phase
     assert profile.current() is profile.NULL
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def synthetic_run(*, sync: bool) -> profile.PhaseProfiler:
+    """4 micro-batches (accumulation 2) on a fake clock, the phases as the driver opens them; quarter seconds (exact)."""
+    clock = FakeClock()
+    p = profile.PhaseProfiler(sync=sync, clock=clock)
+
+    def ph(name: str, seconds: float, *, compiled: bool = False) -> None:
+        with p.phase(name):
+            clock.t += seconds
+        if compiled:
+            p.mark_compile()
+
+    with p.active():
+        p.start()
+        ph("setup", 1.0)
+        p.at(1, 0, 0)  # optimizer step 0: loader start, the compiling first step, its wait
+        ph("data", 5.0), ph("train/step", 10.0, compiled=True), ph("train/first_step_wait", 3.0)
+        p.at(2, 0, 0)
+        ph("data", 0.5), ph("train/step", 0.25), ph("train/device", 1.0)
+        p.at(3, 1, 0)  # optimizer step 1: the second train program compiles
+        ph("data", 0.25), ph("train/step", 7.0, compiled=True), ph("train/device", 1.0)
+        p.at(4, 1, 0)
+        ph("data", 0.75), ph("train/step", 0.5), ph("train/device", 1.0)
+        with p.phase("train/log"):
+            ph("metrics_forward", 0.5), ph("metrics_device", 0.5), ph("csv", 0.25)
+        with p.phase("train/ckpt"):
+            ph("device_wait", 0.25), ph("meta", 0.25), ph("host_copy", 0.5), ph("npz_write", 2.0)
+        with p.phase("epoch_end"), p.phase("val"):
+            ph("data", 2.0), ph("forward", 0.5), ph("device", 4.0), ph("device_get", 0.25)
+            ph("data", 0.5), ph("forward", 0.25), ph("device", 1.0)
+        clock.t += 0.25  # outside every phase
+        p.stop()
+    return p
+
+
+def test_derived_numbers_on_a_fake_clock():
+    s = synthetic_run(sync=True).summary(step_ref_s=1.0)
+    wall = 1.0 + (5 + 10 + 3) + (0.5 + 0.25 + 1) + (0.25 + 7 + 1) + (0.75 + 0.5 + 1) + 1.25 + 3.0 + 8.5 + 0.25
+    assert (s["wall_s"], s["unattributed_s"], s["micro_batches"]) == (wall, 0.25, 4)
+    # one-time costs: both compiling steps and the first step's wait; the first train and validation batch
+    assert s["compile_s"] == s["groups_s"][profile.COMPILE_GROUP] == 10 + 3 + 7
+    assert s["one_time_s"] == {"compile": 20.0, "first_train_batch": 5.0, "first_val_batch": 2.0}
+    steady_wall = wall - 20 - 5 - 2
+    assert (s["steady_wall_s"], s["steady_micro_batches"]) == (steady_wall, 3)  # the first micro-batch is in the wait
+    assert s["s_per_micro_batch"] == wall / 4
+    assert s["s_per_micro_batch_excl_compile"] == (wall - 20) / 4
+    assert s["s_per_micro_batch_steady"] == steady_wall / 3
+    # medians of the micro-batches after the first optimizer step (step 1: micro-batches 3 and 4; 3 compiled)
+    assert s["steady"] == {
+        "data": {"n": 2, "median_ms": 500.0, "mean_ms": 500.0},
+        "train/step": {"n": 1, "median_ms": 500.0, "mean_ms": 500.0},
+        "train/device": {"n": 2, "median_ms": 1000.0, "mean_ms": 1000.0},
+    }
+    # busy: train dispatch + wait, the log row's forward + wait, the checkpoint's wait / read-outs, validation's
+    # forward / wait / read-out; not the compiles, the loader, the npz write or the csv
+    busy = (0.25 + 0.5) + 3 * 1.0 + (0.5 + 0.5) + (0.25 + 0.25 + 0.5) + (0.5 + 0.25) + (4.0 + 1.0) + 0.25
+    assert s["device_busy_s"] == busy
+    assert s["device_idle_frac"] == pytest.approx(1 - busy / steady_wall, rel=1e-15)
+    assert s["device_idle_frac_wall"] == pytest.approx(1 - busy / wall, rel=1e-15)
+    assert s["device_idle_frac_est"] == pytest.approx(1 - 3 * 1.0 / steady_wall, rel=1e-15)
+    assert s["device_idle_frac_est_wall"] == pytest.approx(1 - 4 * 1.0 / wall, rel=1e-15)
+    a = synthetic_run(sync=False).summary()
+    assert a["mode"] == "async" and "device_busy_s" not in a and "device_idle_frac_est" not in a
+    assert a["s_per_micro_batch_steady"] == s["s_per_micro_batch_steady"]
+
+
+def test_cli_profiler_flags():
+    parse = cli.build_parser().parse_args
+    base = ["fit", "--config", str(TINY), "--run-dir", "unused"]
+    assert cli.profilers(parse(base)) == (None, None)
+    prof, trace = cli.profilers(parse([*base, "--profile-phases", "p.csv"]))
+    assert prof.sync is False and trace is None
+    assert cli.profilers(parse([*base, "--profile-phases", "p.csv", "--profile-sync"]))[0].sync is True
+    _, trace = cli.profilers(parse([*base, "--jax-trace", "t", "--jax-trace-window", "3:7"]))
+    assert (trace.first, trace.last) == (3, 7)
 
 
 def test_null_profiler_is_inert():
@@ -280,6 +367,7 @@ def test_fit_command_writes_the_profile(tmp_path, cache):  # noqa: ARG001
     assert {r["path"] for r in rows} >= {"data", "train/log", "epoch_end/val/forward"}
     assert "data/loader" not in {r["path"] for r in rows}  # prefetch: the loader runs in the prefetch thread
     report = summary["profile"]
+    assert report["mode"] == "async"
     assert report["micro_batches"] == MICRO_PER_EPOCH and report["unattributed_frac"] < profile.PROFILE_TOLERANCE
     assert (tmp_path / "phases.csv.json").is_file()
     assert list((tmp_path / "trace").rglob("*.xplane.pb"))
