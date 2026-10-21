@@ -35,6 +35,9 @@ quantizer state; the optimizer, LR schedule, beta controller and data position s
 float checkpoint); it defaults to ``--config``. The checkpoint's config hash is the target's, so ``main_jax`` refuses
 it for another model.
 
+For a quantized target the report also holds ``renorm_lane`` (``renorm_lane_check``: the largest masked-Linformer
+column energy and the count of nonzero E entries the renorm lane rounds away; a nonzero count also warns).
+
 Checkpoints are read with ``torch.load(weights_only=True)`` (no pickled code runs). This module imports torch, so it
 lives outside ``hepattn.keras_native`` (import-hygiene rule); keras runs on JAX (set when ``KERAS_BACKEND`` is unset).
 """
@@ -46,6 +49,7 @@ import operator
 import os
 import re
 import sys
+import warnings
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -668,6 +672,37 @@ def compare_forward(tmodel: nn.Module, nmodel, inputs: dict[str, np.ndarray]) ->
     return out
 
 
+def renorm_lane_check(nmodel) -> dict | None:
+    """The premise of the quantized masked-Linformer renorm lane (``masked_linformer.renorm_bits``) on these weights.
+
+    Over every E / F projection of a quantized renorm core: the largest column energy ``S_c = sum_rows E^2`` and the
+    number of nonzero ``E[:n]`` entries whose energy fraction ``W = E^2 / S_c`` the kept-lane quantizer rounds to 0.
+    The renorm does not see such an entry: a mask row that selects only such entries reaches the rsqrt floor although
+    its projection is not zero (``docs/hgq/FPGA_STATUS.md`` footnote 5). The count is 0 while ``S_c < 32``: the
+    smallest nonzero ``E^2`` is ``2**-(2 cap)``, half a lane step is ``2**-(2 cap + 5)``. ``None`` for a model without
+    quantized renorm cores (a float target has no lane).
+    """
+    from hepattn.keras_native.masked_linformer import AttendCore, ProjectCore  # noqa: PLC0415
+
+    projections, s_max, dropped, worst = 0, 0.0, 0, None
+    for core in nmodel._flatten_layers(include_self=False, recursive=True):  # noqa: SLF001
+        if not isinstance(core, AttendCore | ProjectCore) or not core.renorm:
+            continue
+        for proj, kept in ((core.E, core.kept_k), (core.F, core.kept_v)):
+            if not hasattr(kept, "iq"):  # float leaves
+                return None
+            head, tail = (None if t is None else np.asarray(t, np.float64) for t in proj.rows(False))
+            column = (head**2).sum(0) + (0.0 if tail is None else (tail**2).sum(0))
+            energy = np.asarray(kept.iq.quantizers[1](proj.energy(False)[None], training=False))[0]
+            projections += 1
+            dropped += int(((head != 0) & (energy == 0)).sum())
+            if column.max() > s_max:
+                s_max, worst = float(column.max()), proj.path
+    if not projections:
+        return None
+    return {"projections": projections, "s_c_max": s_max, "s_c_max_at": worst, "dropped_entries": dropped}
+
+
 def _sha256(path: str | Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as f:
@@ -710,6 +745,11 @@ def convert(
             report["max_abs_diff"] = compare_forward(tmodel, nmodel, inputs)
     else:
         report = port_hybrid_state(state, nmodel)
+    lane = renorm_lane_check(nmodel)
+    if lane is not None:
+        report["renorm_lane"] = lane
+        if lane["dropped_entries"]:
+            warnings.warn(f"renorm lane premise fails: {lane}; see docs/hgq/FPGA_STATUS.md footnote 5", stacklevel=2)
     report["checkpoint"] = {"path": str(ckpt_path), "sha256": _sha256(ckpt_path), **info}
     report["config"] = [str(p) for p in config]
     report["target_config"] = [str(p) for p in (target_config or config)]

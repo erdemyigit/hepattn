@@ -12,7 +12,7 @@ changes a row: update this document when they do.
 | `QDense` pointwise, rank-3 `(150, dim)` (CLIC head shape) | ✅ | ✅ verified (linux¹) |
 | Attention core: `QDense`×4 + `QEinsum`×2 + `QSoftmax`, fixed shapes | ✅ | ✅ verified (linux¹) |
 | silu **inline** in `QDense(activation="silu")` | ❌ rank 3: `TypeError` in hls4ml `bit_exact.py:602` (`np.ones(k)` on an array); rank 2 followed by a layer: shape `AssertionError` (same cause); rank 2 as the last layer: writes a call to `nnet::silu`, which no hls4ml 1.3.0 template defines³ | — |
-| sigmoid **inline** in `QDense` (the encoder value-residual mix) | ✅ | ❌ hls4ml's own sigmoid table: all 2304 outputs differ, max 9.8e-4³ |
+| sigmoid **inline** in `QDense` (the encoder value-residual mix) | ✅ | ❌ hls4ml's own sigmoid table: 2304 of 2304 outputs differ (first run), 2303 of 2304 after review round 1 (no training call before the export), max 9.8e-4³ |
 | silu / sigmoid as `QDense` (linear) + rank-2 `QUnaryFunctionLUT` (the S7 `activation_export_form`) | ✅ ² | ✅ verified (linux³); approximate to the trained layer: within half a lane step while the table input does not saturate (\|pre-activation\| < 2⁴ - 2⁻⁶ for the (4, 6) lane), unbounded past it (measure the range on real events before deployment) |
 | `QUnaryFunctionLUT` on rank-3 (pointwise) inputs | ❌ (HGQ2 table-shape bug) | — |
 | renorm `kept`: `QEinsum` of a mask with a computed batch-1 (1, n, k) table | ❌ "Batch dim mismatch for the inputs and output" | — |
@@ -39,19 +39,27 @@ perturbed by 3 LSB changes 6 outputs. Keras on Linux equals keras on macOS on ev
 the kept energy fraction in [0, 1)); rerun after review round 1 without a training call before the export (the
 converted checkpoint's state): again 22 of 22, `S7_evidence/csim_r1.json`.
 
+⁴ A leaf without an input quantizer of its own (`QSoftmax`) is gated behind a fixed (8, 12) input quantizer: in the
+full graph the previous layer's result type sets its input precision; fed a float input directly, hls4ml reads it at
+its default precision and C simulation differs (measured: 16856 of 18432 outputs, max 2.9e-3, before the fix).
+
 ⁵ The rsqrt `QUnaryFunctionLUT` (renorm, input lane unsigned (1, 18), output lane (10, 14)) is bit-exact on its domain
 except at the floor, input 0 (an input below 0 saturates to 0 too, but the kept energy fraction is never negative):
 keras gives 2¹⁰, one LSB past the output lane, hls4ml the lane maximum 2¹⁰ - 2⁻¹⁴. Cause: HGQ2's SAT quantizer clips
 to 2¹⁰ - 2⁻¹⁴ and then rounds `floor(v * 2¹⁴ + 0.5)` in float32, where (2²⁴ - 1) + 0.5 rounds to 2²⁴. The floor is
 reached on a mask row that selects no key; there the table output multiplies exact zeros (attend) or is selected out,
 so it does not reach the core output (`tests/keras_native/test_export.py::test_rsqrt_floor_does_not_reach_the_core_outputs`:
-any floor value gives bitwise the same outputs). Measured on falcon: 16 floor points, all as characterized, the other
-112 outputs exact. Fed standard-normal inputs (half of them negative) the leaf differs in 268 of 512 outputs (review
+the floor value replaced by 3.0 gives bitwise the same outputs; the 3.0 sentinel is what detects a leak: in reviewer
+mutant X5, `ProjectCore` without its kv zeroing, hls4ml's floor value alone passed). Premise: a row that selects keys
+also reaches the floor if, in some column, every selected entry has E = 0 (harmless: the projection is 0 there too) or
+a nonzero E whose energy fraction `W = E² / S_c` the (1, 18) lane rounds to 0 (not harmless: the projection is not 0).
+With at most 7 fractional bits in E the second case cannot occur while every column energy `S_c = sum_rows E²` is
+below 2⁵ = 32 (the smallest nonzero E² is 2⁻¹⁴, half a lane step 2⁻¹⁹). Training does not enforce this. The
+converter reports it for every quantized target (`renorm_lane` in `--report`: the largest `S_c` and the count of
+nonzero E entries rounded to 0; a nonzero count warns). On the S7 fixtures the largest `S_c` is 3.7 and no entry is
+rounded to 0; check this report for the PR #9 and Polaris checkpoints.
+Measured on falcon: 16 floor points, all as characterized, the other 112 outputs exact. Fed standard-normal inputs (half of them negative) the leaf differs in 268 of 512 outputs (review
 round 1); on a grid over [-1, 2.5] every difference is at an input in [-1, 0].
-
-⁴ A leaf without an input quantizer of its own (`QSoftmax`) is gated behind a fixed (8, 12) input quantizer: in the
-full graph the previous layer's result type sets its input precision; fed a float input directly, hls4ml reads it at
-its default precision and C simulation differs (measured: 16856 of 18432 outputs, max 2.9e-3, before the fix).
 
 Under the torch backend the conversion must run under `torch.no_grad()` (the converter materializes LUT tables by
 evaluating activations and calling `.numpy()`); `hepattn.keras.export.convert_to_hls` handles this. Under JAX no

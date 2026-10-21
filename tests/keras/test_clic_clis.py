@@ -18,11 +18,14 @@ Inputs are the S7 fixtures (``tests/keras_native/s7_fixtures``: real Lightning r
   Lightning checkpoint, and the model it evaluates reproduces the stored outputs bit for bit. Control: its old load
   (forward, then ``load_state_dict`` without ``register_keras_parameters``) is refused;
 - ``s7_fixtures/hybrid/einsum_inputs.json`` (the hybrid's ``QEinsum`` input order, which the native converter test
-  checks its quantizer pairing against) is what the hybrid model built from the fixture holds.
+  checks its quantizer pairing against) is what the hybrid model built from the fixture holds;
+- ``port_to_keras.read_model_state`` (the loader of all three CLIs) refuses a checkpoint carrying pickled code.
+  Control: an unrestricted ``torch.load`` of the same file runs that code.
 """
 
 import json
 from pathlib import Path
+from pickle import UnpicklingError  # noqa: S403 (the exception type only)
 
 import numpy as np
 import pytest
@@ -232,3 +235,30 @@ def test_einsum_input_order_fixture_is_current():
     order = make.einsum_inputs(model)
     assert order == json.loads((HYB / "einsum_inputs.json").read_text())
     assert len(order) == 52 and all(len(paths) == 2 for paths in order.values())
+
+
+TRIPWIRE: list[str] = []
+
+
+def _tripwire(tag: str) -> str:
+    TRIPWIRE.append(tag)
+    return tag
+
+
+class _PickledCall:
+    """Unpickles by calling ``_tripwire``: the code a checkpoint file can carry."""
+
+    def __reduce__(self):
+        return (_tripwire, ("ran",))
+
+
+def test_read_model_state_refuses_pickled_code(tmp_path):
+    state = port_to_keras.read_model_state(HYB / "model.ckpt")
+    path = tmp_path / "code.ckpt"
+    torch.save({"state_dict": {f"model.{k}": v for k, v in state.items()}, "callbacks": _PickledCall()}, path)
+    TRIPWIRE.clear()
+    with pytest.raises(UnpicklingError, match="Weights only load failed"):
+        port_to_keras.read_model_state(path)
+    assert TRIPWIRE == []
+    torch.load(path, map_location="cpu", weights_only=False)  # control: unrestricted, the file runs its code
+    assert TRIPWIRE == ["ran"]

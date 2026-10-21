@@ -99,8 +99,8 @@ def test_summary_records_the_warm_start(runs):
     assert '"warm_started_from": "' in runs["summary_hybrid"] and "hybrid.npz" in runs["summary_hybrid"]
 
 
-def fresh_trainer(run_dir: Path) -> loop.Trainer:
-    rc = load_config([CONFIG])
+def fresh_trainer(run_dir: Path, config: Path = CONFIG) -> loop.Trainer:
+    rc = load_config([config])
     settings = loop.LoopSettings.from_run_config(rc, run_dir, max_steps=STEPS, matmul_precision="highest")
     train = main_jax.clic_data(rc, "train", seed=settings.seed, dummy_data=True)
     return loop.Trainer(rc, settings, sample=next(iter(train.epoch(0, 0))), train_batches=train.num_batches)
@@ -134,6 +134,29 @@ def test_warm_start_needs_a_fresh_trainer(hybrid_npz, tmp_path):
     trainer.global_step, trainer.micro_step = 0, 1
     with pytest.raises(ValueError, match="warm_start needs a fresh trainer"):
         trainer.warm_start(hybrid_npz)
+    trainer.micro_step, trainer.resumed_from = 0, tmp_path / "ckpts" / "last.npz"  # a restored trainer, steps 0
+    with pytest.raises(ValueError, match="warm_start needs a fresh trainer"):
+        trainer.warm_start(hybrid_npz)
+
+
+def test_warm_start_refuses_another_model_config(hybrid_npz, tmp_path):
+    """The target config with another loss weight (no variable changes shape) is another model: ``--init-from`` refuses
+    the converted checkpoint by its config hash. Control: without the hash check the same file loads.
+    """
+    import yaml  # noqa: PLC0415
+
+    from hepattn.keras_native import checkpoint as nckpt  # noqa: PLC0415
+
+    text = CONFIG.read_text()
+    assert text.count("loss_weight: 10.0") == 1
+    other = tmp_path / "other.yaml"
+    other.write_text(text.replace("loss_weight: 10.0", "loss_weight: 5.0"))
+    assert yaml.safe_load(other.read_text())["model"] != yaml.safe_load(text)["model"]
+    trainer = fresh_trainer(tmp_path / "run", other)
+    assert trainer.rc.model_hash != load_config([CONFIG]).model_hash
+    with pytest.raises(nckpt.CheckpointError, match="written for config"):
+        trainer.warm_start(hybrid_npz)
+    nckpt.load_checkpoint(hybrid_npz, trainer.steps.model, None, expect_config_hash=None)  # control: shapes match
 
 
 def test_resume_and_init_from_are_exclusive(tmp_path, capsys):

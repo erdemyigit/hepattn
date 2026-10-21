@@ -18,12 +18,17 @@ Gates (plan section 4, S7; tolerances are 2x the measured maxima, the R5 rule; m
   variable value is in the native model bit for bit (quantizer bitwidths included, which training moved away from
   their initial values: asserted), and survives the native checkpoint round trip. Control: a state without one
   quantizer variable raises; one bit less in one quantizer changes the outputs.
+- the converter's own verify report (``compare_forward``, the ``--report`` ``max_abs_diff``) equals the forward
+  difference measured here, and reports a mis-mapped tensor; ``renorm_lane`` reports the renorm-lane premise (control:
+  a projection column with ``S_c`` = 64 drops one entry and warns); a checkpoint carrying pickled code is refused.
 The ``main_jax fit --init-from`` gate is in ``test_convert_fit.py``.
 """
 
 import copy
+import json
 import math
 from pathlib import Path
+from pickle import UnpicklingError  # noqa: S403 (the exception type only)
 
 import numpy as np
 import pytest
@@ -126,6 +131,16 @@ def test_org_float_forward_equals_torch(org):
         assert errors[key] <= tol, f"{key}: {errors[key]:.3e} > {tol:.3e}"
 
 
+def test_converter_report_is_the_measured_forward_difference(org):
+    """``compare_forward`` (``max_abs_diff`` of ``--report``, the one-command check of a production conversion) equals
+    this test's own measure, per output, and is not zero (every ORG_MEASURED value is > 0).
+    """
+    report = C.compare_forward(org["tmodel"], org["nmodel"], org["inputs"])
+    expected = max_errors(org["ref"], native_outputs(org["nmodel"], org["inputs"]))
+    assert report == {**expected, **dict.fromkeys(MASKS, 0.0)}
+    assert all(report[key] > 0 for key in ORG_TOL), report
+
+
 @pytest.mark.parametrize("layer", [0, 1])
 def test_org_mask_logits_are_far_from_the_threshold(org, layer):
     """The exact mask check means something: every valid logit is >= 10x its tolerance from logit(0.1)."""
@@ -162,6 +177,9 @@ def test_org_float_mis_mapped_tensor_fails(org, control):
     errors = max_errors(org["ref"], native_outputs(nmodel, org["inputs"]))
     ratio = max(errors[key] / ORG_TOL[key] for key in ORG_TOL)
     assert ratio > 10, f"{control}: the worst output is only {ratio:.1f}x its tolerance"
+    reported = C.compare_forward(org["tmodel"], nmodel, org["inputs"])
+    ratio = max(reported[key] / ORG_TOL[key] for key in ORG_TOL)
+    assert ratio > 10, f"{control}: the converter's report gives only {ratio:.1f}x the tolerance"
 
 
 def test_org_float_coverage(org):
@@ -322,7 +340,7 @@ def test_hybrid_unknown_torch_tensor_is_refused(hybrid):
         C.port_hybrid_state(state, nmodel)
 
 
-def test_cli_writes_a_checkpoint_main_jax_loads(tmp_path, capsys):
+def test_cli_writes_a_checkpoint_main_jax_loads(org, tmp_path, capsys):
     out = tmp_path / "org.npz"
     assert (
         C.main(["--config", str(ORG / "config.yaml"), "--ckpt", str(ORG / "model.ckpt"), "--out", str(out), "--report", str(tmp_path / "r.json")])
@@ -332,6 +350,10 @@ def test_cli_writes_a_checkpoint_main_jax_loads(tmp_path, capsys):
     meta = nckpt.read_meta(out)
     assert meta["converted_from"]["source"] == "torch" and meta["converted_from"]["checkpoint"]["global_step"] == 4
     assert max(meta["converted_from"]["max_abs_diff"][k] / ORG_TOL[k] for k in ORG_TOL) <= 1.0
+    # the CLI verifies on the fixture's events: its report is the measured difference (test_converter_report_is_...)
+    assert meta["converted_from"]["max_abs_diff"] == C.compare_forward(org["tmodel"], org["nmodel"], org["inputs"])
+    assert json.loads((tmp_path / "r.json").read_text())["max_abs_diff"] == meta["converted_from"]["max_abs_diff"]
+    assert "renorm_lane" not in meta["converted_from"]  # a float target has no renorm lane
     with pytest.raises(FileExistsError):
         C.main(["--config", str(ORG / "config.yaml"), "--ckpt", str(ORG / "model.ckpt"), "--out", str(out)])
 
@@ -433,6 +455,75 @@ def test_hybrid_dtype_mismatch_is_refused(hybrid):
         C.port_hybrid_state(state, nmodel)
 
 
+def _ebops_state(hybrid, value: int, rename: bool) -> tuple[dict, str, str]:
+    """The hybrid state with every module-path copy of one ``ebops`` counter set to ``value`` (int64); with ``rename``,
+    under a variable path that does not end in ``/ebops``. Returns (state, variable path, its canonical).
+    """
+    state = copy.copy(hybrid["state"])
+    path = next(k.split(C.KERAS_PARAM_MARK, 1)[1] for k in state if C.KERAS_PARAM_MARK in k and k.endswith("/ebops"))
+    new = path + "_count" if rename else path
+    for key in [k for k in state if k.endswith(C.KERAS_PARAM_MARK + path)]:
+        assert state[key].dtype == torch.int64
+        state[key.removesuffix(path) + new] = torch.full_like(state.pop(key), value)
+    return state, new, C._canonical(C._segments(path))  # noqa: SLF001
+
+
+@pytest.mark.parametrize("rename", [False, True])
+def test_only_ebops_saturate_in_an_integer_cast(hybrid, monkeypatch, rename):
+    """A value past uint32 saturates for an ``ebops`` counter (as on JAX) and is refused for any other integer variable.
+
+    The same value goes into the same native uint32 variable; only the hybrid variable's name differs (the renamed
+    path is matched to the ebops variable by a patched ``_match_native``).
+    """
+    state, path, canon = _ebops_state(hybrid, 2**33, rename)
+    if rename:
+        new_canon, match = C._canonical(C._segments(path)), C._match_native  # noqa: SLF001
+
+        def renamed(nmodel, groups):
+            found = match(nmodel, {canon if c == new_canon else c: m for c, m in groups.items()})
+            found[new_canon] = found.pop(canon)
+            return found
+
+        monkeypatch.setattr(C, "_match_native", renamed)
+    nmodel = hybrid["rc"].build_model()
+    nmodel(hybrid["inputs"], training=False)
+    if rename:
+        with pytest.raises(C.ConversionError, match=f"{path}: values outside uint32"):
+            C.port_hybrid_state(state, nmodel)
+        return
+    report = C.port_hybrid_state(state, nmodel)
+    assert report["saturated_ebops"] == [path]
+    (var,) = C._match_native(nmodel, {canon: [C._segments(path)]})[canon]  # noqa: SLF001
+    assert np.dtype(var.dtype) == np.uint32 and np.all(np.asarray(var.value) == 2**32 - 1)
+
+
+TRIPWIRE: list[str] = []
+
+
+def _tripwire(tag: str) -> str:
+    TRIPWIRE.append(tag)
+    return tag
+
+
+class _PickledCall:
+    """Unpickles by calling ``_tripwire``: the code a checkpoint file can carry."""
+
+    def __reduce__(self):
+        return (_tripwire, ("ran",))
+
+
+def test_a_checkpoint_carrying_pickled_code_is_refused(tmp_path):
+    state, _ = C.read_lightning_state(ORG / "model.ckpt")
+    path = tmp_path / "code.ckpt"
+    torch.save({"state_dict": {f"model.{k}": v for k, v in state.items()}, "callbacks": _PickledCall()}, path)
+    TRIPWIRE.clear()
+    with pytest.raises(UnpicklingError, match="Weights only load failed"):
+        C.read_lightning_state(path)
+    assert TRIPWIRE == []
+    torch.load(path, map_location="cpu", weights_only=False)  # control: unrestricted, the file runs its code
+    assert TRIPWIRE == ["ran"]
+
+
 @pytest.mark.parametrize("source", ["hybrid", "torch"])
 def test_other_class_weights_are_refused(org, hybrid, source):
     """``loss_weights`` buffers are not ported but compared: other class weights are another config."""
@@ -498,8 +589,9 @@ def quadratic_run(tmp_path: Path, state: dict | None, enc_type: str, dec_type: s
     return run, state
 
 
-# measured max |native - torch| on these random weights: 4.9e-3 at |regr| up to 1.4e4 (about 3 float32 ulp of the largest
-# value), <= 1.1e-6 elsewhere; the bound per output is 16 ulp of its largest value, at least 2.2e-6
+# measured max |native - torch| on these seeded weights: 4.88e-3 at |regr| up to 1.44e4 (5 float32 ulp there, 2.9 eps*|x|),
+# <= 1.1e-6 elsewhere (mask logits up to 9 ulp, 7.0 eps*|x|); the bound per output is 16 eps * max|x| (16-32 ulp of
+# max|x|, by where it sits in its binade), at least 2.2e-6
 QUADRATIC_ULPS, QUADRATIC_ABS = 16, 2.2e-6
 
 
@@ -544,7 +636,7 @@ def _rc(run: Path):
     return load_config([run / "config.yaml"])
 
 
-def test_linformer_into_quadratic_is_refused(org, tmp_path):
+def test_quadratic_into_linformer_is_refused(org, tmp_path):
     """Control for the type comparison: a quadratic torch attention does not port into a native linformer one."""
     run, _ = quadratic_run(tmp_path, None, "torch", "torch")
     tmodel = C.instantiate_torch_model(C.source_model_section([run / "config.yaml"]))
@@ -552,3 +644,34 @@ def test_linformer_into_quadratic_is_refused(org, tmp_path):
     nmodel(org["inputs"], training=False)
     with pytest.raises(C.ConversionError, match="attn_type mismatch: torch torch vs native linformer"):
         C.port_torch_model(tmodel, nmodel)
+
+
+# ------------------------------------------------------------------------------------------- renorm lane premise
+
+
+def test_renorm_lane_premise_is_reported(org, hybrid):
+    """Both quantized conversions report the premise of FPGA_STATUS footnote 5; it holds on the fixtures."""
+    lane = hybrid["report"]["renorm_lane"]
+    assert lane["projections"] == 12 and lane["dropped_entries"] == 0, lane  # 3 cores x 2 layers x (E, F)
+    assert 2.0 < lane["s_c_max"] < 5.0, lane  # measured 3.68: below 32 by a factor 8.7
+    assert "renorm_lane" not in org["report"]  # float target
+
+
+def test_renorm_lane_check_counts_a_dropped_entry(hybrid, monkeypatch):
+    """Control: one E column holds 2**-6 and 2**-7 in its head rows and 8 in its tail (S_c = 64 + 2**-12 + 2**-14).
+    W(2**-7) ~ 2**-20 is under half the 2**-18 lane step, so it rounds to 0 (dropped); W(2**-6) ~ 2**-18 is kept. The
+    converter reports it and warns. The 8 sits in the tail, so S_c must count the tail rows.
+    """
+    from hepattn.keras_native.masked_linformer import AttendCore, SeqProjection  # noqa: PLC0415
+
+    core = next(c for c in hybrid["nmodel"]._flatten_layers(include_self=False) if isinstance(c, AttendCore) and c.renorm and c.E.tail is not None)  # noqa: SLF001
+    head, tail = (np.array(t) for t in core.E.rows(False))  # a decoder kv cross-attention: the tail enters S_c
+    head[:, 0], tail[:, 0] = 0.0, 0.0
+    head[:2, 0], tail[0, 0] = [2.0**-6, 2.0**-7], 8.0
+    rows = SeqProjection.rows
+    monkeypatch.setattr(SeqProjection, "rows", lambda self, training=None: (head, tail) if self.path == core.E.path else rows(self, training))
+    with pytest.warns(UserWarning, match="renorm lane premise fails"):
+        _, _, report = C.convert([HYB / "config.yaml"], HYB / "model.ckpt")
+    lane = report["renorm_lane"]
+    assert lane["dropped_entries"] == 1, lane
+    assert lane["s_c_max"] == 64 + 2.0**-12 + 2.0**-14 and lane["s_c_max_at"] == core.E.path, lane

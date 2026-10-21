@@ -1,0 +1,225 @@
+{
+ "n00": {
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "old": "",
+  "new": "",
+  "rc": 0,
+  "killed": null,
+  "seconds": 84,
+  "failed": [],
+  "summary": [
+   "10 passed, 14 warnings in 79.94s (0:01:19)"
+  ]
+ },
+ "n00f": {
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "old": "",
+  "new": "",
+  "rc": 0,
+  "killed": null,
+  "seconds": 72,
+  "failed": [],
+  "summary": [
+   "2 passed in 68.21s (0:01:08)"
+  ]
+ },
+ "n00h": {
+  "file": "src/hepattn/experiments/clic/port_to_keras.py",
+  "old": "",
+  "new": "",
+  "rc": 0,
+  "killed": null,
+  "seconds": 10,
+  "failed": [],
+  "summary": [
+   "1 passed, 14 warnings in 3.02s"
+  ]
+ },
+ "V08": {
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "old": "keep = np.abs(value) < 1e30",
+  "new": "keep = np.abs(value) < 0",
+  "rc": 1,
+  "killed": true,
+  "seconds": 34,
+  "failed": [
+   "FAILED tests/keras_native/test_convert.py::test_converter_report_is_the_measured_forward_difference",
+   "FAILED tests/keras_native/test_convert.py::test_org_float_mis_mapped_tensor_fails[in_proj_q_k_swapped]",
+   "FAILED tests/keras_native/test_convert.py::test_org_float_mis_mapped_tensor_fails[out_proj_not_transposed]",
+   "FAILED tests/keras_native/test_convert.py::test_org_float_mis_mapped_tensor_fails[swiglu_halves_swapped]"
+  ],
+  "summary": [
+   "4 failed, 1 passed, 14 warnings in 29.82s"
+  ]
+ },
+ "V15": {
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "old": "ckpt = torch.load(path, map_location=\"cpu\", weights_only=True)",
+  "new": "ckpt = torch.load(path, map_location=\"cpu\", weights_only=False)",
+  "rc": 1,
+  "killed": true,
+  "seconds": 11,
+  "failed": [
+   "FAILED tests/keras_native/test_convert.py::test_a_checkpoint_carrying_pickled_code_is_refused"
+  ],
+  "summary": [
+   "1 failed, 14 warnings in 7.35s"
+  ]
+ },
+ "V14": {
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "old": "if not what.endswith(\"/ebops\"):",
+  "new": "if False:",
+  "rc": 1,
+  "killed": true,
+  "seconds": 75,
+  "failed": [
+   "FAILED tests/keras_native/test_convert.py::test_only_ebops_saturate_in_an_integer_cast[True]"
+  ],
+  "summary": [
+   "1 failed, 1 passed, 14 warnings in 70.43s (0:01:10)"
+  ]
+ },
+ "V14b": {
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "old": "if not what.endswith(\"/ebops\"):",
+  "new": "if True:",
+  "rc": 1,
+  "killed": true,
+  "seconds": 76,
+  "failed": [
+   "FAILED tests/keras_native/test_convert.py::test_only_ebops_saturate_in_an_integer_cast[False]"
+  ],
+  "summary": [
+   "1 failed, 1 passed, 14 warnings in 70.82s (0:01:10)"
+  ]
+ },
+ "V19": {
+  "file": "src/hepattn/keras_native/loop.py",
+  "old": "if self.resumed_from is not None or self.global_step or self.micro_step:",
+  "new": "if self.global_step or self.micro_step:",
+  "rc": 1,
+  "killed": true,
+  "seconds": 68,
+  "failed": [
+   "FAILED tests/keras_native/test_convert_fit.py::test_warm_start_needs_a_fresh_trainer"
+  ],
+  "summary": [
+   "1 failed in 63.45s (0:01:03)"
+  ]
+ },
+ "V20": {
+  "file": "src/hepattn/keras_native/loop.py",
+  "old": "(tv, ntv, _), meta = ckpt.load_checkpoint(path, model, None, expect_config_hash=self.rc.model_hash)",
+  "new": "(tv, ntv, _), meta = ckpt.load_checkpoint(path, model, None, expect_config_hash=None)",
+  "rc": 1,
+  "killed": true,
+  "seconds": 70,
+  "failed": [
+   "FAILED tests/keras_native/test_convert_fit.py::test_warm_start_refuses_another_model_config"
+  ],
+  "summary": [
+   "1 failed in 65.74s (0:01:05)"
+  ]
+ },
+ "R1": {
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "old": "dropped += int(((head != 0) & (energy == 0)).sum())",
+  "new": "dropped += int(((head != 0) & (energy < 0)).sum())",
+  "rc": 1,
+  "killed": true,
+  "seconds": 53,
+  "failed": [
+   "FAILED tests/keras_native/test_convert.py::test_renorm_lane_check_counts_a_dropped_entry"
+  ],
+  "summary": [
+   "1 failed, 1 passed, 14 warnings in 49.05s"
+  ]
+ },
+ "R2": {
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "old": "column = (head**2).sum(0) + (0.0 if tail is None else (tail**2).sum(0))",
+  "new": "column = (head**2).sum(0)",
+  "rc": 1,
+  "killed": true,
+  "seconds": 64,
+  "failed": [
+   "FAILED tests/keras_native/test_convert.py::test_renorm_lane_check_counts_a_dropped_entry"
+  ],
+  "summary": [
+   "1 failed, 1 passed, 14 warnings in 59.59s"
+  ]
+ },
+ "R3": {
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "old": "dropped += int(((head != 0) & (energy == 0)).sum())",
+  "new": "dropped += int((energy == 0).sum())",
+  "rc": 1,
+  "killed": true,
+  "seconds": 62,
+  "failed": [
+   "FAILED tests/keras_native/test_convert.py::test_renorm_lane_premise_is_reported",
+   "FAILED tests/keras_native/test_convert.py::test_renorm_lane_check_counts_a_dropped_entry"
+  ],
+  "summary": [
+   "2 failed, 15 warnings in 57.19s"
+  ]
+ },
+ "R4": {
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "old": "        report[\"renorm_lane\"] = lane\n",
+  "new": "        pass\n",
+  "rc": 1,
+  "killed": true,
+  "seconds": 59,
+  "failed": [
+   "FAILED tests/keras_native/test_convert.py::test_renorm_lane_premise_is_reported",
+   "FAILED tests/keras_native/test_convert.py::test_renorm_lane_check_counts_a_dropped_entry"
+  ],
+  "summary": [
+   "2 failed, 14 warnings in 54.85s"
+  ]
+ },
+ "R5": {
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "old": "warnings.warn(f\"renorm lane premise fails: {lane}; see docs/hgq/FPGA_STATUS.md footnote 5\", stacklevel=2)",
+  "new": "pass",
+  "rc": 1,
+  "killed": true,
+  "seconds": 56,
+  "failed": [
+   "FAILED tests/keras_native/test_convert.py::test_renorm_lane_check_counts_a_dropped_entry"
+  ],
+  "summary": [
+   "1 failed, 1 passed, 14 warnings in 52.42s"
+  ]
+ },
+ "R6": {
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "old": "energy = np.asarray(kept.iq.quantizers[1](proj.energy(False)[None], training=False))[0]",
+  "new": "energy = np.asarray(proj.energy(False))",
+  "rc": 1,
+  "killed": true,
+  "seconds": 57,
+  "failed": [
+   "FAILED tests/keras_native/test_convert.py::test_renorm_lane_check_counts_a_dropped_entry"
+  ],
+  "summary": [
+   "1 failed, 1 passed, 14 warnings in 52.91s"
+  ]
+ },
+ "P1": {
+  "file": "src/hepattn/experiments/clic/port_to_keras.py",
+  "old": "state = torch.load(path, map_location=\"cpu\", weights_only=True)",
+  "new": "state = torch.load(path, map_location=\"cpu\", weights_only=False)",
+  "rc": 1,
+  "killed": true,
+  "seconds": 11,
+  "failed": [
+   "FAILED tests/keras/test_clic_clis.py::test_read_model_state_refuses_pickled_code"
+  ],
+  "summary": [
+   "1 failed, 14 warnings in 3.31s"
+  ]
+ }
+}

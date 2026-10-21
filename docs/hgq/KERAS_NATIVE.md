@@ -206,7 +206,11 @@ checks both directions: every source tensor is read (the task `loss_weights` buf
 class weights; the hybrid's `proj_*_dead` rows are dropped, as org never reads them) and every native variable is
 written (a float source into a QAT target leaves only the HGQ2 quantizer state, `beta` and `ebops` at their initial
 values); anything else raises `ConversionError`. For a float target it also reports the torch-vs-native forward
-difference on two dummy events (`max_abs_diff` in the report). The mapping and its gates: module docstring and
+difference on two dummy events (`max_abs_diff` in the report). For a quantized target the report holds `renorm_lane`:
+the largest masked-Linformer column energy `S_c` and the number of nonzero E entries the renorm lane rounds to 0
+(must be 0; a nonzero count warns; [FPGA_STATUS.md](FPGA_STATUS.md) footnote 5). Runs trained with `flash` or
+`flash-varlen` attention (the encoder of org `base.yaml`) convert as `torch` attention, which the native model uses
+for them (a `UserWarning` says so); the verify forward runs the torch model with SDPA on the CPU. The mapping and its gates: module docstring and
 [port_log/S7.md](port_log/S7.md). The optimizer state of the Lightning checkpoint is not converted (a resume of a
 Lightning run continues as a warm start).
 
