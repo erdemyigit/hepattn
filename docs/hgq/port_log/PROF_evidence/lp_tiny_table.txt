@@ -1,0 +1,20 @@
+variant           s/micro excl.compile over G3 ms  top groups (ms/micro)
+smoke               2.431        0.048     -113.6  train/step+compile 1949.6, train/log 411.9, epoch_end/val 34.2, train/ckpt 14.0, train/step 10.8, epoch_end/ckpt_epoch 6.8
+smoke_nodet         2.823        0.066      -95.7  train/step+compile 2274.9, train/log 451.6, epoch_end/val 49.5, train/ckpt 16.5, train/step 14.4, epoch_end/ckpt_epoch 9.4
+pure                0.929        0.019     -142.4  train/step+compile 909.8, train/step 9.4, epoch_end/ckpt_last 7.0, data 2.2, epoch_start 0.4, train_end 0.1
+pure_det            0.827        0.016     -145.6  train/step+compile 810.6, train/step 7.4, epoch_end/ckpt_last 6.0, data 2.0, epoch_start 0.4, train_end 0.1
+prod                1.215        0.040     -121.6  train/step+compile 970.0, epoch_end/val 210.0, epoch_end/ckpt_epoch 12.6, epoch_end/ckpt_last 11.3, train/step 8.5, data 2.2
+pure_sync           0.818        0.016     -145.5  train/step+compile 802.2, train/step 7.4, epoch_end/ckpt_last 6.2, data 1.8, epoch_start 0.4, train_end 0.1
+pure_noprof         0.838        0.392      229.9
+pure_prefetch       0.845        0.015     -146.7  train/step+compile 830.4, train/step 7.6, epoch_end/ckpt_last 6.3, epoch_start 0.4, data 0.2, train_end 0.1
+pure_trace          2.295        1.299     1136.9  trace 1278.7, train/step+compile 996.1, train/step 10.0, epoch_end/ckpt_last 6.6, data 2.6, epoch_start 0.4
+loader0          loader: 1.4 ms/batch median, first batch 0.0 s
+loader4          loader: 0.5 ms/batch median, first batch 2.7 s
+LOOP-PROFILE-DONE /private/tmp/claude-501/-Users-eertorer-Desktop-CMS-Group-LightweightTransformers4RECO-hepattn/344375f2-3963-489b-a70c-e605492b4dce/scratchpad/prof2/lp_tiny.json
+EXIT 0
+##### final script, --tiny --variants smoke_nodet,pure,pure_noprof (fresh run root)
+variant           s/micro excl.compile over G3 ms  top groups (ms/micro)
+smoke_nodet         3.290        0.065      -96.8  compile 3225.5, train/log 21.7, train/step 14.8, train/ckpt 14.0, epoch_end/ckpt_epoch 7.1, data 4.1
+pure                0.955        0.018     -144.0  compile 937.5, train/step 8.3, epoch_end/ckpt_last 6.4, data 2.2, epoch_start 0.5, train_end 0.1
+pure_noprof         0.910            -          -  no profiler: fit_s 14.6
+profiler perturbation: fit_s pure 15.3 / pure_noprof 14.6 = 1.049

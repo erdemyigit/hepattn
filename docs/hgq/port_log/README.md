@@ -26,6 +26,7 @@ Setup and test commands: [KERAS_NATIVE.md](../KERAS_NATIVE.md).
 | S6b training driver (`loop.py`, `cli.py`, `main_jax.py`), Polaris smoke and G3 scripts | [S6b.md](S6b.md) (`S6b_mutations.py`, `S6b_val_loss_probe.py`, `S6b_evidence/`) | `keras-jax` / `hepattn-keras-jax` |
 | Completeness critique of S5 + S6 (gate-by-gate mutants, beta setpoint spread, clean-shell CLI, Polaris scripts in a fresh venv) | [S56-critique.md](S56-critique.md) (`S56_critique_mutations.py`, `S56_evidence/critique_*`) | `keras-jax` / `hepattn-keras-jax` |
 | S7 Lightning-checkpoint converter (org float, hybrid HGQ2), `main_jax fit --init-from`, export to hls4ml under JAX (kept / activation export forms, csim on falcon), hybrid CLIs on the org model | [S7.md](S7.md) (`S7_mutations.py`, `S7_csim.py`, `S7_evidence/`) | `s7/export` / `hepattn-s7` |
+| PROF opt-in phase profiler of the native driver (`--profile-phases`, `--prefetch`, `--jax-trace`), production-dim CPU attribution, `18_loop_profile` (A100 variants, H7 pairs first; `smoke-timing` for H0) | [PROF.md](PROF.md) (`PROF_mutations.py`, `PROF_evidence/`) | `prof/loop` / `hepattn-prof` |
 
 ## Gates carried to a later stage
 

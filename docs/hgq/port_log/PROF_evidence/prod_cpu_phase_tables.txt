@@ -1,0 +1,167 @@
+##### lp_prod.json  args: micro 16 num_val 256 batch 32 accum 4 dummy True workers 8
+
+=== pure
+mode async  wall 815.479 s  micro-batches 16  50967.5 ms/micro  unattributed 0.1090 s (0.01%)
+phase                                                 n     excl_s   %wall  ms/micro  median_ms
+train/step                                           14    497.180   60.97  31073.77   31841.77
+train/step+compile                                    2    314.506   38.57  19656.60  157252.81
+epoch_end/ckpt_last/npz_write                         1      1.225    0.15     76.55    1224.73
+epoch_end/ckpt_last/sha256                            1      0.562    0.07     35.11     561.71
+data/loader                                          16      0.546    0.07     34.15      14.89
+epoch_end/ckpt_last                                   1      0.531    0.07     33.17    2545.33
+data/device_put                                      16      0.262    0.03     16.37      10.65
+data/numpy                                           16      0.162    0.02     10.15       6.84
+epoch_end/ckpt_last/host_copy                         1      0.136    0.02      8.52     136.32
+data                                                 16      0.124    0.02      7.72      41.78
+epoch_end/ckpt_last/meta                              1      0.052    0.01      3.22      51.56
+epoch_end/ckpt_last/sidecar                           1      0.034    0.00      2.15      34.33
+epoch_start                                           1      0.022    0.00      1.34      21.51
+epoch_end/drain                                       1      0.012    0.00      0.78      12.44
+epoch_end/ckpt_last/device_wait                       1      0.006    0.00      0.37       5.94
+train/first_step_wait                                 1      0.003    0.00      0.20       3.19
+train_end/ckpt_last/device_wait                       1      0.002    0.00      0.14       2.29
+train_end/drain/wait                                  1      0.002    0.00      0.11       1.83
+epoch_end                                             1      0.001    0.00      0.07    2558.86
+train_end/ckpt_last                                   1      0.001    0.00      0.06       3.86
+train_end/ckpt_last/meta                              1      0.001    0.00      0.04       0.67
+setup                                                 1      0.000    0.00      0.02       0.32
+summary                                               1      0.000    0.00      0.02       0.31
+train_end/drain                                       1      0.000    0.00      0.00       1.84
+concurrent: {"match_callback": {"max_ms": 2236.8763750127982, "median_ms": 522.2617914841976, "n": 16, "total_s": 11.896769247949123}}
+result: {"fit_s": 815.4796874159947, "build_s": 95.80676295800367, "first_step_s": 186.95703104199492, "micro_step": 16, "cache_events": {"cache_hits": 0, "cache_misses": 2, "requests": 1744}}
+
+=== pure_sync
+mode sync  wall 561.660 s  micro-batches 16  35103.7 ms/micro  unattributed 0.0885 s (0.02%)
+phase                                                 n     excl_s   %wall  ms/micro  median_ms
+train/step                                           14    385.085   68.56  24067.79   28425.78
+train/step+compile                                    2    172.471   30.71  10779.45   86235.59
+epoch_end/ckpt_last/npz_write                         1      2.019    0.36    126.22    2019.47
+epoch_end/ckpt_last/sha256                            1      0.537    0.10     33.55     536.81
+epoch_end/ckpt_last                                   1      0.493    0.09     30.84    3189.48
+data/loader                                          16      0.441    0.08     27.55      19.20
+data/device_put                                      16      0.174    0.03     10.88      11.15
+data/numpy                                           16      0.090    0.02      5.63       5.13
+epoch_end/ckpt_last/meta                              1      0.060    0.01      3.76      60.17
+epoch_end/ckpt_last/host_copy                         1      0.048    0.01      2.99      47.86
+data                                                 16      0.048    0.01      2.98      39.17
+train/device                                         15      0.040    0.01      2.48       2.54
+epoch_end/ckpt_last/sidecar                           1      0.030    0.01      1.87      29.85
+epoch_start                                           1      0.018    0.00      1.10      17.59
+data/device_put_wait                                 16      0.004    0.00      0.25       0.23
+epoch_end/drain                                       1      0.003    0.00      0.19       3.06
+epoch_end                                             1      0.002    0.00      0.15    3194.97
+epoch_end/ckpt_last/device_wait                       1      0.002    0.00      0.12       1.86
+train_end/ckpt_last/device_wait                       1      0.001    0.00      0.09       1.46
+train/first_step_wait                                 1      0.001    0.00      0.08       1.31
+train_end/drain/wait                                  1      0.001    0.00      0.07       1.08
+summary                                               1      0.001    0.00      0.07       1.06
+train_end/ckpt_last                                   1      0.001    0.00      0.04       2.75
+train_end/ckpt_last/meta                              1      0.001    0.00      0.04       0.63
+setup                                                 1      0.000    0.00      0.01       0.18
+train_end/drain                                       1      0.000    0.00      0.00       1.09
+concurrent: {"match_callback": {"max_ms": 573.7805000098888, "median_ms": 135.34937451186124, "n": 16, "total_s": 2.7815471241192427}}
+result: {"fit_s": 561.6602841249842, "build_s": 55.324976874981076, "first_step_s": 92.98171266700956, "micro_step": 16, "cache_events": {"cache_hits": 2, "cache_misses": 0, "requests": 1744}}
+
+=== smoke_nodet
+mode async  wall 667.277 s  micro-batches 16  41704.8 ms/micro  unattributed 0.1235 s (0.02%)
+phase                                                 n     excl_s   %wall  ms/micro  median_ms
+train/step                                           14    416.375   62.40  26023.42   30064.54
+train/step+compile                                    2    185.953   27.87  11622.07   92976.54
+train/log/metrics_forward+compile                     1     18.237    2.73   1139.84   18237.39
+epoch_end/val/forward                                 8     10.212    1.53    638.22    1265.16
+train/log/bits+compile                                1     10.207    1.53    637.97   10207.45
+train/ckpt/npz_write                                  4      7.559    1.13    472.42    2078.64
+epoch_end/val/data/loader                             9      5.467    0.82    341.66       0.38
+train/log/metrics_forward                             3      4.084    0.61    255.26    1344.81
+train/ckpt/sha256                                     4      2.244    0.34    140.22     545.22
+train/ckpt                                            4      1.677    0.25    104.81    3167.15
+epoch_end/ckpt_epoch/npz_write                        1      0.709    0.11     44.30     708.86
+train/log/device_get                                  4      0.659    0.10     41.18      41.27
+epoch_end/ckpt_epoch/sha256                           1      0.637    0.10     39.80     636.84
+train/log                                             4      0.569    0.09     35.57    1657.23
+data/loader                                          16      0.557    0.08     34.79      19.38
+train/log/bits                                        3      0.333    0.05     20.81     113.64
+epoch_end/ckpt_epoch                                  1      0.330    0.05     20.63    1728.46
+data/device_put                                      16      0.206    0.03     12.86      12.92
+epoch_end/val/data                                    9      0.191    0.03     11.95       2.50
+train/ckpt/host_copy                                  4      0.182    0.03     11.36      49.34
+train/ckpt/sidecar                                    4      0.119    0.02      7.45      28.81
+data/numpy                                           16      0.104    0.02      6.50       5.68
+epoch_end/val/metrics                                 8      0.096    0.01      5.97       9.76
+train/ckpt/meta                                       4      0.078    0.01      4.88      23.77
+train/log/metrics_host                                4      0.072    0.01      4.51      19.40
+data                                                 16      0.057    0.01      3.54      54.18
+train/log/csv                                         4      0.037    0.01      2.29       8.93
+epoch_end/ckpt_epoch/sidecar                          1      0.032    0.00      1.99      31.92
+epoch_end/val/device_get                              8      0.027    0.00      1.71       1.86
+epoch_end/val/data/device_put                         8      0.026    0.00      1.65       1.63
+epoch_end/val/bits                                    1      0.025    0.00      1.55      24.84
+epoch_start                                           1      0.017    0.00      1.08      17.29
+epoch_end/ckpt_epoch/host_copy                        1      0.017    0.00      1.07      17.17
+train/log/device_wait                                 4      0.015    0.00      0.95       3.82
+train/ckpt/device_wait                                4      0.010    0.00      0.65       2.55
+epoch_end/val                                         1      0.004    0.00      0.28   16055.43
+epoch_end/val/device                                  8      0.003    0.00      0.20       0.37
+epoch_end/csv                                         1      0.003    0.00      0.18       2.90
+train/first_step_wait                                 1      0.002    0.00      0.15       2.44
+epoch_end/val/metrics_compute                         1      0.002    0.00      0.15       2.37
+epoch_end/ckpt_last/device_wait                       1      0.002    0.00      0.14       2.20
+epoch_end/ckpt_epoch/device_wait                      1      0.002    0.00      0.12       2.00
+train/log/metrics_device                              4      0.002    0.00      0.12       0.56
+epoch_end/val/data/numpy                              8      0.002    0.00      0.12       0.15
+epoch_end/ckpt_epoch/meta                             1      0.002    0.00      0.10       1.59
+epoch_end/drain                                       1      0.001    0.00      0.09       1.45
+train_end/ckpt_last/device_wait                       1      0.001    0.00      0.08       1.35
+epoch_end/ckpt_last                                   1      0.001    0.00      0.08       4.52
+train_end/drain/wait                                  1      0.001    0.00      0.08       1.25
+summary                                               1      0.001    0.00      0.06       1.03
+epoch_end/ckpt_last/meta                              1      0.001    0.00      0.06       0.98
+train/log/ebops                                       4      0.001    0.00      0.04       0.13
+train_end/ckpt_last/meta                              1      0.001    0.00      0.04       0.59
+epoch_end                                             1      0.000    0.00      0.02   17793.02
+setup                                                 1      0.000    0.00      0.01       0.17
+train_end/ckpt_last                                   1      0.000    0.00      0.01       2.02
+train_end/drain                                       1      0.000    0.00      0.00       1.25
+concurrent: {"match_callback": {"max_ms": 2016.1766250093933, "median_ms": 138.2588959968416, "n": 28, "total_s": 9.205916711012833}}
+result: {"fit_s": 667.2773239999951, "build_s": 56.36494754199521, "first_step_s": 98.0807918329956, "micro_step": 16, "cache_events": {"cache_hits": 2, "cache_misses": 2, "requests": 1756}}
+
+=== pure_noprof
+result: {"fit_s": 520.428956082993, "build_s": 53.097627749986714, "first_step_s": 100.74145241698716, "micro_step": 16, "cache_events": {"cache_hits": 2, "cache_misses": 0, "requests": 1744}}
+
+=== loader0
+{"workers": 0, "dataset_s": 0.09873616698314436, "first_batch_s": 0.036618375015677884, "batches": 30, "median_ms": 13.954249996459112, "mean_ms": 16.603402765273735, "p90_ms": 25.87275000405498, "phases_ms_per_batch": {"data": 0.07773170267076542, "data/device_put": 0.4832153645111248, "data/loader": 15.766913931778012, "data/numpy": 0.12486949951077501, "device_put_wait": 0.13516390366324535}, "device": "cpu:0", "elapsed_s": 4.975692917010747}
+
+=== loader4
+{"workers": 4, "dataset_s": 0.09875020800973289, "first_batch_s": 2.6373162920062896, "batches": 30, "median_ms": 2.891354510211386, "mean_ms": 3.4214875030253706, "p90_ms": 6.8676249939017, "phases_ms_per_batch": {"data": 0.13965422695036978, "data/device_put": 0.6012361341466507, "data/loader": 2.258820833715921, "data/numpy": 0.16068600428601107, "device_put_wait": 0.2552597036507602}, "device": "cpu:0", "elapsed_s": 28.188777833012864}
+
+=== loader8
+{"workers": 8, "dataset_s": 0.09757712500868365, "first_batch_s": 3.8088520409946796, "batches": 30, "median_ms": 0.7875830051489174, "mean_ms": 2.754084865834254, "p90_ms": 6.034958001691848, "phases_ms_per_batch": {"data": 0.12129983418465902, "data/device_put": 0.467234833437639, "data/loader": 1.7582777654752135, "data/numpy": 0.12753893194409707, "device_put_wait": 0.27430976430575055}, "device": "cpu:0", "elapsed_s": 49.579484582995065}
+
+variant           s/micro excl.compile over G3 ms  top groups (ms/micro)
+pure               50.967       31.311    31149.1  train/step 31073.8, compile 19656.8, epoch_end/ckpt_last 159.1, data 68.4, epoch_start 1.3, epoch_end/drain 0.8
+pure_sync          35.104       24.324    24162.6  train/step 24067.8, compile 10779.5, epoch_end/ckpt_last 199.3, data 47.3, train/device 2.5, epoch_start 1.1
+smoke_nodet        41.705       28.305    28143.2  train/step 26023.4, compile 13400.0, epoch_end/val 1003.5, train/ckpt 741.8, train/log 360.7, epoch_end/ckpt_epoch 108.0
+pure_noprof        32.527            -          -  no profiler: fit_s 520.4
+loader0          loader: 14.0 ms/batch median, first batch 0.0 s
+loader4          loader: 2.9 ms/batch median, first batch 2.6 s
+loader8          loader: 0.8 ms/batch median, first batch 3.8 s
+profiler perturbation: fit_s pure 815.5 / pure_noprof 520.4 = 1.567
+
+##### lp_real.json  args: micro 320 num_val 1000 batch 32 accum 4 dummy False workers None
+
+=== loader0
+{"workers": 0, "dataset_s": 0.34843291601282544, "first_batch_s": 0.0400979170226492, "batches": 49, "median_ms": 20.25579198380001, "mean_ms": 20.23939279618445, "p90_ms": 20.777333003934473, "phases_ms_per_batch": {"data": 0.05724334944400708, "data/device_put": 0.4150713229675454, "data/loader": 19.56420069517644, "data/numpy": 0.08026779539008834, "device_put_wait": 0.11848036808018782}, "device": "cpu:0", "elapsed_s": 4.771395832998678}
+
+=== loader4
+{"workers": 4, "dataset_s": 0.3433105840231292, "first_batch_s": 9.777169374981895, "batches": 49, "median_ms": 1.4582919829990715, "mean_ms": 5.554221141061802, "p90_ms": 19.55854200059548, "phases_ms_per_batch": {"data": 0.13729764982506784, "data/device_put": 0.6768035729729324, "data/loader": 4.278801021056858, "data/numpy": 0.17363177457995407, "device_put_wait": 0.2820247734364654}, "device": "cpu:0", "elapsed_s": 16.46062454098137}
+
+=== loader8
+{"workers": 8, "dataset_s": 0.35370020900154486, "first_batch_s": 19.762239500007126, "batches": 49, "median_ms": 1.875999994808808, "mean_ms": 3.7415221236094984, "p90_ms": 11.139999987790361, "phases_ms_per_batch": {"data": 0.19761305706271406, "data/device_put": 0.7077874698942261, "data/loader": 2.289687041003181, "data/numpy": 0.1752797985801055, "device_put_wait": 0.36383759080698447}, "device": "cpu:0", "elapsed_s": 28.459034250001423}
+
+variant           s/micro excl.compile over G3 ms  top groups (ms/micro)
+loader0          loader: 20.3 ms/batch median, first batch 0.0 s
+loader4          loader: 1.5 ms/batch median, first batch 9.8 s
+loader8          loader: 1.9 ms/batch median, first batch 19.8 s
+
+##### re-derived with the final 18_loop_profile.py (perturbation validity check added after this run)
+{"pure_fit_s": 815.4796874159947, "pure_noprof_fit_s": 520.428956082993, "ratio": 1.5669375769436433, "cache_misses": [2, 0], "valid": false}

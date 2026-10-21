@@ -1,0 +1,4 @@
+targeted (loop, cli, data, checkpoint, train_step, resume_cross_lane, profile): 139 passed, 4240 warnings in 2227.26s (0:37:07)
+full tests/keras_native (.venv-jax): 842 passed, 16 skipped, 401 warnings in 2616.80s (0:43:36)
+test_data_real.py with CLIC_DATA_DIR=<main checkout>/data/clic: 4 passed in 6.70s
+test_export.py in hepattn-s7/.venv-jax (hls4ml 1.3.0): 18 passed, 5 skipped, 2 warnings in 81.33s (0:01:21)
