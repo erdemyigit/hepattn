@@ -1,0 +1,44 @@
+{
+ "checkpoint": {
+  "epoch": 0,
+  "global_step": 4,
+  "path": "tests/keras_native/s7_fixtures/hybrid/model.ckpt",
+  "pytorch-lightning_version": "2.5.2",
+  "sha256": "4d1fdb8c36bc350997fb4c51ace3ed1471c0def2ddf5fc4159638aafb9a8c5c3"
+ },
+ "config": [
+  "tests/keras_native/s7_fixtures/hybrid/config.yaml"
+ ],
+ "config_hash": "106dae9a3a18a2863f21667f1fb7d40e8fdfcc1e7d79f494f02bbfa94d3a62a8",
+ "hybrid_keras_variables": 1983,
+ "hybrid_state_keys": 6387,
+ "ignored": [
+  "decoder.decoder_layers.0.q_sa.fn.proj_k_dead",
+  "decoder.decoder_layers.0.q_sa.fn.proj_v_dead",
+  "decoder.decoder_layers.1.q_sa.fn.proj_k_dead",
+  "decoder.decoder_layers.1.q_sa.fn.proj_v_dead",
+  "decoder.tasks.0.loss_weights",
+  "tasks.0.loss_weights"
+ ],
+ "integer_casts": {
+  "int64->uint32": 176
+ },
+ "native_variables": 1986,
+ "native_written": 1986,
+ "saturated_ebops": [],
+ "source": "hybrid",
+ "target_config": [
+  "tests/keras_native/s7_fixtures/hybrid/config.yaml"
+ ],
+ "torch_tensors": [
+  "decoder.decoder_layers.0.q_sa.fn.proj_k_dead",
+  "decoder.decoder_layers.0.q_sa.fn.proj_v_dead",
+  "decoder.decoder_layers.1.q_sa.fn.proj_k_dead",
+  "decoder.decoder_layers.1.q_sa.fn.proj_v_dead",
+  "decoder.initial_queries",
+  "decoder.tasks.0.loss_weights",
+  "encoder.register_tokens",
+  "input_nets.0.posenc.B",
+  "tasks.0.loss_weights"
+ ]
+}

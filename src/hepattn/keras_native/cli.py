@@ -5,6 +5,10 @@
 
     python -m hepattn.experiments.clic.main_jax fit --config polaris_hgq.yaml --run-dir runs/r1 [--resume last]
     python -m hepattn.experiments.clic.main_jax test --config polaris_hgq.yaml --ckpt runs/r1/ckpts/epoch-....npz
+    python -m hepattn.experiments.clic.main_jax fit --config polaris_hgq.yaml --run-dir runs/r2 --init-from converted.npz
+
+``--init-from`` warm-starts a new run from the model variables of a checkpoint (``loop.Trainer.warm_start``), e.g. a
+Lightning checkpoint converted by ``hepattn.experiments.clic.convert_to_native``; ``--resume`` continues a run.
 
 Several ``--config`` files merge in order, as LightningCLI does (``config.load_config``). The options below override
 the YAML (they are the Lightning trainer / data arguments a Polaris job sets on the command line). Everything a run
@@ -66,7 +70,12 @@ def build_parser() -> argparse.ArgumentParser:
     fit = sub.add_parser("fit", help="train")
     _common(fit)
     fit.add_argument("--run-dir", required=True)
-    fit.add_argument("--resume", help="checkpoint .npz, or 'last' (the run directory's last checkpoint)")
+    start = fit.add_mutually_exclusive_group()
+    start.add_argument("--resume", help="checkpoint .npz, or 'last' (the run directory's last checkpoint)")
+    start.add_argument(
+        "--init-from",
+        help="warm start: the model variables of a checkpoint .npz (e.g. convert_to_native output); optimizer, step, schedule start fresh",
+    )
     fit.add_argument("--max-epochs", type=int)
     fit.add_argument("--max-steps", type=int, help="optimizer steps")
     fit.add_argument("--limit-train-batches", type=int, help="micro-batches per epoch")
@@ -221,6 +230,8 @@ def fit(args: argparse.Namespace, data_factory: DataFactory) -> dict:
                 raise SystemExit(f"--resume last: {pointer} does not exist (no step checkpoint callback?); pass an epoch checkpoint path")
             resume = run_dir / "ckpts" / json.loads(pointer.read_text())["file"]
         trainer.restore(resume)
+    if args.init_from:
+        trainer.warm_start(args.init_from)
     run_dir.mkdir(parents=True, exist_ok=True)
     _revision(run_dir / "config.yaml").write_text(yaml.safe_dump(effective_raw(rc, args), sort_keys=False))
     loop.write_json(
@@ -234,6 +245,7 @@ def fit(args: argparse.Namespace, data_factory: DataFactory) -> dict:
             "compile_cache": None if cache is None else str(cache),
             "total_steps": trainer.total_steps,
             "resume": None if resume is None else str(resume),
+            "init_from": args.init_from,
         },
     )
     t1 = time.perf_counter()

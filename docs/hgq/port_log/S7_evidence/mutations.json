@@ -1,0 +1,262 @@
+[
+ {
+  "mutant": "m00a",
+  "file": null,
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "tests/keras_native/test_export.py"
+  ],
+  "killed": false,
+  "summary": "34 passed, 5 skipped, 2 warnings in 117.98s (0:01:57)",
+  "seconds": 126
+ },
+ {
+  "mutant": "m00b",
+  "file": null,
+  "tests": [
+   "tests/keras/test_clic_clis.py",
+   "tests/keras/test_export.py"
+  ],
+  "killed": false,
+  "summary": "16 passed, 2 skipped, 20 warnings in 44.34s",
+  "seconds": 50
+ },
+ {
+  "mutant": "m01",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "org_float_forward"
+  ],
+  "killed": true,
+  "summary": "1 failed, 15 deselected in 18.42s",
+  "seconds": 23
+ },
+ {
+  "mutant": "m02",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "org_float_forward"
+  ],
+  "killed": true,
+  "summary": "1 failed, 15 deselected in 18.10s",
+  "seconds": 22
+ },
+ {
+  "mutant": "m03",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "org_float_forward"
+  ],
+  "killed": true,
+  "summary": "1 failed, 15 deselected in 15.92s",
+  "seconds": 19
+ },
+ {
+  "mutant": "m04",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "org_float_forward"
+  ],
+  "killed": true,
+  "summary": "1 failed, 15 deselected in 18.13s",
+  "seconds": 22
+ },
+ {
+  "mutant": "m05",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "unread_tensor"
+  ],
+  "killed": true,
+  "summary": "1 failed, 15 deselected in 17.27s",
+  "seconds": 21
+ },
+ {
+  "mutant": "m06",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "unwritten_variable"
+  ],
+  "killed": true,
+  "summary": "1 failed, 15 deselected in 16.37s",
+  "seconds": 20
+ },
+ {
+  "mutant": "m07",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "hybrid_forward or bit_for_bit"
+  ],
+  "killed": true,
+  "summary": "14 deselected, 1 error in 45.74s",
+  "seconds": 49
+ },
+ {
+  "mutant": "m08",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "hybrid_forward"
+  ],
+  "killed": true,
+  "summary": "1 failed, 15 deselected in 62.70s (0:01:02)",
+  "seconds": 70
+ },
+ {
+  "mutant": "m09",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "missing_quantizer"
+  ],
+  "killed": true,
+  "summary": "1 failed, 15 deselected in 73.69s (0:01:13)",
+  "seconds": 80
+ },
+ {
+  "mutant": "m10",
+  "file": "src/hepattn/keras_native/loop.py",
+  "tests": [
+   "tests/keras_native/test_convert_fit.py"
+  ],
+  "killed": true,
+  "summary": "1 failed, 1 warning in 423.57s (0:07:03)",
+  "seconds": 433
+ },
+ {
+  "mutant": "m11",
+  "file": "src/hepattn/keras_native/export.py",
+  "tests": [
+   "tests/keras_native/test_export.py",
+   "-k",
+   "kept_export_form_equals"
+  ],
+  "killed": true,
+  "summary": "1 failed, 19 deselected, 1 warning in 38.87s",
+  "seconds": 42
+ },
+ {
+  "mutant": "m12",
+  "file": "src/hepattn/keras_native/export.py",
+  "tests": [
+   "tests/keras_native/test_export.py",
+   "-k",
+   "swiglu_net_matches"
+  ],
+  "killed": true,
+  "summary": "1 failed, 20 deselected in 31.95s",
+  "seconds": 35
+ },
+ {
+  "mutant": "m13",
+  "file": "src/hepattn/keras_native/export.py",
+  "tests": [
+   "tests/keras_native/test_export.py",
+   "-k",
+   "every_org_leaf_kind"
+  ],
+  "killed": true,
+  "summary": "1 failed, 22 deselected in 36.24s",
+  "seconds": 40
+ },
+ {
+  "mutant": "m14",
+  "file": "src/hepattn/keras_native/export.py",
+  "tests": [
+   "tests/keras_native/test_export.py",
+   "-k",
+   "kept_export_form_equals"
+  ],
+  "killed": true,
+  "summary": "1 failed, 19 deselected in 36.02s",
+  "seconds": 40
+ },
+ {
+  "mutant": "m15",
+  "file": "src/hepattn/experiments/clic/port_to_keras.py",
+  "tests": [
+   "tests/keras/test_clic_clis.py",
+   "-k",
+   "keeps_the_linformer or complete_and_reproduces"
+  ],
+  "killed": true,
+  "summary": "1 failed, 4 deselected in 3.50s",
+  "seconds": 9
+ },
+ {
+  "mutant": "m16",
+  "file": "src/hepattn/experiments/clic/port_to_keras.py",
+  "tests": [
+   "tests/keras/test_clic_clis.py",
+   "-k",
+   "bit_for_bit"
+  ],
+  "killed": true,
+  "summary": "1 failed, 5 deselected in 7.36s",
+  "seconds": 13
+ },
+ {
+  "mutant": "m17",
+  "file": "src/hepattn/experiments/clic/evaluate_hgq.py",
+  "tests": [
+   "tests/keras/test_clic_clis.py",
+   "-k",
+   "float_baseline"
+  ],
+  "killed": true,
+  "summary": "1 failed, 5 deselected in 11.08s",
+  "seconds": 17
+ },
+ {
+  "mutant": "m18",
+  "file": "src/hepattn/experiments/clic/evaluate_hgq.py",
+  "tests": [
+   "tests/keras/test_clic_clis.py",
+   "-k",
+   "hls_report"
+  ],
+  "killed": true,
+  "summary": "1 failed, 8 deselected in 6.36s",
+  "seconds": 13
+ },
+ {
+  "mutant": "m19",
+  "file": "src/hepattn/keras/export.py",
+  "tests": [
+   "tests/keras/test_clic_clis.py",
+   "-k",
+   "swiglu_nets"
+  ],
+  "killed": true,
+  "summary": "1 failed, 7 deselected in 4.52s",
+  "seconds": 11
+ },
+ {
+  "mutant": "m03-equivalent (run 1: tail rows reversed, a column sum: equivalent mutant)",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "org_float_forward"
+  ],
+  "killed": false,
+  "summary": "1 passed, 15 deselected in 17.30s",
+  "seconds": 22
+ }
+]

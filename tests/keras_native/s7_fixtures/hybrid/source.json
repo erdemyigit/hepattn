@@ -1,0 +1,4 @@
+{
+ "run_dir": "CLIC_pflow_HGQ_polaris_20261020-T143925",
+ "checkpoint": "epoch=000-val_loss=32.93553.ckpt"
+}

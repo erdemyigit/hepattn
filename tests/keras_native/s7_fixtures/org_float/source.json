@@ -1,0 +1,4 @@
+{
+ "run_dir": "clic_linformer_phi_20261020-T143908",
+ "checkpoint": "epoch=000-val_loss=31.68047.ckpt"
+}

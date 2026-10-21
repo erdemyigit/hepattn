@@ -1,0 +1,48 @@
+{
+ "checkpoint": {
+  "epoch": 0,
+  "global_step": 4,
+  "path": "tests/keras_native/s7_fixtures/org_float/model.ckpt",
+  "pytorch-lightning_version": "2.5.2",
+  "sha256": "c7b5beacaa87747d499d3dd244c36f4ce4d0f6acef503062b2ea4beaa2172e54"
+ },
+ "config": [
+  "tests/keras_native/s7_fixtures/org_float/config.yaml"
+ ],
+ "config_hash": "86eebd884833825b4092629316c97e3bb3570feffbb35de1ff09c777ca19691b",
+ "dropped_rows": {
+  "decoder_l0_q_sa_project_unmasked_E": 48,
+  "decoder_l0_q_sa_project_unmasked_F": 48,
+  "decoder_l1_q_sa_project_unmasked_E": 48,
+  "decoder_l1_q_sa_project_unmasked_F": 48
+ },
+ "ignored": [
+  "decoder.tasks.0.loss_weights",
+  "tasks.0.loss_weights"
+ ],
+ "max_abs_diff": {
+  "final.classification.pflow_class_prob": 8.940696716308594e-08,
+  "final.classification.pflow_logit": 4.76837158203125e-07,
+  "final.incidence.pflow_incidence": 6.332993507385254e-08,
+  "final.mask.pflow_node_logit": 2.7418136596679688e-06,
+  "final.regression.pflow_proxy_regr": 0.000732421875,
+  "final.regression.pflow_regr": 0.375,
+  "layer_0.attn_mask": 0.0,
+  "layer_0.classification.pflow_class_prob": 2.9802322387695312e-08,
+  "layer_0.classification.pflow_logit": 1.1920928955078125e-07,
+  "layer_0.mask.pflow_node_logit": 1.2367963790893555e-06,
+  "layer_1.attn_mask": 0.0,
+  "layer_1.classification.pflow_class_prob": 5.960464477539063e-08,
+  "layer_1.classification.pflow_logit": 2.980232238769531e-07,
+  "layer_1.mask.pflow_node_logit": 1.2218952178955078e-06
+ },
+ "native_kept_initial": 0,
+ "native_variables": 161,
+ "native_written": 161,
+ "source": "torch",
+ "target_config": [
+  "tests/keras_native/s7_fixtures/org_float/config.yaml"
+ ],
+ "torch_tensors": 131,
+ "torch_tensors_read": 129
+}

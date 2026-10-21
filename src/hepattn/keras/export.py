@@ -14,8 +14,11 @@ from hepattn.keras import keras
 from hepattn.keras.dense import KerasDense
 
 
-def build_functional_dense(kdense: KerasDense, input_shape: tuple[int, ...], name: str = "head") -> keras.Model:
-    """Assemble a keras functional model from a KerasDense's live sublayers.
+def build_functional_dense(kdense: KerasDense, input_shape: tuple[int, ...], name: str = "head", *, activations: str = "inline") -> keras.Model:
+    """Assemble a keras functional model from a KerasDense's live sublayers (SwiGLU nets included).
+
+    The assembly is ``hepattn.keras_native.export.build_functional_dense`` (the hybrid KerasDense has the native
+    Dense's layer layout); see there for ``activations="lut"``, the hls4ml-convertible form of inline silu / sigmoid.
 
     Args:
         kdense: The (float or HGQ2) KerasDense whose layers to assemble.
@@ -23,20 +26,14 @@ def build_functional_dense(kdense: KerasDense, input_shape: tuple[int, ...], nam
             must match the rank/shape the layers were built with (HGQ2 quantizers
             materialize per-element bitwidths for a specific static shape).
         name: Model name.
+        activations: ``"inline"`` (the trained layers) or ``"lut"`` (export form of inline silu / sigmoid).
 
     Returns:
         A keras.Model sharing the KerasDense's weights.
-
-    Raises:
-        NotImplementedError: For gated (SwiGLU) nets: their x1/x2/product branch is not assembled here yet.
     """
-    if kdense.gate:
-        raise NotImplementedError("SwiGLU-gated KerasDense cannot be exported as a functional model yet")
-    inputs = keras.Input(shape=input_shape, name=f"{name}_input")
-    x = inputs
-    for layer in [*kdense.hidden, kdense.final]:
-        x = layer(x)
-    return keras.Model(inputs, x, name=name)
+    from hepattn.keras_native.export import build_functional_dense as assemble  # noqa: PLC0415
+
+    return assemble(kdense, input_shape, name, activations=activations)
 
 
 def save_keras_model(model: keras.Model, path: str | Path) -> None:

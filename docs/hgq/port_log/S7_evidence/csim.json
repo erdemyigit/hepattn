@@ -1,0 +1,237 @@
+{
+ "hls4ml": "1.3.0",
+ "keras": "3.15.0",
+ "rows": [
+  {
+   "stem": "m00",
+   "key": "toy_mlp",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 14400,
+   "y_std": 0.8767868876457214,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 3.0,
+   "control_n_diff": 6
+  },
+  {
+   "stem": "m01",
+   "key": "toy_attention_core",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 2048,
+   "y_std": 0.6266149878501892,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 4.7
+  },
+  {
+   "stem": "m02",
+   "key": "QDense:linear:",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 16384,
+   "y_std": 0.577869176864624,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 2.6
+  },
+  {
+   "stem": "m03",
+   "key": "QDense:sigmoid: (export form)",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 2304,
+   "y_std": 0.24166637659072876,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 3.3
+  },
+  {
+   "stem": "m04",
+   "key": "QDense:silu: (export form)",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 55296,
+   "y_std": 0.30745193362236023,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 3.2
+  },
+  {
+   "stem": "m05",
+   "key": "QEinsum::bhkd,bk->bhkd",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 2048,
+   "y_std": 1.008729100227356,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 2.0
+  },
+  {
+   "stem": "m06",
+   "key": "QEinsum::bhqd,bhkd->bhqk",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 18432,
+   "y_std": 2.778745651245117,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 2.0
+  },
+  {
+   "stem": "m07",
+   "key": "QEinsum::bhqd,bhnd->bhqn",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 32768,
+   "y_std": 2.8614401817321777,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 2.0
+  },
+  {
+   "stem": "m08",
+   "key": "QEinsum::bhqk,bhkd->bhqd",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 18432,
+   "y_std": 2.828158140182495,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 2.0
+  },
+  {
+   "stem": "m09",
+   "key": "QEinsum::bhqk,bqk->bhqk",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 16384,
+   "y_std": 1.0003681182861328,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 3.3
+  },
+  {
+   "stem": "m10",
+   "key": "QEinsum::bhqn,bhnd->bhqd",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 16384,
+   "y_std": 4.01926326751709,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 2.1
+  },
+  {
+   "stem": "m11",
+   "key": "QEinsum::bn,znk->bk (export form)",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 128,
+   "y_std": 0.08430833369493484,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 2.4
+  },
+  {
+   "stem": "m12",
+   "key": "QEinsum::bnc,bmc->bnm",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 16384,
+   "y_std": 4.022329330444336,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 2.0
+  },
+  {
+   "stem": "m13",
+   "key": "QEinsum::bnc,bnc->bnc",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 55296,
+   "y_std": 0.9966846704483032,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 2.4
+  },
+  {
+   "stem": "m14",
+   "key": "QEinsum::bqe,ble->bql",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 16384,
+   "y_std": 4.004730224609375,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 2.0
+  },
+  {
+   "stem": "m15",
+   "key": "QEinsum::bqn,znk->bqk (export form)",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 8192,
+   "y_std": 0.048603810369968414,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 2.4
+  },
+  {
+   "stem": "m16",
+   "key": "QEinsumDense:linear:bhnd,nk->bhkd",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 2048,
+   "y_std": 1.7551732063293457,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 2.4
+  },
+  {
+   "stem": "m17",
+   "key": "QEinsumDense:linear:bhqk,nk->bhqn",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 32768,
+   "y_std": 0.5972261428833008,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 4.7
+  },
+  {
+   "stem": "m18",
+   "key": "QEinsumDense:linear:bhqn,nk->bhqk",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 16384,
+   "y_std": 0.8409451246261597,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 2.4
+  },
+  {
+   "stem": "m19",
+   "key": "QSoftmax::",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 18432,
+   "y_std": 0.11598733067512512,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 3.0
+  },
+  {
+   "stem": "m20",
+   "key": "QUnaryFunctionLUT:rsqrt_floor:",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 128,
+   "y_std": 1.4187425374984741,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 4.0
+  },
+  {
+   "stem": "m21",
+   "key": "classification_head (lut form)",
+   "max_abs": 0.0,
+   "n_diff": 0,
+   "size": 1536,
+   "y_std": 0.23150965571403503,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 3.3
+  },
+  {
+   "stem": "m22",
+   "key": "CONTROL QDense:sigmoid: as trained",
+   "max_abs": 0.0009763836860656738,
+   "n_diff": 2304,
+   "size": 2304,
+   "y_std": 0.2463914006948471,
+   "keras_vs_export_max_abs": 0.0,
+   "seconds": 2.9
+  }
+ ]
+}

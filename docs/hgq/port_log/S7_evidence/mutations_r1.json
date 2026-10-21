@@ -1,0 +1,266 @@
+[
+ {
+  "mutant": "m00a",
+  "file": null,
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "tests/keras_native/test_export.py"
+  ],
+  "killed": false,
+  "summary": "48 passed, 5 skipped, 5 warnings in 176.86s (0:02:56)",
+  "seconds": 183,
+  "note": "rerun after the test fix (first run: 1 failed, 25 passed in 116.04s (0:01:56))"
+ },
+ {
+  "mutant": "m00b",
+  "file": null,
+  "tests": [
+   "tests/keras/test_clic_clis.py",
+   "tests/keras/test_export.py"
+  ],
+  "killed": false,
+  "summary": "19 passed, 2 skipped, 20 warnings in 71.16s (0:01:11)",
+  "seconds": 79
+ },
+ {
+  "mutant": "m00c",
+  "file": null,
+  "tests": [
+   "tests/keras_native/test_convert_fit.py",
+   "-k",
+   "beta or fresh_trainer or exclusive"
+  ],
+  "killed": false,
+  "summary": "3 passed, 5 deselected in 73.59s (0:01:13)",
+  "seconds": 78
+ },
+ {
+  "mutant": "m20",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "flash_attention"
+  ],
+  "killed": true,
+  "summary": "1 failed, 26 deselected, 1 warning in 23.15s",
+  "seconds": 28,
+  "note": "rerun after the test fix (first run: 1 passed, 26 deselected in 24.46s)"
+ },
+ {
+  "mutant": "m21",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "flash_attention"
+  ],
+  "killed": true,
+  "summary": "1 failed, 26 deselected in 19.09s",
+  "seconds": 23
+ },
+ {
+  "mutant": "m22",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "norm_without_bias"
+  ],
+  "killed": true,
+  "summary": "1 failed, 26 deselected in 5.96s",
+  "seconds": 9
+ },
+ {
+  "mutant": "m23",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "native_twin"
+  ],
+  "killed": true,
+  "summary": "1 failed, 26 deselected in 67.14s (0:01:07)",
+  "seconds": 72
+ },
+ {
+  "mutant": "m24",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "class_weights"
+  ],
+  "killed": true,
+  "summary": "1 failed, 25 deselected in 69.59s (0:01:09)",
+  "seconds": 75
+ },
+ {
+  "mutant": "m25",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "dtype_mismatch"
+  ],
+  "killed": true,
+  "summary": "1 failed, 26 deselected in 65.89s (0:01:05)",
+  "seconds": 71
+ },
+ {
+  "mutant": "m26",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "two_values"
+  ],
+  "killed": true,
+  "summary": "1 failed, 26 deselected in 72.31s (0:01:12)",
+  "seconds": 78
+ },
+ {
+  "mutant": "m27",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "source_kind"
+  ],
+  "killed": true,
+  "summary": "1 failed, 26 deselected in 5.69s",
+  "seconds": 9
+ },
+ {
+  "mutant": "m28",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "einsum_inputs_pair"
+  ],
+  "killed": true,
+  "summary": "1 failed, 26 deselected in 47.23s",
+  "seconds": 52
+ },
+ {
+  "mutant": "m28f",
+  "file": "src/hepattn/experiments/clic/convert_to_native.py",
+  "tests": [
+   "tests/keras_native/test_convert.py",
+   "-k",
+   "hybrid_forward_equals"
+  ],
+  "killed": false,
+  "summary": "1 passed, 26 deselected in 66.30s (0:01:06)",
+  "seconds": 71
+ },
+ {
+  "mutant": "m29",
+  "file": "src/hepattn/keras_native/loop.py",
+  "tests": [
+   "tests/keras_native/test_convert_fit.py",
+   "-k",
+   "checkpoint_beta"
+  ],
+  "killed": true,
+  "summary": "1 failed, 7 deselected in 76.64s (0:01:16)",
+  "seconds": 84
+ },
+ {
+  "mutant": "m30",
+  "file": "src/hepattn/keras_native/loop.py",
+  "tests": [
+   "tests/keras_native/test_convert_fit.py",
+   "-k",
+   "fresh_trainer"
+  ],
+  "killed": true,
+  "summary": "1 failed, 7 deselected in 70.74s (0:01:10)",
+  "seconds": 76
+ },
+ {
+  "mutant": "m31",
+  "file": "src/hepattn/keras_native/cli.py",
+  "tests": [
+   "tests/keras_native/test_convert_fit.py",
+   "-k",
+   "exclusive"
+  ],
+  "killed": true,
+  "summary": "1 failed, 7 deselected in 46.08s",
+  "seconds": 50
+ },
+ {
+  "mutant": "m32",
+  "file": "src/hepattn/keras_native/export.py",
+  "tests": [
+   "tests/keras_native/test_export.py",
+   "-k",
+   "of_another_rank"
+  ],
+  "killed": true,
+  "summary": "1 failed, 24 deselected in 8.20s",
+  "seconds": 11
+ },
+ {
+  "mutant": "m33",
+  "file": "src/hepattn/keras_native/export.py",
+  "tests": [
+   "tests/keras_native/test_export.py",
+   "-k",
+   "controls_kept"
+  ],
+  "killed": true,
+  "summary": "1 failed, 25 deselected in 47.53s",
+  "seconds": 52
+ },
+ {
+  "mutant": "m34",
+  "file": "tests/keras_native/test_export.py",
+  "tests": [
+   "tests/keras_native/test_export.py",
+   "-k",
+   "every_org_leaf_kind"
+  ],
+  "killed": true,
+  "summary": "1 failed, 25 deselected in 59.76s",
+  "seconds": 65
+ },
+ {
+  "mutant": "m35",
+  "file": "src/hepattn/keras_native/masked_linformer.py",
+  "tests": [
+   "tests/keras_native/test_export.py",
+   "-k",
+   "rsqrt_floor"
+  ],
+  "killed": true,
+  "summary": "1 failed, 25 deselected in 44.70s",
+  "seconds": 49
+ },
+ {
+  "mutant": "m36",
+  "file": "src/hepattn/experiments/clic/eval_keras.py",
+  "tests": [
+   "tests/keras/test_clic_clis.py",
+   "-k",
+   "eval_keras_main"
+  ],
+  "killed": true,
+  "summary": "1 failed, 11 deselected in 9.47s",
+  "seconds": 17
+ },
+ {
+  "mutant": "m37",
+  "file": "tests/keras_native/s7_fixtures/make_s7_fixtures.py",
+  "tests": [
+   "tests/keras/test_clic_clis.py",
+   "-k",
+   "einsum_input_order"
+  ],
+  "killed": true,
+  "summary": "1 failed, 11 deselected in 6.73s",
+  "seconds": 14
+ }
+]
