@@ -13,9 +13,15 @@ Inputs are the S7 fixtures (``tests/keras_native/s7_fixtures``: real Lightning r
   baseline (built without the quant spec: ``build_keras_maskformer_from_config(cfg, quant=None)`` keeps the spec of a
   ``KerasMaskFormer`` config, so the old baseline was a second quantized model, refused by the strict load); the
   quantized model it evaluates reproduces the hybrid's stored outputs bit for bit. Control: loading without
-  registering the keras weights (what it did before) is refused.
+  registering the keras weights (what it did before) is refused;
+- ``eval_keras.main`` (the same defect as ``evaluate_hgq``: strict load into an unregistered model) runs on the hybrid
+  Lightning checkpoint, and the model it evaluates reproduces the stored outputs bit for bit. Control: its old load
+  (forward, then ``load_state_dict`` without ``register_keras_parameters``) is refused;
+- ``s7_fixtures/hybrid/einsum_inputs.json`` (the hybrid's ``QEinsum`` input order, which the native converter test
+  checks its quantizer pairing against) is what the hybrid model built from the fixture holds.
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +34,7 @@ pytest.importorskip("hepattn.keras", reason="hgq dependency group not installed"
 from test_maskformer_parity import flatten_outputs  # ty: ignore [unresolved-import]
 from test_org_model_parity import TOLS, scaled_err  # ty: ignore [unresolved-import]
 
-from hepattn.experiments.clic import evaluate_hgq, port_to_keras
+from hepattn.experiments.clic import eval_keras, evaluate_hgq, port_to_keras
 from hepattn.keras.maskformer import KerasMaskFormer
 from hepattn.models.attention import Attention
 from hepattn.models.encoder import change_attn_backends
@@ -176,3 +182,53 @@ def test_evaluate_hgq_hls_report_on_the_org_head(tmp_path):
     text = out.read_text()
     assert "## hls4ml conversion" in text and '"n_layers"' in text and "warning" not in text
     assert (tmp_path / "hls_clf_head/firmware/myproject.cpp").is_file()
+
+
+def test_eval_keras_main_on_the_hybrid_checkpoint(tmp_path, monkeypatch):
+    """``eval_keras`` loads a ``MPflowHGQ`` Lightning checkpoint (strict) and evaluates the trained model."""
+    loaded = []
+    original = eval_keras.load_keras_state
+
+    def capture(model, state_path, inputs):
+        loaded.append(original(model, state_path, inputs))
+        return loaded[-1]
+
+    monkeypatch.setattr(eval_keras, "load_keras_state", capture)
+    out = tmp_path / "metrics.json"
+    eval_keras.main(["--config", str(HYB / "config.yaml"), "--state", str(HYB / "model.ckpt"), "--num-events", "4", "--out", str(out)])
+    summary = json.loads(out.read_text())
+    assert summary["num_events"] == 4 and summary["mean_losses"]
+    assert all(np.isfinite(v) for v in summary["mean_losses"].values()), summary["mean_losses"]
+    inputs, ref = stored_hybrid()
+    with torch.no_grad():
+        got = flatten_outputs(loaded[0](inputs))
+    for key, value in ref.items():
+        assert np.array_equal(got[key].numpy(), value), key
+
+
+def test_control_eval_keras_old_load_is_refused(monkeypatch):
+    """What ``eval_keras`` did before: a forward to materialize, then a strict load without registering."""
+    from torch import nn  # noqa: PLC0415
+
+    def old_load(model, state_path, inputs):
+        with torch.no_grad():
+            model(inputs)
+        nn.Module.load_state_dict(model, port_to_keras.read_model_state(state_path))
+        return model
+
+    monkeypatch.setattr(eval_keras, "load_keras_state", old_load)
+    with pytest.raises(RuntimeError, match="Unexpected key"):
+        eval_keras.main(["--config", str(HYB / "config.yaml"), "--state", str(HYB / "model.ckpt"), "--num-events", "4"])
+
+
+def test_einsum_input_order_fixture_is_current():
+    """The hybrid's QEinsum input order (read from the layer objects) is the committed ``einsum_inputs.json``."""
+    import importlib.util  # noqa: PLC0415
+
+    spec = importlib.util.spec_from_file_location("make_s7_fixtures", FIX / "make_s7_fixtures.py")
+    make = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(make)
+    model, _ = loaded_hybrid()
+    order = make.einsum_inputs(model)
+    assert order == json.loads((HYB / "einsum_inputs.json").read_text())
+    assert len(order) == 52 and all(len(paths) == 2 for paths in order.values())

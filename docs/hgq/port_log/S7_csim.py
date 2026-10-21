@@ -11,11 +11,18 @@ Two steps, two machines:
     #    (masked_linformer.rsqrt_floor) the .keras files name
     KERAS_BACKEND=jax PYTHONPATH=src python docs/hgq/port_log/S7_csim.py csim <dir>
 
+Inputs are those of the model's domain, as in the pytest csim test (``test_export.domain_inputs``): 0/1 masks for the
+kept einsums; for the renorm rsqrt table the kept energy fraction in [0, 1), with the floor point 0 in the first column
+of every row. No training call before the export: the models hold the converted checkpoint's state.
+
 ``csim`` loads each model, runs keras and hls4ml's C simulation (Vitis, io_parallel, ``compile()``) on the stored
 inputs and prints max |hls - keras| and the number of differing elements; it exits 1 unless every row is exactly equal,
-except the ``CONTROL`` rows (the inline sigmoid as trained), which must differ.
-A control row perturbs the C-simulation input by one least significant bit of the input quantizer for the first model
-and requires a difference (so an all-zero comparison is not vacuous). Results go to ``<dir>/csim.json``.
+except the ``CONTROL`` rows (the inline sigmoid as trained), which must differ, and the rsqrt floor points (input 0),
+where keras must give 2**10 and hls4ml the lane maximum 2**10 - 2**-14 (one LSB apart; ``test_export.assert_rsqrt_csim``
+explains why, ``test_rsqrt_floor_does_not_reach_the_core_outputs`` that it does not reach the core outputs); the rsqrt
+row's ``n_diff`` counts the other points. A control perturbs the first model's C-simulation input by 3 least
+significant bits of its input quantizer (3 x 2**-8) on one element and requires a difference (so an all-zero
+comparison is not vacuous). Results go to ``<dir>/csim.json``.
 """
 
 import json
@@ -47,12 +54,7 @@ def export(out: Path) -> None:
     models["CONTROL QDense:sigmoid: as trained"] = leaf_model(org.encoder.layers[1].attn.fn.value_residual_mix)
     manifest = []
     for i, (key, model) in enumerate(models.items()):
-        model(T.random_inputs(model, rng), training=True)  # as the tests: a training call before conversion
-        inputs = T.random_inputs(model, rng, batch=16)
-        if "znk" in key:  # 0/1 masks
-            inputs = (np.abs(inputs) > 0.5).astype("float32")
-        if "rsqrt" in key:  # the kept energy fraction, in [0, 1]
-            inputs = (np.abs(inputs) % 1.0).astype("float32")
+        inputs = T.domain_inputs(key, model, rng)
         inputs = inputs if isinstance(inputs, list) else [inputs]
         stem = f"m{i:02d}"
         model.save(str(out / f"{stem}.keras"))
@@ -86,6 +88,11 @@ def csim(root: Path) -> int:
             y_keras.shape
         )
         diff = np.abs(y_hls.astype(np.float64) - y_keras)
+        floor_ok = True
+        if "rsqrt" in entry["key"]:  # the floor points (input 0), characterized in test_export.assert_rsqrt_csim
+            floor = x == 0
+            floor_ok = bool(floor.any() and np.all(y_keras[floor] == 2.0**10) and np.all(y_hls[floor] == 2.0**10 - 2.0**-14))
+            diff = np.where(floor, 0.0, diff)
         row = {
             "stem": stem,
             "key": entry["key"],
@@ -96,14 +103,16 @@ def csim(root: Path) -> int:
             "keras_vs_export_max_abs": float(np.abs(y_keras - y_export).max()),
             "seconds": round(time.perf_counter() - t0, 1),
         }
-        if stem == manifest[0]["stem"]:  # control: one LSB (2**-8 for the toy datalane f0=8) on one input element
+        if "rsqrt" in entry["key"]:
+            row |= {"floor_points": int((x == 0).sum()), "floor_as_characterized": floor_ok}
+        if stem == manifest[0]["stem"]:  # control: 3 LSB (LSB 2**-8 for the toy datalane f0=8) on one input element
             xc = np.array(x, copy=True)
             xc.flat[0] += 2.0**-8 * (1 if xc.flat[0] < 0 else -1) * 3
             yc = np.asarray(hls.predict(np.ascontiguousarray(xc))).reshape(y_keras.shape)
             row["control_n_diff"] = int((yc != y_hls).sum())
             bad += row["control_n_diff"] == 0
         expect_equal = not entry["key"].startswith("CONTROL")  # a CONTROL model must differ (hls4ml's own table)
-        bad += (row["n_diff"] > 0) == expect_equal or not np.isfinite(y_keras).all()
+        bad += (row["n_diff"] > 0) == expect_equal or not np.isfinite(y_keras).all() or not floor_ok
         rows.append(row)
         print(json.dumps(row), flush=True)
     (root / "csim.json").write_text(json.dumps({"hls4ml": hls4ml.__version__, "keras": keras.__version__, "rows": rows}, indent=1))

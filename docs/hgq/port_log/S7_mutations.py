@@ -24,6 +24,7 @@ HYBRID = REPO.parent / "hepattn/.venv/bin/python"
 CONV = "src/hepattn/experiments/clic/convert_to_native.py"
 EXPORT = "src/hepattn/keras_native/export.py"
 T = "tests/keras_native/"
+EXPECTED_SURVIVORS = {"m28f"}  # the forward gate cannot see the same-shape quantizer swap (review round 1)
 
 MUTATIONS = [
     # baselines: the unmutated copy passes every target (killed must be False)
@@ -179,6 +180,147 @@ MUTATIONS = [
         "torch",
         ["tests/keras/test_clic_clis.py", "-k", "swiglu_nets"],
     ),
+    # review round 1 (S7.md "Review round 1"): each mutant reverts one fix or disables one refusal
+    ("m00c", None, "", "", "jax", [T + "test_convert_fit.py", "-k", "beta or fresh_trainer or exclusive"]),
+    (
+        "m20",
+        CONV,
+        "    if _native_attn_type(tattn.attn_type) != nattn.attn_type:",
+        "    if tattn.attn_type != nattn.attn_type:",
+        "jax",
+        [T + "test_convert.py", "-k", "flash_attention"],
+    ),
+    (
+        "m21",
+        CONV,
+        "        portable_attention(tmodel)  # for the verify forward on the CPU\n",
+        "",
+        "jax",
+        [T + "test_convert.py", "-k", "flash_attention"],
+    ),
+    (
+        "m22",
+        CONV,
+        "        if tnorm.bias is not None:  # LayerNorm(bias=False): native center=False, checked above\n            _assign(nnorm.beta, _np(tnorm.bias))",
+        "        _assign(nnorm.beta, _np(tnorm.bias))",
+        "jax",
+        [T + "test_convert.py", "-k", "norm_without_bias"],
+    ),
+    ("m23", CONV, "    if missing:\n", "    if False:\n", "jax", [T + "test_convert.py", "-k", "native_twin"]),
+    (
+        "m24",
+        CONV,
+        "    expected = np.asarray(_loss_weight_owner(name, nmodel).loss_weights, dtype=np.float32)\n",
+        "    return\n",
+        "jax",
+        [T + "test_convert.py", "-k", "class_weights"],
+    ),
+    (
+        "m25",
+        CONV,
+        "            if not (np.issubdtype(array.dtype, np.integer) and np.issubdtype(dtype, np.integer)):",
+        "            if False:",
+        "jax",
+        [T + "test_convert.py", "-k", "dtype_mismatch"],
+    ),
+    (
+        "m26",
+        CONV,
+        "                if not torch.equal(keras_vars[path], value):",
+        "                if False:",
+        "jax",
+        [T + "test_convert.py", "-k", "two_values"],
+    ),
+    (
+        "m27",
+        CONV,
+        '    raise ConversionError(f"model.model.class_path',
+        '    return TORCH_SOURCE\n    raise ConversionError(f"model.model.class_path',
+        "jax",
+        [T + "test_convert.py", "-k", "source_kind"],
+    ),
+    (
+        "m28",
+        CONV,
+        "        for segs, var in zip(sorted(members, key=_suffix_order), targets, strict=True):",
+        "        for segs, var in zip(sorted(members, key=_suffix_order, reverse=len({tuple(keras_vars['/'.join(m)].shape) for m in members}) == 1), targets, strict=True):",
+        "jax",
+        [T + "test_convert.py", "-k", "einsum_inputs_pair"],
+    ),
+    (  # the forward gate alone does not see the same-shape swap (expected to survive: why m28's test exists)
+        "m28f",
+        CONV,
+        "        for segs, var in zip(sorted(members, key=_suffix_order), targets, strict=True):",
+        "        for segs, var in zip(sorted(members, key=_suffix_order, reverse=len({tuple(keras_vars['/'.join(m)].shape) for m in members}) == 1), targets, strict=True):",
+        "jax",
+        [T + "test_convert.py", "-k", "hybrid_forward_equals"],
+    ),
+    (
+        "m29",
+        "src/hepattn/keras_native/loop.py",
+        "            self.beta = self.steps.read_beta(self.state)\n        self.warm_started_from",
+        "            pass\n        self.warm_started_from",
+        "jax",
+        [T + "test_convert_fit.py", "-k", "checkpoint_beta"],
+    ),
+    (
+        "m30",
+        "src/hepattn/keras_native/loop.py",
+        "        if self.resumed_from is not None or self.global_step or self.micro_step:",
+        "        if self.resumed_from is not None:",
+        "jax",
+        [T + "test_convert_fit.py", "-k", "fresh_trainer"],
+    ),
+    (
+        "m31",
+        "src/hepattn/keras_native/cli.py",
+        "    start = fit.add_mutually_exclusive_group()",
+        "    start = fit",
+        "jax",
+        [T + "test_convert_fit.py", "-k", "exclusive"],
+    ),
+    (
+        "m32",
+        EXPORT,
+        "            x = keras.layers.Reshape((*inner, size))(ndense.products[i]([f1, f2]))",
+        "            x = keras.layers.Reshape((*inner, size))(ndense.products[i]([f1, f1]))",
+        "jax",
+        [T + "test_export.py", "-k", "of_another_rank"],
+    ),
+    ("m33", EXPORT, "if shape[0] == 1 else", "if False else", "jax", [T + "test_export.py", "-k", "controls_kept"]),
+    (
+        "m34",
+        T + "test_export.py",
+        '        hls = convert_to_hls(model, tmp_path / f"k{i:02d}", compile_csim=False)',
+        '        model(random_inputs(model, np.random.default_rng(4)), training=True)\n        hls = convert_to_hls(model, tmp_path / f"k{i:02d}", compile_csim=False)',
+        "jax",
+        [T + "test_export.py", "-k", "every_org_leaf_kind"],
+    ),
+    (
+        "m35",
+        "src/hepattn/keras_native/masked_linformer.py",
+        "        p = ops.where(m, self.F(a, training=training), 0.0)",
+        "        p = self.F(a, training=training)",
+        "jax",
+        [T + "test_export.py", "-k", "rsqrt_floor"],
+    ),
+    (
+        "m36",
+        "src/hepattn/experiments/clic/eval_keras.py",
+        "    model = load_keras_state(build_keras_maskformer_from_config(model_cfg, quant=quant).eval(), opts.state, first_inputs)",
+        "    model = build_keras_maskformer_from_config(model_cfg, quant=quant).eval()\n    model.materialize(first_inputs)\n"
+        "    model.load_state_dict(__import__('hepattn.experiments.clic.port_to_keras', fromlist=['x']).read_model_state(opts.state))",
+        "torch",
+        ["tests/keras/test_clic_clis.py", "-k", "eval_keras_main"],
+    ),
+    (
+        "m37",
+        "tests/keras_native/s7_fixtures/make_s7_fixtures.py",
+        "for q in layer.iq.quantizers]",
+        "for q in layer.iq.quantizers[::-1]]",
+        "torch",
+        ["tests/keras/test_clic_clis.py", "-k", "einsum_input_order"],
+    ),
 ]
 
 
@@ -244,7 +386,8 @@ def main() -> None:
         print(json.dumps(results[-1]), flush=True)
     if out_path:
         out_path.write_text(json.dumps(results, indent=1))
-    survivors = [r["mutant"] for r in results if r["killed"] == (r["file"] is None)]  # a baseline must pass
+    # a baseline must pass; an EXPECTED_SURVIVORS mutant documents what a weaker test misses
+    survivors = [r["mutant"] for r in results if r["killed"] == (r["file"] is None or r["mutant"] in EXPECTED_SURVIVORS)]
     print(f"{len(results)} mutants, survivors: {survivors}")
     sys.exit(1 if survivors else 0)
 

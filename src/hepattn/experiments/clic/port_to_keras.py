@@ -29,10 +29,9 @@ import yaml
 from jsonargparse import ArgumentParser
 from torch import nn
 
+from hepattn.experiments.clic.convert_to_native import portable_attention
 from hepattn.keras.maskformer import KerasMaskFormer
 from hepattn.keras.porting import port_maskformer
-from hepattn.models.attention import Attention
-from hepattn.models.encoder import Encoder
 from hepattn.models.maskformer import MaskFormer
 
 
@@ -84,22 +83,6 @@ def build_keras_maskformer_from_config(model_cfg: dict, quant: dict | None = Non
         input_sort_field=init_args.get("input_sort_field"),
         quant=quant,
     )
-
-
-def portable_attention(model: nn.Module) -> int:
-    """Switch every non-linformer attention to the "torch" backend; returns the number of modules switched.
-
-    ``change_attn_backends(model, "torch")`` raises for a linformer attention (org: "linformer owns trained projection
-    parameters"), and the hybrid ports a linformer attention to its masked-Linformer core, not to SDPA.
-    """
-    switched = 0
-    for module in model.modules():
-        if (isinstance(module, Encoder) and module.attn_type not in {"linformer", "torch"}) or (
-            isinstance(module, Attention) and module.attn_type not in {"linformer", "torch"}
-        ):
-            module.set_backend("torch")
-            switched += 1
-    return switched
 
 
 def read_model_state(path: str | Path) -> dict:

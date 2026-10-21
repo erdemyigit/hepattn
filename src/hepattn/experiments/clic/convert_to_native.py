@@ -59,6 +59,7 @@ HYBRID_SOURCE = "hybrid"
 KERAS_PARAM_MARK = "._torch_params."
 HYBRID_IGNORED = re.compile(r"(^|\.)(loss_weights|proj_k_dead|proj_v_dead)$")
 _AUTO_SUFFIX = re.compile(r"_(\d+)$")
+FLASH_TYPES = {"flash", "flash-varlen"}  # = keras_native.encoder.COERCE_TO_TORCH (asserted in test_convert.py)
 
 
 class ConversionError(RuntimeError):
@@ -162,7 +163,8 @@ def port_norm(tnorm: nn.Module, nnorm) -> None:
         raise ConversionError(f"{nnorm.name}: affine flags differ from torch")
     if affine:
         _assign(nnorm.gamma, _np(tnorm.weight))
-        _assign(nnorm.beta, _np(tnorm.bias))
+        if tnorm.bias is not None:  # LayerNorm(bias=False): native center=False, checked above
+            _assign(nnorm.beta, _np(tnorm.bias))
     elif nnorm.variables:
         raise ConversionError(f"{nnorm.name}: a non-affine norm must have no variables")
 
@@ -183,18 +185,43 @@ def _port_projection(seq_proj, proj: torch.Tensor) -> None:
         _COVERAGE.dropped_rows[seq_proj.name] = full.shape[0] - seq_proj.n
 
 
+def _native_attn_type(attn_type: str) -> str:
+    """The native attention type of a torch one (``keras_native.encoder.COERCE_TO_TORCH``, without importing keras)."""
+    return "torch" if attn_type in FLASH_TYPES else attn_type
+
+
+def portable_attention(model: nn.Module) -> int:
+    """Switch every non-linformer torch attention to the "torch" (SDPA) backend; returns the number of modules switched.
+
+    ``flash`` / ``flash-varlen`` (org ``base.yaml``'s encoder) do not run on the CPU; the backend holds no parameters.
+    ``change_attn_backends(model, "torch")`` raises for a linformer attention (org: "linformer owns trained projection
+    parameters"), so those keep their backend.
+    """
+    from hepattn.models.attention import Attention  # noqa: PLC0415
+    from hepattn.models.encoder import Encoder  # noqa: PLC0415
+
+    switched = 0
+    for module in model.modules():
+        if isinstance(module, Encoder | Attention) and module.attn_type not in {"linformer", "torch"}:
+            module.set_backend("torch")
+            switched += 1
+    return switched
+
+
 @torch.no_grad()
 def port_attention(tattn, nattn) -> None:
     """Torch Attention (torch or linformer backend) -> native Attention of the same attn_type.
 
     Linformer: ``proj_k`` / ``proj_v`` (seq_len, k) go to the core's E / F. Rows past the key length are dropped when
-    the native core has no tail (no renorm, e.g. decoder query self-attention): org never reads them there.
+    the native core has no tail (no renorm, e.g. decoder query self-attention): org never reads them there. The torch
+    types ``flash`` / ``flash-varlen`` compare as ``torch``, as the native Encoder and decoder coerce them (same
+    parameters, same math on the dense-mask path).
 
     Raises:
         RuntimeError: If the native linformer core is not built.
         ConversionError: If the attention type, shape or ``qkv_norm`` differ.
     """
-    if tattn.attn_type != nattn.attn_type:
+    if _native_attn_type(tattn.attn_type) != nattn.attn_type:
         raise ConversionError(f"attn_type mismatch: torch {tattn.attn_type} vs native {nattn.attn_type}")
     if tattn.dim != nattn.dim or tattn.num_heads != nattn.num_heads:
         raise ConversionError("attention shape mismatch")
@@ -674,6 +701,7 @@ def convert(
     state, info = read_lightning_state(ckpt_path)
     if kind == TORCH_SOURCE:
         tmodel = instantiate_torch_model(model_entry)
+        portable_attention(tmodel)  # for the verify forward on the CPU
         result = tmodel.load_state_dict(state, strict=True)
         if result.missing_keys or result.unexpected_keys:  # strict raises; kept for type checkers
             raise ConversionError(f"state dict mismatch: {result}")

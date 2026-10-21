@@ -1,0 +1,25 @@
+rc=0
+{"stem": "m00", "key": "toy_mlp", "max_abs": 0.0, "n_diff": 0, "size": 14400, "y_std": 0.8778709769248962, "keras_vs_export_max_abs": 0.0, "seconds": 2.9, "control_n_diff": 6}
+{"stem": "m01", "key": "toy_attention_core", "max_abs": 0.0, "n_diff": 0, "size": 2048, "y_std": 0.6594231128692627, "keras_vs_export_max_abs": 0.0, "seconds": 4.6}
+{"stem": "m02", "key": "QDense:linear:", "max_abs": 0.0, "n_diff": 0, "size": 16384, "y_std": 0.5734715461730957, "keras_vs_export_max_abs": 0.0, "seconds": 2.4}
+{"stem": "m03", "key": "QDense:sigmoid: (export form)", "max_abs": 0.0, "n_diff": 0, "size": 2304, "y_std": 0.24644404649734497, "keras_vs_export_max_abs": 0.0, "seconds": 3.1}
+{"stem": "m04", "key": "QDense:silu: (export form)", "max_abs": 0.0, "n_diff": 0, "size": 55296, "y_std": 0.3073864281177521, "keras_vs_export_max_abs": 0.0, "seconds": 2.8}
+{"stem": "m05", "key": "QEinsum::bhkd,bk->bhkd", "max_abs": 0.0, "n_diff": 0, "size": 2048, "y_std": 1.0167125463485718, "keras_vs_export_max_abs": 0.0, "seconds": 1.9}
+{"stem": "m06", "key": "QEinsum::bhqd,bhkd->bhqk", "max_abs": 0.0, "n_diff": 0, "size": 18432, "y_std": 2.8683745861053467, "keras_vs_export_max_abs": 0.0, "seconds": 2.0}
+{"stem": "m07", "key": "QEinsum::bhqd,bhnd->bhqn", "max_abs": 0.0, "n_diff": 0, "size": 32768, "y_std": 2.838721990585327, "keras_vs_export_max_abs": 0.0, "seconds": 2.0}
+{"stem": "m08", "key": "QEinsum::bhqk,bhkd->bhqd", "max_abs": 0.0, "n_diff": 0, "size": 18432, "y_std": 2.7873735427856445, "keras_vs_export_max_abs": 0.0, "seconds": 2.0}
+{"stem": "m09", "key": "QEinsum::bhqk,bqk->bhqk", "max_abs": 0.0, "n_diff": 0, "size": 16384, "y_std": 1.0169181823730469, "keras_vs_export_max_abs": 0.0, "seconds": 3.2}
+{"stem": "m10", "key": "QEinsum::bhqn,bhnd->bhqd", "max_abs": 0.0, "n_diff": 0, "size": 16384, "y_std": 4.050471305847168, "keras_vs_export_max_abs": 0.0, "seconds": 2.0}
+{"stem": "m11", "key": "QEinsum::bn,znk->bk (export form)", "max_abs": 0.0, "n_diff": 0, "size": 128, "y_std": 0.08504601567983627, "keras_vs_export_max_abs": 0.0, "seconds": 2.4}
+{"stem": "m12", "key": "QEinsum::bnc,bmc->bnm", "max_abs": 0.0, "n_diff": 0, "size": 16384, "y_std": 4.000486850738525, "keras_vs_export_max_abs": 0.0, "seconds": 2.0}
+{"stem": "m13", "key": "QEinsum::bnc,bnc->bnc", "max_abs": 0.0, "n_diff": 0, "size": 55296, "y_std": 1.0009227991104126, "keras_vs_export_max_abs": 0.0, "seconds": 2.4}
+{"stem": "m14", "key": "QEinsum::bqe,ble->bql", "max_abs": 0.0, "n_diff": 0, "size": 16384, "y_std": 3.962266683578491, "keras_vs_export_max_abs": 0.0, "seconds": 2.0}
+{"stem": "m15", "key": "QEinsum::bqn,znk->bqk (export form)", "max_abs": 0.0, "n_diff": 0, "size": 8192, "y_std": 0.048710260540246964, "keras_vs_export_max_abs": 0.0, "seconds": 2.3}
+{"stem": "m16", "key": "QEinsumDense:linear:bhnd,nk->bhkd", "max_abs": 0.0, "n_diff": 0, "size": 2048, "y_std": 1.7444126605987549, "keras_vs_export_max_abs": 0.0, "seconds": 2.3}
+{"stem": "m17", "key": "QEinsumDense:linear:bhqk,nk->bhqn", "max_abs": 0.0, "n_diff": 0, "size": 32768, "y_std": 0.6019578576087952, "keras_vs_export_max_abs": 0.0, "seconds": 4.6}
+{"stem": "m18", "key": "QEinsumDense:linear:bhqn,nk->bhqk", "max_abs": 0.0, "n_diff": 0, "size": 16384, "y_std": 0.8395283222198486, "keras_vs_export_max_abs": 0.0, "seconds": 2.4}
+{"stem": "m19", "key": "QSoftmax::", "max_abs": 0.0, "n_diff": 0, "size": 18432, "y_std": 0.1154877245426178, "keras_vs_export_max_abs": 0.0, "seconds": 2.9}
+{"stem": "m20", "key": "QUnaryFunctionLUT:rsqrt_floor:", "max_abs": 0.0, "n_diff": 0, "size": 128, "y_std": 337.890380859375, "keras_vs_export_max_abs": 0.0, "seconds": 3.4, "floor_points": 16, "floor_as_characterized": true}
+{"stem": "m21", "key": "classification_head (lut form)", "max_abs": 0.0, "n_diff": 0, "size": 1536, "y_std": 0.2159847617149353, "keras_vs_export_max_abs": 0.0, "seconds": 3.0}
+{"stem": "m22", "key": "CONTROL QDense:sigmoid: as trained", "max_abs": 0.0009764432907104492, "n_diff": 2303, "size": 2304, "y_std": 0.24232147634029388, "keras_vs_export_max_abs": 0.0, "seconds": 2.8}
+23 models, 0 not bit-exact (or control failed)

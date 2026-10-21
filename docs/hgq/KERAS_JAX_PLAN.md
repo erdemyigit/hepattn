@@ -1,7 +1,7 @@
 # Plan: move HGQ2 QAT training to pure Keras on JAX
 
 Status: G1 GO (its trainer gap still OPEN until G3); S1-S4 merged into `keras-jax` on 2026-10-15; retargeted to the org/main float Linformer model (`ac0da8f`)
-on 2026-10-16; S5, S6a, S6b done on 2026-10-20 (Polaris: real-data smoke passed, G3 queued); S7 done on 2026-10-20 (branch `s7/export`) ([RETARGET_ORG_MAIN.md](RETARGET_ORG_MAIN.md), stages R0-R5; see "Status" below). Originally a proposal that waited for G1.
+on 2026-10-16; S5, S6a, S6b done on 2026-10-20 (Polaris: real-data smoke passed, job 7763621, and G3 passed, job 7763879: recorded in the main worktree's `WORKLOG.hgq.md`, not on this branch; [port_log/README.md](port_log/README.md) still lists both as carried); S7 done on 2026-10-20 (branch `s7/export`) ([RETARGET_ORG_MAIN.md](RETARGET_ORG_MAIN.md), stages R0-R5; see "Status" below). Originally a proposal that waited for G1.
 Date: 2026-10-14. Branch: `keras-jax` (pushed only up to `826bc0a`, after R5; S5 and S6 are not pushed), worktree `hepattn-keras-jax`.
 Scope: only the CLIC HGQ2 quantization-aware training, evaluation and export path. The other
 experiments (`atlas_muon`, `trackml`, `tide`, ...) and the float torch model stay on torch and Lightning.

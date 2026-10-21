@@ -334,3 +334,221 @@ def test_cli_writes_a_checkpoint_main_jax_loads(tmp_path, capsys):
     assert max(meta["converted_from"]["max_abs_diff"][k] / ORG_TOL[k] for k in ORG_TOL) <= 1.0
     with pytest.raises(FileExistsError):
         C.main(["--config", str(ORG / "config.yaml"), "--ckpt", str(ORG / "model.ckpt"), "--out", str(out)])
+
+
+# ------------------------------------------------------------------------------------------- pairing of same-named quantizers
+
+
+def einsum_input_check(nmodel, keras_vars: dict) -> tuple[list[str], int]:
+    """Native ``QEinsum`` input quantizer j vs the hybrid's input quantizer j (``hybrid/einsum_inputs.json``, read from the
+    hybrid layer objects, not from the converter's suffix order). Returns (mismatches, pairs whose two inputs differ).
+    """
+    import json  # noqa: PLC0415
+
+    from hgq.layers import QEinsum  # noqa: PLC0415
+
+    order = json.loads((HYB / "einsum_inputs.json").read_text())
+    native = {layer.name: layer for layer in nmodel._flatten_layers(include_self=False, recursive=True) if isinstance(layer, QEinsum)}  # noqa: SLF001
+    assert set(native) == set(order), sorted(set(native) ^ set(order))
+    mismatches, distinct = [], 0
+    for name, positions in order.items():
+        quantizers = native[name].iq.quantizers
+        assert len(quantizers) == len(positions) == 2, name
+        values = []
+        for j, (quantizer, paths) in enumerate(zip(quantizers, positions, strict=True)):
+            source = {path.rsplit("/", 1)[1]: path for path in paths}
+            assert sorted(source) == sorted(v.path.rsplit("/", 1)[1] for v in quantizer.variables), name
+            values.append({leaf: keras_vars[path].numpy() for leaf, path in source.items()})
+            for var in quantizer.variables:
+                got = np.asarray(var.value)
+                if not np.array_equal(got, values[j][var.path.rsplit("/", 1)[1]].astype(got.dtype)):
+                    mismatches.append(f"{name} input {j} {var.path}")
+        distinct += any(not np.array_equal(values[0][leaf], values[1][leaf]) for leaf in values[0])
+    return mismatches, distinct
+
+
+def test_hybrid_einsum_inputs_pair_by_input_position(hybrid):
+    """Same-named quantizers (a ``QEinsum``'s ``quantizer`` / ``quantizer_1``) land on the same input as in the hybrid.
+
+    The forward gate cannot see a swap here (the GLU input quantizers' ``f`` does not bind on the fixture's events), so
+    this compares against the hybrid's own input order. 10 of the 52 pairs hold different values (asserted).
+    """
+    keras_vars, _ = C.hybrid_keras_state(hybrid["state"])
+    mismatches, distinct = einsum_input_check(hybrid["nmodel"], keras_vars)
+    assert mismatches == []
+    assert distinct >= 10, f"only {distinct} QEinsum leaves have two different input quantizers: the check would be vacuous"
+
+
+def test_control_swapped_einsum_inputs_are_found(hybrid):
+    """Control: the two input quantizers of one GLU product swapped after the conversion are reported."""
+    keras_vars, _ = C.hybrid_keras_state(hybrid["state"])
+    nmodel = hybrid["rc"].build_model()
+    nmodel(hybrid["inputs"], training=False)
+    C.port_hybrid_state(hybrid["state"], nmodel)
+    glu = nmodel.input_nets[0].net.products[0]
+    for a, b in zip(glu.iq.quantizers[0].variables, glu.iq.quantizers[1].variables, strict=True):
+        va, vb = np.array(a.value), np.array(b.value)
+        a.assign(vb)
+        b.assign(va)
+    mismatches, _ = einsum_input_check(nmodel, keras_vars)
+    assert mismatches and all(glu.name in m for m in mismatches), mismatches
+
+
+# ------------------------------------------------------------------------------------------- refusals
+
+
+def test_hybrid_variable_without_a_native_twin_is_refused(hybrid):
+    state = copy.copy(hybrid["state"])
+    state["encoder._torch_params.extra_layer/kernel"] = torch.zeros(3)
+    nmodel = hybrid["rc"].build_model()
+    nmodel(hybrid["inputs"], training=False)
+    with pytest.raises(C.ConversionError, match=r"1 hybrid variables without a native twin: \['extra_layer/kernel: 1 hybrid, 0 native'\]"):
+        C.port_hybrid_state(state, nmodel)
+
+
+def test_hybrid_variable_with_two_values_is_refused(hybrid):
+    """One keras variable under two module paths with different values (the hybrid stores it under every enclosing layer)."""
+    state = copy.copy(hybrid["state"])
+    by_path: dict = {}
+    for key in state:
+        if C.KERAS_PARAM_MARK in key:
+            by_path.setdefault(key.split(C.KERAS_PARAM_MARK, 1)[1], []).append(key)
+    path, keys = next((p, k) for p, k in by_path.items() if len(k) > 1 and p.endswith("/kernel"))
+    state[keys[1]] = state[keys[1]] + 1
+    nmodel = hybrid["rc"].build_model()
+    nmodel(hybrid["inputs"], training=False)
+    with pytest.raises(C.ConversionError, match=f"{path}: different values under two module paths"):
+        C.port_hybrid_state(state, nmodel)
+
+
+def test_hybrid_dtype_mismatch_is_refused(hybrid):
+    state = copy.copy(hybrid["state"])
+    keys = [k for k in state if C.KERAS_PARAM_MARK in k and k.endswith("innet0_net_final/kernel")]
+    assert keys
+    for key in keys:
+        state[key] = state[key].double()
+    nmodel = hybrid["rc"].build_model()
+    nmodel(hybrid["inputs"], training=False)
+    with pytest.raises(C.ConversionError, match=r"source dtype float64, native float32"):
+        C.port_hybrid_state(state, nmodel)
+
+
+@pytest.mark.parametrize("source", ["hybrid", "torch"])
+def test_other_class_weights_are_refused(org, hybrid, source):
+    """``loss_weights`` buffers are not ported but compared: other class weights are another config."""
+    if source == "hybrid":
+        state = copy.copy(hybrid["state"])
+        state["tasks.0.loss_weights"] = state["tasks.0.loss_weights"] * 2
+        nmodel = hybrid["rc"].build_model()
+        nmodel(hybrid["inputs"], training=False)
+        convert = lambda: C.port_hybrid_state(state, nmodel)  # noqa: E731
+    else:
+        tmodel = copy.deepcopy(org["tmodel"])
+        tmodel.tasks[0].loss_weights.mul_(2)
+        nmodel = org["rc"].build_model()
+        nmodel(org["inputs"], training=False)
+        convert = lambda: C.port_torch_model(tmodel, nmodel)  # noqa: E731
+    with pytest.raises(C.ConversionError, match=r"tasks\.0\.loss_weights: \[.*\] differs from the native task constant"):
+        convert()
+
+
+def test_source_kind_refuses_another_model_class():
+    assert C.source_kind({"class_path": "hepattn.models.MaskFormer"}) == C.TORCH_SOURCE
+    assert C.source_kind({"class_path": "hepattn.keras.maskformer.KerasMaskFormer"}) == C.HYBRID_SOURCE
+    with pytest.raises(C.ConversionError, match="neither MaskFormer nor KerasMaskFormer"):
+        C.source_kind({"class_path": "hepattn.models.Encoder"})
+
+
+def test_port_norm_without_bias():
+    """An affine LayerNorm without bias (``bias=False``) ports its weight into a native norm without ``beta``."""
+    import keras  # noqa: PLC0415
+
+    tnorm = torch.nn.LayerNorm(4, bias=False)
+    with torch.no_grad():
+        tnorm.weight.copy_(torch.arange(1.0, 5.0))
+    nnorm = keras.layers.LayerNormalization(epsilon=tnorm.eps, center=False)
+    nnorm.build((None, 4))
+    C.port_norm(tnorm, nnorm)
+    assert np.array_equal(np.asarray(nnorm.gamma.value), [1.0, 2.0, 3.0, 4.0])
+    assert nnorm.beta is None
+    with pytest.raises(C.ConversionError, match="affine flags differ"):  # control: a native norm with beta
+        C.port_norm(tnorm, keras.layers.LayerNormalization(epsilon=tnorm.eps))
+
+
+# ------------------------------------------------------------------------------------------- flash attention types
+
+
+def quadratic_run(tmp_path: Path, state: dict | None, enc_type: str, dec_type: str) -> tuple[Path, dict]:
+    """The org fixture config with quadratic attention of the given torch types, and a checkpoint of ``state`` (default:
+    the torch model's own initial weights). Returns (config, state).
+    """
+    import yaml  # noqa: PLC0415
+
+    cfg = yaml.safe_load((ORG / "config.yaml").read_text())
+    init = cfg["model"]["model"]["init_args"]
+    init["encoder"]["init_args"].update(attn_type=enc_type, attn_kwargs={"num_heads": 2})
+    init["decoder"]["init_args"]["decoder_layer_config"]["attn_kwargs"] = {"attn_type": dec_type, "num_heads": 2}
+    run = tmp_path / f"{enc_type}_{dec_type}"
+    run.mkdir()
+    (run / "config.yaml").write_text(yaml.safe_dump(cfg))
+    if state is None:
+        torch.manual_seed(0)
+        state = C.instantiate_torch_model(C.source_model_section([run / "config.yaml"])).state_dict()
+    torch.save({"state_dict": {f"model.{k}": v for k, v in state.items()}, "epoch": 0, "global_step": 0}, run / "model.ckpt")
+    return run, state
+
+
+# measured max |native - torch| on these random weights: 4.9e-3 at |regr| up to 1.4e4 (about 3 float32 ulp of the largest
+# value), <= 1.1e-6 elsewhere; the bound per output is 16 ulp of its largest value, at least 2.2e-6
+QUADRATIC_ULPS, QUADRATIC_ABS = 16, 2.2e-6
+
+
+def test_flash_attention_checkpoints_convert(tmp_path):
+    """Org ``base.yaml`` trains the encoder with ``flash-varlen``; the native model coerces flash types to ``torch``.
+
+    The converter compares the coerced types and runs its verify forward on the CPU with the torch SDPA backend: a
+    flash / flash-varlen run converts to the same native model as the same weights under ``torch`` (bitwise), with the
+    same forward difference. Before the fix the conversion raised "attn_type mismatch: torch flash-varlen vs native torch".
+    """
+    from hepattn.keras_native.encoder import COERCE_TO_TORCH  # noqa: PLC0415
+
+    assert C.FLASH_TYPES == COERCE_TO_TORCH
+    ref_run, state = quadratic_run(tmp_path, None, "torch", "torch")
+    _, ref_model, ref_report = C.convert([ref_run / "config.yaml"], ref_run / "model.ckpt")
+    inputs, _ = C.sample_batch(_rc(ref_run), 2)
+    ref_out = native_outputs(ref_model, inputs)
+    for key, diff in ref_report["max_abs_diff"].items():
+        value = ref_out[key]
+        scale = float(np.abs(value[np.abs(value) < SENTINEL]).max()) if value.dtype != bool else 0.0
+        assert diff <= max(QUADRATIC_ABS, QUADRATIC_ULPS * np.finfo(np.float32).eps * scale), (key, diff, scale)
+    for enc_type, dec_type in (("flash-varlen", "torch"), ("flash", "flash-varlen")):
+        run, _ = quadratic_run(tmp_path, state, enc_type, dec_type)
+        with pytest.warns(UserWarning, match="coerces attn_type"):
+            _, model, report = C.convert([run / "config.yaml"], run / "model.ckpt")
+        assert report["torch_tensors_read"] + len(report["ignored"]) == report["torch_tensors"]
+        assert report["native_written"] == report["native_variables"]
+        assert report["max_abs_diff"] == ref_report["max_abs_diff"], (enc_type, dec_type)
+        out = native_outputs(model, inputs)
+        assert all(np.array_equal(out[key], ref_out[key]) for key in ref_out), (enc_type, dec_type)
+        # the porter itself accepts the flash types (no backend switch: port_torch_model on the model as configured)
+        tmodel = C.instantiate_torch_model(C.source_model_section([run / "config.yaml"]))
+        assert tmodel.encoder.attn_type == enc_type
+        nmodel = _rc(run).build_model()
+        nmodel(inputs, training=False)
+        assert C.port_torch_model(tmodel, nmodel)["native_written"] == report["native_written"]
+
+
+def _rc(run: Path):
+    from hepattn.keras_native.config import load_config  # noqa: PLC0415
+
+    return load_config([run / "config.yaml"])
+
+
+def test_linformer_into_quadratic_is_refused(org, tmp_path):
+    """Control for the type comparison: a quadratic torch attention does not port into a native linformer one."""
+    run, _ = quadratic_run(tmp_path, None, "torch", "torch")
+    tmodel = C.instantiate_torch_model(C.source_model_section([run / "config.yaml"]))
+    nmodel = org["rc"].build_model()
+    nmodel(org["inputs"], training=False)
+    with pytest.raises(C.ConversionError, match="attn_type mismatch: torch torch vs native linformer"):
+        C.port_torch_model(tmodel, nmodel)

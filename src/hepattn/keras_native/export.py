@@ -24,8 +24,11 @@ the trained layers' outputs bit for bit:
     simulation differs from keras (measured, docs/hgq/port_log/S7.md). The export form is the same ``QDense`` without
     activation followed by a rank-2 ``QUnaryFunctionLUT`` of the activation with fixed signed input and output lanes:
     bit-exact in hls4ml, but NOT the trained graph: the table quantizes the pre-activation and its output, so it
-    deviates from the trained layer by about half a step of those lanes (measured in the tests). A bit-exact
-    deployable activation needs the table form at training time (a model change, docs/hgq/FPGA_STATUS.md).
+    deviates from the trained layer by at most half an input step x max|f'| + half an output step while the
+    pre-activation is inside the table's input lane (|pre| < 2**4 - 2**-6 for the default (4, 6) lane; measured in the
+    tests). Past that the input saturates and the deviation is not bounded (silu grows linearly): measure the
+    pre-activation range on real events before deploying. A bit-exact deployable activation needs the table form at
+    training time (a model change, docs/hgq/FPGA_STATUS.md).
 
 ``convert_to_hls`` runs hls4ml's HGQ2 flow (no precision configuration: HGQ2 models propagate their own precisions).
 hls4ml reads values with ``keras.ops.convert_to_numpy``, so this works under any keras backend; no torch here.

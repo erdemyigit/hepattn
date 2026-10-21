@@ -20,6 +20,9 @@ dummy data, no logger, the scipy matcher without workers, and only the callbacks
 ``hybrid/outputs.npz``: 3 dummy events (``in::<key>``) and the hybrid's eval-mode outputs (``out::<path>``) after
 loading ``model.ckpt`` into a model built from the saved ``config.yaml`` (the ``evaluate_hgq`` path: build, materialize,
 register the keras parameters, strict load). The native converter gate compares against these.
+
+``hybrid/einsum_inputs.json``: the input order of every ``QEinsum`` leaf's quantizers in that model (``einsum_inputs``).
+``make_s7_fixtures.py einsum-inputs`` rewrites only this file.
 """
 
 import json
@@ -190,7 +193,10 @@ def flatten(tree: dict, prefix: str = "") -> dict:
 
 
 @torch.no_grad()
-def hybrid_outputs() -> None:
+def load_hybrid() -> tuple:
+    """The hybrid built from ``hybrid/config.yaml`` with ``hybrid/model.ckpt`` loaded (the ``evaluate_hgq`` path), and
+    the ``NUM_EVENTS`` dummy events it was materialized on.
+    """
     from torch.utils.data import DataLoader  # noqa: PLC0415
 
     from hepattn.experiments.clic.evaluate_hgq import load_state  # noqa: PLC0415
@@ -208,6 +214,35 @@ def hybrid_outputs() -> None:
     model.materialize(inputs)
     model.register_keras_parameters()
     load_state(model, HERE / "hybrid/model.ckpt")
+    return model, inputs
+
+
+def einsum_inputs(model) -> dict[str, list[list[str]]]:
+    """Per ``QEinsum`` leaf of the hybrid: the keras variable paths of its input quantizers, in input order.
+
+    Read from the layer objects (``iq.quantizers[j]`` quantizes input j), not from the paths: the native converter test
+    checks its suffix-order pairing of same-named quantizers against this (``test_convert.py``).
+    """
+    from hgq.layers import QEinsum  # noqa: PLC0415
+
+    order = {}
+    for layer in model.modules():
+        if isinstance(layer, QEinsum):
+            assert layer.name not in order, f"two QEinsum leaves named {layer.name}"
+            order[layer.name] = [[v.path for v in q.variables] for q in layer.iq.quantizers]
+    return order
+
+
+def write_einsum_inputs(model) -> None:
+    order = einsum_inputs(model)
+    (HERE / "hybrid/einsum_inputs.json").write_text(json.dumps(order, indent=1, sort_keys=True) + "\n")
+    print("einsum inputs:", len(order), "QEinsum leaves")
+
+
+@torch.no_grad()
+def hybrid_outputs() -> None:
+    model, inputs = load_hybrid()
+    write_einsum_inputs(model)
     outputs = flatten(model(inputs))
     arrays = {f"in::{k}": v.numpy() for k, v in inputs.items()}
     arrays |= {f"out::{k}": v.detach().numpy() for k, v in outputs.items()}
@@ -216,6 +251,9 @@ def hybrid_outputs() -> None:
 
 
 def main() -> None:
+    if sys.argv[1:] == ["einsum-inputs"]:  # only hybrid/einsum_inputs.json, from the existing checkpoint
+        write_einsum_inputs(load_hybrid()[0])
+        return
     with tempfile.TemporaryDirectory() as tmp:
         make_org_float(Path(tmp))
         make_hybrid(Path(tmp))

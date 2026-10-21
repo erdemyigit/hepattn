@@ -2,8 +2,9 @@
 
 Reads the same experiment YAML as training (same ROOT files via CLICDataset/uproot),
 builds the KerasMaskFormer from the config's model section, loads a state dict
-(either a keras state from port_to_keras.py or a Lightning checkpoint), and runs the
-test split in eager torch: per-event losses, thresholded predictions, and throughput.
+(either a keras state from port_to_keras.py or a Lightning checkpoint; ``port_to_keras.load_keras_state``: strict,
+``torch.load(weights_only=True)``), and runs the test split in eager torch: per-event losses, thresholded
+predictions, and throughput.
 
     python -m hepattn.experiments.clic.eval_keras \
         --config <run_dir>/config.yaml --state <keras_state.pt|lightning.ckpt> --out metrics.json
@@ -19,15 +20,8 @@ import torch
 import yaml
 
 from hepattn.experiments.clic.pflow_data import PflowDataModule
-from hepattn.experiments.clic.port_to_keras import build_keras_maskformer_from_config
+from hepattn.experiments.clic.port_to_keras import build_keras_maskformer_from_config, load_keras_state
 from hepattn.keras import set_keras_default_device
-
-
-def load_state(model, state_path: str | Path) -> None:
-    state = torch.load(state_path, map_location="cpu", weights_only=False)
-    if isinstance(state, dict) and "state_dict" in state:  # Lightning checkpoint
-        state = {k.removeprefix("model."): v for k, v in state["state_dict"].items() if k.startswith("model.")}
-    model.load_state_dict(state)
 
 
 def main(args: list[str] | None = None) -> None:
@@ -51,13 +45,11 @@ def main(args: list[str] | None = None) -> None:
 
     model_cfg = raw["model"]["model"]
     quant = model_cfg.get("init_args", {}).get("quant")
-    model = build_keras_maskformer_from_config(model_cfg, quant=quant).eval()
-
-    # materialize lazily-built quantized layers from the first batch, then load weights
+    # materialize (lazy layers, linformer cores) and register the keras weights before the strict load: a Lightning
+    # checkpoint of MPflowHGQ (and a port_to_keras state) holds every HGQ2 kernel / bias / beta / ebops, which an
+    # unregistered model does not have (the load then fails with "Unexpected key(s)")
     first_inputs, _ = next(iter(loader))
-    with torch.no_grad():
-        model(first_inputs)
-    load_state(model, opts.state)
+    model = load_keras_state(build_keras_maskformer_from_config(model_cfg, quant=quant).eval(), opts.state, first_inputs)
 
     loss_sums: dict[str, float] = {}
     num_events = 0

@@ -97,3 +97,48 @@ def test_warm_start_is_not_the_fresh_initialisation(runs, source):
 
 def test_summary_records_the_warm_start(runs):
     assert '"warm_started_from": "' in runs["summary_hybrid"] and "hybrid.npz" in runs["summary_hybrid"]
+
+
+def fresh_trainer(run_dir: Path) -> loop.Trainer:
+    rc = load_config([CONFIG])
+    settings = loop.LoopSettings.from_run_config(rc, run_dir, max_steps=STEPS, matmul_precision="highest")
+    train = main_jax.clic_data(rc, "train", seed=settings.seed, dummy_data=True)
+    return loop.Trainer(rc, settings, sample=next(iter(train.epoch(0, 0))), train_batches=train.num_batches)
+
+
+@pytest.fixture(scope="module")
+def hybrid_npz(tmp_path_factory) -> Path:
+    out = tmp_path_factory.mktemp("warm") / "hybrid.npz"
+    assert C.main(["--config", str(HYB / "config.yaml"), "--ckpt", str(HYB / "model.ckpt"), "--out", str(out)]) == 0
+    return out
+
+
+def test_warm_start_reads_the_checkpoint_beta(hybrid_npz, tmp_path):
+    """``trainer.beta`` (what ``_set_beta`` compares against) is the checkpoint's beta, not the fresh model's."""
+    from hepattn.keras_native import checkpoint as nckpt  # noqa: PLC0415
+
+    trainer = fresh_trainer(tmp_path / "run")
+    fresh_beta = trainer.beta
+    _, ntv, _ = nckpt.load_checkpoint(hybrid_npz, trainer.steps.model, None, expect_config_hash=trainer.rc.model_hash)[0]
+    stored = trainer.steps.ebops_leaves.read_beta(ntv)
+    assert stored != fresh_beta, (stored, fresh_beta)  # measured: 1e-7 (BetaPID after the fixture's epoch) vs 0
+    trainer.warm_start(hybrid_npz)
+    assert trainer.beta == trainer.steps.read_beta(trainer.state) == stored
+
+
+def test_warm_start_needs_a_fresh_trainer(hybrid_npz, tmp_path):
+    trainer = fresh_trainer(tmp_path / "run")
+    trainer.global_step = 1
+    with pytest.raises(ValueError, match="warm_start needs a fresh trainer"):
+        trainer.warm_start(hybrid_npz)
+    trainer.global_step, trainer.micro_step = 0, 1
+    with pytest.raises(ValueError, match="warm_start needs a fresh trainer"):
+        trainer.warm_start(hybrid_npz)
+
+
+def test_resume_and_init_from_are_exclusive(tmp_path, capsys):
+    argv = ["fit", "--config", str(CONFIG), "--run-dir", str(tmp_path / "r"), "--dummy-data", "--resume", "last", "--init-from", "x.npz"]
+    with pytest.raises(SystemExit) as err:
+        main_jax.main(argv)
+    assert err.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err

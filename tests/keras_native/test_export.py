@@ -15,9 +15,16 @@ Part 2 (S7) runs on the org QAT model converted from the hybrid Lightning checkp
   einsum, "Batch dim mismatch"; ``QDense`` with inline silu) and the inline sigmoid (converts, C simulation differs)
   through their export forms. Controls: kept and silu still fail as trained; the inline sigmoid's C simulation differs
   (Linux);
-- the activation export form (silu, sigmoid) deviates from the trained layer by at most half a step of its table lanes (approximate by
-  design), and is not exact (so the bound is the claim);
-- C simulation of every export form and leaf kind equals keras bit for bit (Linux).
+- the activation export form (silu, sigmoid) deviates from the trained layer by at most half a step of its table lanes
+  while the table input does not saturate (|pre-activation| < 2**4 - 2**-6; approximate by design), and is not exact
+  (so the bound is the claim);
+- C simulation of every export form and leaf kind equals keras bit for bit (Linux), on the inputs of the model's domain
+  (0/1 masks; the renorm rsqrt table on the kept energy fraction in [0, 1]). One characterized exception: at the rsqrt
+  floor (input 0, only on mask rows that select nothing) keras gives 2**10, one LSB past the table's lane, hls4ml the
+  lane maximum 2**10 - 2**-14; ``test_rsqrt_floor_does_not_reach_the_core_outputs`` shows the cores multiply it by
+  exact zeros there;
+- the export models are built from the converted state without changing it (no training call before conversion);
+- the functional assembly folds a SwiGLU product of any rank to rank 3 (rank 2 and 4 tested).
 """
 
 import collections
@@ -331,24 +338,36 @@ def export_models(org) -> dict[str, keras.Model]:
 ORG_KINDS = 19  # measured on the converted fixture model (docs/hgq/port_log/S7.md)
 
 
+def org_state(model) -> dict[str, np.ndarray]:
+    return {v.path: np.array(v.value) for v in model.variables}
+
+
 @needs_hls4ml
 def test_every_org_leaf_kind_generates_hls4ml_code(org, tmp_path):
+    """No training call before the conversion: the exported state is the converted checkpoint's (asserted unchanged)."""
+    before = org_state(org)
     models = export_models(org)
     assert len(models) == ORG_KINDS, sorted(models)
-    rng = np.random.default_rng(4)
     for i, (key, model) in enumerate(models.items()):
-        model(random_inputs(model, rng), training=True)  # as R5: a training call before conversion
         hls = convert_to_hls(model, tmp_path / f"k{i:02d}", compile_csim=False)
         assert (tmp_path / f"k{i:02d}/firmware/myproject.cpp").is_file(), key
         assert hls is not None
+    after = org_state(org)
+    changed = [path for path, value in before.items() if not np.array_equal(value, after[path])]
+    assert changed == [], f"{len(changed)} converted variables changed by the export: {changed[:4]}"
 
 
 @needs_hls4ml
 def test_controls_kept_and_inline_silu_fail_as_trained(org, tmp_path):
     kinds = leaves_by_kind(org)
     kept = next(layers[0] for (cls, _, eq), layers in kinds.items() if eq == "bqn,znk->bqk")
+    as_trained = leaf_model(kept)
+    mask_shape, table_shape = kept._build_shapes_dict["input_shape"]  # noqa: SLF001
+    # the leaf as trained: a batch axis on the mask, the table a batch-1 operand (1, n, k), not a batched input
+    assert tuple(as_trained.inputs[0].shape) == (None, *mask_shape[1:]), as_trained.inputs[0].shape
+    assert tuple(as_trained.inputs[1].shape) == tuple(table_shape) and table_shape[0] == 1, as_trained.inputs[1].shape
     with pytest.raises(AssertionError, match="Batch dim mismatch"):
-        convert_to_hls(leaf_model(kept), tmp_path / "kept", compile_csim=False)
+        convert_to_hls(as_trained, tmp_path / "kept", compile_csim=False)
     silu = next(layers[0] for (cls, act, _), layers in kinds.items() if cls == "QDense" and act == "silu")
     assert len(silu._build_shapes_dict["input_shape"]) == 3  # noqa: SLF001  (a per-token head, rank 3)
     with pytest.raises(TypeError, match="only integer scalar arrays"):
@@ -376,20 +395,130 @@ def test_activation_export_form_deviation_is_bounded(org, act):
     assert dev.max() > 0, "the export form equals the trained layer: then it is not approximate and the docs are wrong"
 
 
+def test_rsqrt_floor_does_not_reach_the_core_outputs(org, monkeypatch):
+    """The rsqrt table's floor value (keras 2**10, hls4ml 2**10 - 2**-14) multiplies exact zeros in both cores.
+
+    The floor (kept energy 0) is reached on a mask row that selects no key: attend (decoder cross-attention) zeroes that
+    row's scores before ``mul_k`` and selects it out after ``mul_v``; project (encoder) has all-zero projected k and v
+    in an event with no valid node. Replacing every floor output of the table by hls4ml's value, or by an arbitrary 3.0,
+    changes no core output bit; control: halving the other table outputs changes the outputs.
+    """
+    from hepattn.keras_native import masked_linformer as ml  # noqa: PLC0415
+
+    i, f = RSQRT_LUT_OUT
+    original = ml.rescale
+    hits = []
+
+    def patched(floor_value: float | None):
+        def rescale(kept_layer, lut, mask, energy, training=None):
+            def lut_hls(x, training=None):
+                y = lut(x, training=training)
+                floor = keras.ops.equal(y, 2.0**i)
+                hits.append(int(np.asarray(floor).sum()))
+                if floor_value is None:  # control
+                    return keras.ops.where(floor, y, 0.5 * y)
+                return keras.ops.where(floor, floor_value, y)
+
+            return original(kept_layer, lut_hls, mask, energy, training)
+
+        return rescale
+
+    rng = np.random.default_rng(9)
+    attend = org.decoder.layers[0].q_ca.fn.core
+    project = org.encoder.layers[1].attn.fn.core
+    cases = []
+    q = rng.standard_normal((2, attend.h, attend.nq, attend.d)).astype("float32")
+    kv = rng.standard_normal((2, attend.h, attend.n, attend.d)).astype("float32")
+    mask = rng.random((2, attend.nq, attend.n)) < 0.5
+    mask[:, ::3] = False  # every third query row selects nothing
+    cases.append((attend, (q, kv, kv * 0.5, mask)))
+    q = rng.standard_normal((2, project.h, project.nq, project.d)).astype("float32")
+    kv = rng.standard_normal((2, project.h, project.n, project.d)).astype("float32")
+    kv_mask = rng.random((2, project.n)) < 0.5
+    kv_mask[1] = False  # an event with no valid node
+    cases.append((project, (q, kv, kv * 0.5, kv_mask)))
+    for core, args in cases:
+        ref = np.asarray(core(*args, training=False))
+        assert np.isfinite(ref).all() and ref.std() > 0
+        for value in (2.0**i - 2.0**-f, 3.0):
+            monkeypatch.setattr(ml, "rescale", patched(value))
+            hits.clear()
+            got = np.asarray(core(*args, training=False))
+            assert sum(hits) > 0, f"{core.name}: no table input at the floor (vacuous)"
+            assert np.array_equal(got, ref), f"{core.name}: the floor value {value} reaches the output"
+        monkeypatch.setattr(ml, "rescale", patched(None))
+        assert not np.array_equal(np.asarray(core(*args, training=False)), ref), f"{core.name}: control"
+        monkeypatch.setattr(ml, "rescale", original)
+
+
+@pytest.mark.parametrize("lead", [(), (3, 5)], ids=["rank2", "rank4"])
+def test_functional_swiglu_net_of_another_rank(lead):
+    """The SwiGLU product einsum is rank 3: other ranks are folded around it (``Dense._swiglu``, ``_fold``)."""
+    from hepattn.keras_native.dense import Dense  # noqa: PLC0415
+    from hepattn.keras_native.factory import LayerFactory  # noqa: PLC0415
+
+    from .golden.cases import QUANT_SPECS  # noqa: PLC0415
+
+    factory = LayerFactory(QUANT_SPECS["high"])
+    with factory.scopes():
+        net = Dense(8, output_size=4, hidden_layers=[12], activation="SwiGLU", factory=factory, name=f"fold{len(lead)}")
+        net.build((None, *lead, 8))
+    functional = build_functional_dense(net, input_shape=(*lead, 8), name=f"fold{len(lead)}_net")
+    x = np.random.default_rng(10).standard_normal((3, *lead, 8)).astype("float32")
+    ref = np.asarray(net(x, training=False))
+    assert ref.shape == (3, *lead, 4)
+    assert np.array_equal(ref, np.asarray(functional(x, training=False)))
+    # control: the product leaf matters (x1 alone through the final layer is another function)
+    assert not np.allclose(ref, np.asarray(net.final(net.hidden[0](x, training=False), training=False)), atol=1e-3)
+
+
 # ------------------------------------------------------------------------------------- C simulation (Linux)
+
+
+RSQRT_LUT_OUT = (10, 14)  # masked_linformer.renorm_bits(7)["lut_out"]: the fixture's seq_proj_frac_cap is the default 7
+
+
+def domain_inputs(key: str, model: keras.Model, rng, batch: int = 16):
+    """Random inputs in the leaf's domain: 0/1 masks for the kept einsums; for the rsqrt table the kept energy fraction
+    in [0, 1) with the floor point 0 in the first column of every row (a mask row that selects nothing).
+    """
+    inputs = random_inputs(model, rng, batch=batch)
+    if "znk" in key:
+        inputs = (np.abs(inputs) > 0.5).astype("float32")
+    if "rsqrt" in key:
+        inputs = (np.abs(inputs) % 1.0).astype("float32")
+        inputs[:, 0] = 0.0
+    return inputs
+
+
+def assert_rsqrt_csim(model: keras.Model, hls_model, x: np.ndarray) -> None:
+    """Bit-exact except at the floor (input 0): keras 2**i (one LSB past the lane), hls4ml the lane maximum.
+
+    HGQ2's SAT quantizer clips to 2**i - 2**-f and then rounds ``floor(v * 2**f + 0.5)`` in float32: with i + f = 24,
+    ``(2**24 - 1) + 0.5`` rounds to 2**24, so keras returns 2**i; hls4ml's fixed-point table holds the lane maximum.
+    """
+    i, f = RSQRT_LUT_OUT
+    y_keras = np.asarray(model(x, training=False))
+    y_hls = np.asarray(hls_model.predict(np.ascontiguousarray(x))).reshape(y_keras.shape)
+    floor = x == 0
+    assert floor.sum() == x.shape[0] and (x[~floor] >= 2.0**-18).mean() > 0.99
+    assert np.array_equal(y_hls[~floor], y_keras[~floor]), f"{int((y_hls[~floor] != y_keras[~floor]).sum())} in-domain outputs differ"
+    assert np.all(y_keras[floor] == 2.0**i) and np.all(y_hls[floor] == 2.0**i - 2.0**-f), (np.unique(y_keras[floor]), np.unique(y_hls[floor]))
 
 
 @needs_hls4ml
 def test_export_forms_and_leaf_kinds_csim_bit_exact(org, tmp_path):
-    """C simulation of every org leaf kind (export forms included) equals keras exactly. Linux only (skips on macOS)."""
+    """C simulation of every org leaf kind (export forms included) equals keras exactly on in-domain inputs, the rsqrt
+    floor characterized (``assert_rsqrt_csim``). Linux only (skips on macOS).
+    """
     rng = np.random.default_rng(6)
     for i, (key, model) in enumerate(export_models(org).items()):
-        model(random_inputs(model, rng), training=True)
         hls = csim_or_skip(model, tmp_path / f"c{i:02d}")
-        inputs = random_inputs(model, rng, batch=16)
-        if "znk" in key:  # masks
-            inputs = (np.abs(inputs) > 0.5).astype("float32")
-        assert_csim_equal(model, hls, inputs)
+        inputs = domain_inputs(key, model, rng)
+        if "rsqrt" in key:
+            assert_rsqrt_csim(model, hls, inputs)
+        else:
+            assert_csim_equal(model, hls, inputs)
 
 
 @needs_hls4ml
