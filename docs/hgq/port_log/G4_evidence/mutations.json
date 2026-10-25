@@ -1,0 +1,197 @@
+{
+ "results": [
+  {
+   "id": "m00",
+   "file": null,
+   "env": "jax",
+   "outcome": "pass",
+   "summary": "15 passed in 2.96s",
+   "first_failure": ""
+  },
+  {
+   "id": "m00b",
+   "file": null,
+   "env": "hybrid",
+   "outcome": "pass",
+   "summary": "1 passed in 3.09s",
+   "first_failure": ""
+  },
+  {
+   "id": "m01",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed in 0.06s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_coverage_formula_and_monte_carlo"
+  },
+  {
+   "id": "m02",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 1 passed in 0.11s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_band_strict_inside_and_degenerate"
+  },
+  {
+   "id": "m03",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 1 passed in 0.11s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_band_strict_inside_and_degenerate"
+  },
+  {
+   "id": "m04",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 3 passed in 0.11s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_preconditions - Asserti..."
+  },
+  {
+   "id": "m05",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 3 passed in 0.11s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_preconditions - Asserti..."
+  },
+  {
+   "id": "m06",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 6 passed in 0.11s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_ebops_gate - AssertionE..."
+  },
+  {
+   "id": "m07",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 6 passed in 0.11s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_ebops_gate - assert (no..."
+  },
+  {
+   "id": "m08",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 6 passed in 0.11s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_ebops_gate - AssertionE..."
+  },
+  {
+   "id": "m09",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 7 passed in 0.12s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_resumed_rows_later_wins - asser..."
+  },
+  {
+   "id": "m10",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 9 passed in 0.11s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_checkpoint_steps_never_on_an_epoch_end"
+  },
+  {
+   "id": "m11",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 10 passed in 0.20s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_g4_config - assert (10, 500, 10..."
+  },
+  {
+   "id": "m12",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed in 0.06s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_coverage_formula_and_monte_carlo"
+  },
+  {
+   "id": "m13",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 4 passed in 0.11s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_forward_tolerance - AssertionEr..."
+  },
+  {
+   "id": "m14",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 5 passed in 0.12s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_incomplete_and_inconclusive"
+  },
+  {
+   "id": "m15",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 11 passed in 0.29s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_arm_hybrid_config_paths_and_seed"
+  },
+  {
+   "id": "m16",
+   "file": "polaris/19_g4_hybrid.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 12 passed in 2.49s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_data_position - AssertionError:..."
+  },
+  {
+   "id": "m17",
+   "file": "polaris/19_g4_hybrid.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 13 passed in 2.97s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_hybrid_order_is_the_native_order"
+  },
+  {
+   "id": "m18",
+   "file": "polaris/19_g4_hybrid.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 13 passed in 2.98s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_hybrid_order_is_the_native_order"
+  },
+  {
+   "id": "m19",
+   "file": "polaris/19_g4_hybrid.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 14 passed in 3.00s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_trainer_sampler_reads_the_position"
+  },
+  {
+   "id": "m22",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 6 passed in 0.11s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_ebops_gate - assert (Fa..."
+  },
+  {
+   "id": "m20",
+   "file": "src/hepattn/keras/callbacks.py",
+   "env": "hybrid",
+   "outcome": "killed",
+   "summary": "1 failed in 3.14s",
+   "first_failure": "FAILED tests/keras/test_beta_pid.py::test_controller_state_survives_a_checkpoint"
+  },
+  {
+   "id": "m21",
+   "file": "src/hepattn/keras/callbacks.py",
+   "env": "hybrid",
+   "outcome": "killed",
+   "summary": "1 failed in 3.07s",
+   "first_failure": "FAILED tests/keras/test_beta_pid.py::test_controller_state_survives_a_checkpoint"
+  }
+ ],
+ "all_as_expected": true
+}

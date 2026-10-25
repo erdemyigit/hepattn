@@ -1,0 +1,10 @@
+Per-batch train loss at the converted init weights (LR 1e-30, accumulation 1, tiny CPU, dummy events, order A).
+hybrid = 19_g4_hybrid.py with G4_LOG_TERMS=1 (terms.jsonl), native = main_jax steps.csv; diff = native - hybrid.
+batch 0: hybrid 23.91289 native 23.91582 rel +1.22e-04 | object_ce -0.0001 mask_bce +0.0003 mask_dice +0.0000 l1 +0.0025 kl_div +0.0001
+batch 1: hybrid 24.82736 native 24.92240 rel +3.83e-03 | object_ce +0.0034 mask_bce +0.0075 mask_dice -0.0006 l1 +0.0825 kl_div +0.0023
+batch 2: hybrid 24.70788 native 24.70789 rel +1.54e-07 | object_ce -0.0000 mask_bce +0.0000 mask_dice +0.0000 l1 +0.0000 kl_div +0.0000
+batch 3: hybrid 23.91033 native 23.91033 rel +2.39e-07 | object_ce +0.0000 mask_bce -0.0000 mask_dice +0.0000 l1 +0.0000 kl_div +0.0000
+batch 4: hybrid 24.09628 native 24.10461 rel +3.46e-04 | object_ce +0.0006 mask_bce +0.0005 mask_dice -0.0001 l1 +0.0076 kl_div -0.0002
+batch 5: hybrid 23.99326 native 23.99323 rel -1.19e-06 | object_ce -0.0000 mask_bce -0.0000 mask_dice +0.0000 l1 -0.0000 kl_div -0.0000
+batch 6: hybrid 25.17060 native 25.17641 rel +2.31e-04 | object_ce -0.0000 mask_bce -0.0000 mask_dice +0.0000 l1 +0.0058 kl_div +0.0000
+batch 7: hybrid 24.54956 native 24.54956 rel +0.00e+00 | object_ce -0.0000 mask_bce +0.0000 mask_dice +0.0000 l1 -0.0000 kl_div +0.0000

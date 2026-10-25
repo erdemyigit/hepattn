@@ -29,6 +29,7 @@ Setup and test commands: [KERAS_NATIVE.md](../KERAS_NATIVE.md).
 | Merge of S7 into `keras-jax` (`f4aab4a`), suites on the merged tree, hls4ml-optional `.venv-jax` | [S7-merge.md](S7-merge.md) | `keras-jax` / `hepattn-keras-jax` |
 | PROF opt-in phase profiler of the native driver (`--profile-phases`, `--prefetch`, `--jax-trace`), production-dim CPU attribution, `18_loop_profile` (A100 variants, H7 pairs then the perturbation pair first; `smoke-timing` for H0; `report`); two review fixes: steady- and loop-window metrics, log-window perturbation, job-start budget, tested data positions and trace window, 76/76 mutants | [PROF.md](PROF.md) (`PROF_mutations.py`, `PROF_evidence/`) | `prof/loop` / `hepattn-prof` |
 | Merge of `prof/loop` into `keras-jax`, suites on the merged tree, profiler-off check | [PROF-merge.md](PROF-merge.md) | `keras-jax` / `hepattn-keras-jax` |
+| G4 preparation: `polaris/19_g4_compare.{py,pbs}`, `19_g4_hybrid.py` (native data order in Lightning, step-0 init, resume), hybrid `BetaPID` checkpoint state fix, local CPU end to end with kills, 21 mutants | [G4.md](G4.md) (`G4_mutations.py`, `G4_evidence/`) | `g4/compare` / `hepattn-g4` |
 
 ## Gates carried to a later stage
 
