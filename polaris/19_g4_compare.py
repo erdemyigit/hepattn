@@ -90,7 +90,7 @@ LR_RTOL = 1e-4  # native schedule in float32 (~6e-8 relative), torch OneCycleLR 
 # max |value| 2.3e-6 per output and 0 mask flips (= the 1-ulp spread of float mode, 2.1e-6); 1e-4 is a 40x margin.
 FLOAT_RTOL = 1e-4
 FLIP_FRAC = 1e-4  # boolean outputs (attention masks): differing fraction allowed in float mode (measured 0)
-PLATFORMS = {"gpu": ("cuda", None), "cpu": ("cpu", "cpu")}  # name: (torch device, JAX_PLATFORMS)
+PLATFORMS = {"gpu": ("cuda:0", None), "cpu": ("cpu", "cpu")}  # name: (torch device as Lightning names it, JAX_PLATFORMS)
 DEGENERATE = 1e-6  # |D| / |M| below this: the two hybrids coincide and the band is empty -> inconclusive
 # EBOPs band floor, in log10(EBOPs / setpoint): 0.01 dex (2.3%), 1/22 of the initial distance to the setpoint
 # (log10(2.511e11 / 1.5e11) = 0.224, 03_make_config.py). EBOPs move in discrete bit steps, so two hybrids can coincide
