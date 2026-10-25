@@ -331,6 +331,15 @@ class BetaPID(Callback):
         pl_module.log("train/pid_ebops", ebops, sync_dist=True)
         pl_module.log("train/pid_saturated", float(self.controller.saturated), sync_dist=True)
 
+    # Lightning stores a callback's state_dict() in the checkpoint and gives it back on resume. Without these the
+    # controller restarted unseeded after every resume (a preempted sweep, a chained G4 run): its next step returned
+    # init_beta again. The native driver keeps the same state (Trainer.meta "beta_controller").
+    def state_dict(self) -> dict:
+        return self.controller.state_dict()
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        self.controller.load_state_dict(state_dict)
+
 
 def _delegate(name: str, attr: str | None = None) -> property:
     attr = attr or name

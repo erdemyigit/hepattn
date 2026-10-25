@@ -396,3 +396,26 @@ def test_scheduler_ramp_is_the_shared_ramp():
     for step, beta in expected.items():
         sched.on_train_batch_start(SimpleNamespace(global_step=step), module, None, 0)
         assert module.model.keras_layers()[0]._beta.value == pytest.approx(beta, rel=1e-12, abs=0), step  # noqa: SLF001
+
+
+def test_controller_state_survives_a_checkpoint():
+    """Lightning saves ``BetaPID.state_dict()`` and restores it on resume: the resumed callback continues the run.
+
+    Control: a fresh callback (the behaviour before ``state_dict`` existed) restarts at ``init_beta``.
+    """
+    readings = [1.7e15, 1.6e15, 1.5e15, 1.3e15, 1.2e15, 1.25e15]
+    kwargs = {"target_ebops": TARGET, "init_beta": INIT_BETA, "i": 0.5, "warmup_epochs": 1}
+    full = BetaPID(**kwargs)
+    betas = [run_hook(full, FakeModule([e]), epoch)[0] for epoch, e in enumerate(readings)]
+
+    first = BetaPID(**kwargs)
+    for epoch, e in enumerate(readings[:3]):
+        run_hook(first, FakeModule([e]), epoch)
+    saved = first.state_dict()
+    resumed, fresh = BetaPID(**kwargs), BetaPID(**kwargs)
+    resumed.load_state_dict(saved)
+    after = [run_hook(resumed, FakeModule([e]), epoch)[0] for epoch, e in enumerate(readings[3:], start=3)]
+    control = [run_hook(fresh, FakeModule([e]), epoch)[0] for epoch, e in enumerate(readings[3:], start=3)]
+    assert after == betas[3:]
+    assert control[0] == pytest.approx(INIT_BETA, rel=1e-6, abs=0)  # the seeding carries HGQ2's 1e-9 offset
+    assert abs(betas[3] / INIT_BETA - 1) > 0.05, "the reference must have moved beta away from init_beta"
