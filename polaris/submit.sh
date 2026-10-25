@@ -7,6 +7,7 @@
 #   bash polaris/submit.sh 05_sweep.pbs --depend afterany:1234567.polaris
 #
 #   G3_JOBS=jax-g1:32,jax-precision:32,hybrid-tf32:16 bash polaris/submit.sh 17_g3_step.pbs   # job knobs: see JOB_VARS
+#   G4_STAGE=train G4_TAG=g4a G4_QUEUE=preemptable G4_WALLTIME=14:00:00 bash polaris/submit.sh 19_g4_compare.pbs
 #
 # Prints the job id. Use `qstat -u $USER` to watch, `qdel <id>` to cancel.
 set -euo pipefail
@@ -59,6 +60,9 @@ case "$BASE" in
   17_g3_step.pbs)       DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
   # default: 10 fits of 320 micro-batches (9 profiled; compile-cache hits after the first of each XLA-flag set) + 3 loader runs
   18_loop_profile.pbs)  DEF_QUEUE="${QUEUE_DEBUG:-debug}"; DEF_WALL="01:00:00" ;;
+  # G4: init ~15 min in debug; a train job runs the 4 arms in parallel and resumes, so the queue and walltime are chosen
+  # in the submit shell: G4_QUEUE=preemptable G4_WALLTIME=14:00:00 for one long job, or the 1 h debug default for a chain
+  19_g4_compare.pbs)    DEF_QUEUE="${G4_QUEUE:-${QUEUE_DEBUG:-debug}}"; DEF_WALL="${G4_WALLTIME:-01:00:00}" ;;
   *)            DEF_QUEUE="${QUEUE_DEBUG:-debug}";      DEF_WALL="${WALLTIME_SMOKE:-00:20:00}" ;;
 esac
 QUEUE="${QUEUE:-$DEF_QUEUE}"
@@ -73,11 +77,11 @@ ARGS=(-A "$PBS_PROJECT" -l "filesystems=$PBS_FILESYSTEMS" -q "$QUEUE"
       -l "walltime=$DEF_WALL" -o "$LOGDIR/${BASE%.pbs}.log")
 [ -n "$DEPEND" ] && ARGS+=(-W "depend=$DEPEND")
 
-# Job knobs that the .pbs scripts read (16_jax_smoke, 17_g3_step, 18_loop_profile). qsub runs here without -V, so the job does not see
+# Job knobs that the .pbs scripts read (16_jax_smoke, 17_g3_step, 18_loop_profile, 19_g4_compare). qsub runs here without -V, so the job does not see
 # the submit shell's environment. The knobs that are set (an empty value counts: SMOKE_XLA_FLAGS= drops the flag) go
 # into a file of `export` lines, and the job gets only that file's path (-v SUBMIT_ENV_FILE=...), because qsub -v
 # splits its list at commas (G3_JOBS holds commas).
-JOB_VARS=(G3_JOBS G3_ARGS G3_DATA_FILE SMOKE_ARGS SMOKE_XLA_FLAGS PROF_VARIANTS PROF_ARGS PROF_XLA_FLAGS JAX_COMPILATION_CACHE_DIR)
+JOB_VARS=(G3_JOBS G3_ARGS G3_DATA_FILE SMOKE_ARGS SMOKE_XLA_FLAGS PROF_VARIANTS PROF_ARGS PROF_XLA_FLAGS G4_STAGE G4_TAG G4_ROOT G4_ARGS G4_ARMS JAX_COMPILATION_CACHE_DIR)
 ENV_FILE=""
 for v in "${JOB_VARS[@]}"; do
   [ -n "${!v+x}" ] || continue

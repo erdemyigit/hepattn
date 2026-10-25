@@ -1,0 +1,101 @@
+#!/bin/bash -l
+#PBS -N hgq_g4
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=01:00:00
+#PBS -r y
+# NOTE: -q and -l walltime= below are FALLBACKS for a bare qsub.
+# submit.sh overrides both (G4_QUEUE / G4_WALLTIME in the submit shell, else QUEUE_DEBUG and 1 h).
+#PBS -q debug
+#PBS -j oe
+#PBS -o logs/19_g4_compare.log
+#
+# Gate G4 (docs/hgq/KERAS_JAX_PLAN.md section 4, "S8 / G4"): JAX vs hybrid training from the same converted initial
+# weights and the same data order, K = 5000 optimizer steps, fp32 (polaris/19_g4_compare.py has the design and the
+# verdict). One stage per job (G4_STAGE):
+#   G4_STAGE=init   G4_TAG=g4a bash polaris/submit.sh 19_g4_compare.pbs      # ~15 min: config, hybrid init, conversion
+#   G4_STAGE=train  G4_TAG=g4a bash polaris/submit.sh 19_g4_compare.pbs --depend afterok:<init job>
+#   G4_STAGE=report G4_TAG=g4a bash polaris/submit.sh 19_g4_compare.pbs      # also run by the train stage at the end
+# train runs every arm of G4_ARMS on its own GPU of this node (default: hybrid-a hybrid-b jax jax-b on GPUs 0-3), each
+# resuming from its own last checkpoint, so a chain of train jobs (--depend afterany:<previous>) continues the run;
+# a train job that finds every arm done only writes the report. When the gate arms are done, it writes the report.
+# (submit.sh hands G4_STAGE, G4_TAG, G4_ROOT, G4_ARGS, G4_ARMS and JAX_COMPILATION_CACHE_DIR to the job.)
+#   G4_ARGS  extra options of the stage's command (init: e.g. "--num-train 400000"; report: e.g. "--band 1.5")
+#   G4_ARMS  arms to train (drop jax-b to leave GPU 3 idle: G4_ARMS="hybrid-a hybrid-b jax")
+#   G4_ROOT  run directories (default $WORK_ROOT/g4); the report goes to logs/g4_<tag>.json
+# Envs: $REPO/.venv (hybrid, 01_setup_env.sh) and $REPO/.venv-jax (ONE-TIME SETUP in 16_jax_smoke.pbs).
+# -r y: a preempted job (preemptable queue) is requeued and resumes from the checkpoints.
+set -uo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+source polaris/env.sh
+# the job knobs set in the submit shell (polaris/submit.sh writes them to a file: qsub passes no environment)
+if [ -n "${SUBMIT_ENV_FILE:-}" ]; then
+  echo "job variables from $SUBMIT_ENV_FILE:"; cat "$SUBMIT_ENV_FILE"
+  source "$SUBMIT_ENV_FILE"
+fi
+export PYTHONNOUSERSITE=1 TORCHDYNAMO_DISABLE=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# real JAX device memory instead of the default 75% preallocation (as 15_g2_forward.pbs)
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+# persistent compilation cache shared by the keras_native jobs (~2 min per program on an A100 otherwise)
+export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-$WORK_ROOT/jax_cache}"
+
+source polaris/repo_dir.sh
+REPO="$HEPATTN_DIR"; cd "$REPO"
+mkdir -p logs
+
+HPY="$REPO/.venv/bin/python"
+JPY="$REPO/.venv-jax/bin/python"
+[ -x "$HPY" ] || { echo "ERROR: $HPY missing; run polaris/01_setup_env.sh"; exit 1; }
+[ -x "$JPY" ] || { echo "ERROR: $JPY missing; see ONE-TIME SETUP in polaris/16_jax_smoke.pbs"; exit 1; }
+[ -f polaris/19_g4_compare.py ] || { echo "ERROR: $REPO has no polaris/19_g4_compare.py (update the clone)"; exit 1; }
+TAG="${G4_TAG:?set G4_TAG (the name of this G4 run) in the submit shell}"
+ROOT="${G4_ROOT:-$WORK_ROOT/g4}"
+STAGE="${G4_STAGE:-train}"
+G4=("$JPY" polaris/19_g4_compare.py)
+JOB="${PBS_JOBID:-local}"
+echo "=== G4 $STAGE tag=$TAG root=$ROOT job=$JOB node=$(hostname) clone=$REPO ($(git -C "$REPO" rev-parse --short HEAD)) ==="
+nvidia-smi --query-gpu=index,name,memory.total --format=csv
+free -g | head -2
+
+report() {
+  PYTHONPATH="$REPO/src" "${G4[@]}" report --root "$ROOT" --tag "$TAG" --out "logs/g4_${TAG}.json" ${1:-}
+}
+
+case "$STAGE" in
+  init)
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$REPO/src" "${G4[@]}" init --root "$ROOT" --tag "$TAG" --data-dir "$DATA_ROOT" \
+      --hybrid-python "$HPY" --jax-python "$JPY" ${G4_ARGS:-}
+    echo "G4-INIT-EXIT-$?"
+    ;;
+  train)
+    read -r -a ARMS <<< "${G4_ARMS:-hybrid-a hybrid-b jax jax-b}"
+    NGPU=$(nvidia-smi -L | wc -l)
+    [ "${#ARMS[@]}" -le "$NGPU" ] || { echo "ERROR: ${#ARMS[@]} arms > $NGPU GPUs"; exit 1; }
+    pids=()
+    for i in "${!ARMS[@]}"; do
+      arm="${ARMS[$i]}"
+      echo "  GPU $i -> $arm  (logs/g4_${TAG}_${arm}_${JOB}.out; child output in $ROOT/$TAG/$arm/logs/)"
+      CUDA_VISIBLE_DEVICES="$i" PYTHONPATH="$REPO/src" "${G4[@]}" run --root "$ROOT" --tag "$TAG" --arm "$arm" \
+        --hybrid-python "$HPY" --jax-python "$JPY" --compile-cache "$JAX_COMPILATION_CACHE_DIR" \
+        > "logs/g4_${TAG}_${arm}_${JOB}.out" 2>&1 &
+      pids+=($!)
+    done
+    # memory of the node while the arms load and train (each loads the train set; see G4_POLARIS_COMMANDS.md)
+    ( while sleep 600; do echo "[$(date +%H:%M)] $(free -g | awk 'NR==2{print "mem used " $3 " / " $2 " GB"}')"; done ) &
+    mon=$!
+    fail=0
+    for p in "${pids[@]}"; do wait "$p" || fail=$((fail + 1)); done
+    kill "$mon" 2>/dev/null
+    echo "=== arms finished: $fail with a nonzero exit ==="
+    PYTHONPATH="$REPO/src" "${G4[@]}" status --root "$ROOT" --tag "$TAG"
+    report
+    echo "G4-TRAIN-EXIT-$fail"
+    ;;
+  report)
+    report "${G4_ARGS:-}"
+    echo "G4-REPORT-EXIT-$?"
+    ;;
+  *)
+    echo "ERROR: G4_STAGE must be init, train or report, got $STAGE"; exit 1 ;;
+esac

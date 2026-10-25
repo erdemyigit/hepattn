@@ -140,6 +140,7 @@ uninterrupted production run. Coordinate before you do.
 | `04_smoke.pbs` | **gate**: real GPU, real data, bf16 steps, asserts quantizers exist and train |
 | `05_sweep.pbs` | **main**: N GPUs × independent beta points, self-chaining across walltime |
 | `06_ddp_validate.pbs` | optional: tests whether DDP is safe on this stack before trusting it |
+| `19_g4_compare.pbs` / `.py`, `19_g4_hybrid.py` | gate G4: JAX vs two hybrid seeds from the same converted weights and data order, K = 5000 steps; stages `init`, `train` (4 arms on one node, resumable), `report` (`G4_STAGE`); see `19_g4_compare.py` |
 | `submit.sh` | injects `-A` / `-l filesystems=` / `-q` from `env.sh` |
 
 ## Troubleshooting
