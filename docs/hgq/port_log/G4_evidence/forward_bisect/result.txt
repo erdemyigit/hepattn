@@ -1,0 +1,21 @@
+# sources: layers whose recorded inputs agree (1e-6 x p99 |x|) but whose output differs (hybrid vs native, quantized, production CPU)
+SOURCE #16 encoder_l0_attn_q_proj_iq (Quantizer) inputs equal, out0 differs in 6/1376256
+SOURCE #19 encoder_l0_attn_q_proj (QDense) inputs equal, out0 differs in 1424/1376256
+SOURCE #20 encoder_l0_attn_k_proj_iq (Quantizer) inputs equal, out0 differs in 6/1376256
+SOURCE #23 encoder_l0_attn_k_proj (QDense) inputs equal, out0 differs in 1423/1376256
+SOURCE #24 encoder_l0_attn_v_proj_iq (Quantizer) inputs equal, out0 differs in 6/1376256
+SOURCE #27 encoder_l0_attn_v_proj (QDense) inputs equal, out0 differs in 1442/1376256
+
+# first layers above 5% relative difference
+#    0 innet0_net_hidden0_x1_iq                                Quantizer            maxrel 0.00e+00 frac>1% 0.0000
+#  151 encoder_l1_attn_project_softmax_inv_table_iq            Quantizer            maxrel 2.00e+00 frac>1% 0.0133
+#  152 encoder_l1_attn_project_softmax_inv_table_oq            Quantizer            maxrel 2.98e-01 frac>1% 0.0020
+#  153 encoder_l1_attn_project_softmax_inv_table               QUnaryFunctionLUT    maxrel 2.98e-01 frac>1% 0.0020
+#  154 encoder_l1_attn_project_softmax                         QSoftmax             maxrel 2.98e-01 frac>1% 0.0003
+#  155 quantizer_18                                            Quantizer            maxrel 2.98e-01 frac>1% 0.0003
+#  157 multiple_quantizers_9                                   MultipleQuantizers   maxrel 2.98e-01 frac>1% 0.0003
+#  158 encoder_l1_attn_project_av                              QEinsum              maxrel 2.73e-01 frac>1% 0.0001
+#  159 encoder_l1_attn_project                                 ProjectCore          maxrel 2.73e-01 frac>1% 0.0001
+#  160 encoder_l1_attn_out_proj_iq                             Quantizer            maxrel 1.96e+00 frac>1% 0.0002
+#  163 encoder_l1_attn_out_proj                                QDense               maxrel 7.37e-01 frac>1% 0.0018
+#  164 encoder_l1_ffn_hidden0_x1_iq                            Quantizer            maxrel 7.24e-01 frac>1% 0.0030

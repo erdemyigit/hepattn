@@ -5,7 +5,7 @@
    "file": null,
    "env": "jax",
    "outcome": "pass",
-   "summary": "15 passed in 2.96s",
+   "summary": "17 passed in 4.03s",
    "first_failure": ""
   },
   {
@@ -13,7 +13,7 @@
    "file": null,
    "env": "hybrid",
    "outcome": "pass",
-   "summary": "1 passed in 3.09s",
+   "summary": "1 passed in 5.81s",
    "first_failure": ""
   },
   {
@@ -21,7 +21,7 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed in 0.06s",
+   "summary": "1 failed in 0.08s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_coverage_formula_and_monte_carlo"
   },
   {
@@ -29,7 +29,7 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 1 passed in 0.11s",
+   "summary": "1 failed, 1 passed in 0.17s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_band_strict_inside_and_degenerate"
   },
   {
@@ -37,7 +37,7 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 1 passed in 0.11s",
+   "summary": "1 failed, 1 passed in 0.17s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_band_strict_inside_and_degenerate"
   },
   {
@@ -45,7 +45,7 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 3 passed in 0.11s",
+   "summary": "1 failed, 3 passed in 0.19s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_preconditions - Asserti..."
   },
   {
@@ -53,7 +53,7 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 3 passed in 0.11s",
+   "summary": "1 failed, 3 passed in 0.16s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_preconditions - Asserti..."
   },
   {
@@ -61,7 +61,7 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 6 passed in 0.11s",
+   "summary": "1 failed, 7 passed in 0.22s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_ebops_gate - AssertionE..."
   },
   {
@@ -69,7 +69,7 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 6 passed in 0.11s",
+   "summary": "1 failed, 7 passed in 0.22s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_ebops_gate - assert (no..."
   },
   {
@@ -77,7 +77,7 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 6 passed in 0.11s",
+   "summary": "1 failed, 7 passed in 0.17s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_ebops_gate - AssertionE..."
   },
   {
@@ -85,7 +85,7 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 7 passed in 0.12s",
+   "summary": "1 failed, 8 passed in 0.19s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_resumed_rows_later_wins - asser..."
   },
   {
@@ -93,7 +93,7 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 9 passed in 0.11s",
+   "summary": "1 failed, 10 passed in 0.20s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_checkpoint_steps_never_on_an_epoch_end"
   },
   {
@@ -101,7 +101,7 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 10 passed in 0.20s",
+   "summary": "1 failed, 11 passed in 0.31s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_g4_config - assert (10, 500, 10..."
   },
   {
@@ -109,7 +109,7 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed in 0.06s",
+   "summary": "1 failed in 0.10s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_coverage_formula_and_monte_carlo"
   },
   {
@@ -117,15 +117,47 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 4 passed in 0.11s",
-   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_forward_tolerance - AssertionEr..."
+   "summary": "1 failed, 4 passed in 0.19s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_float_gate - AssertionError: as..."
+  },
+  {
+   "id": "m23",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 4 passed in 0.16s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_float_gate - AssertionError: as..."
+  },
+  {
+   "id": "m24",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 3 passed in 0.20s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_preconditions - Asserti..."
+  },
+  {
+   "id": "m25",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 3 passed in 0.18s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_preconditions - Asserti..."
+  },
+  {
+   "id": "m26",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 5 passed in 0.19s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_forward_errors - AssertionError..."
   },
   {
    "id": "m14",
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 5 passed in 0.12s",
+   "summary": "1 failed, 6 passed in 0.22s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_incomplete_and_inconclusive"
   },
   {
@@ -133,7 +165,7 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 11 passed in 0.29s",
+   "summary": "1 failed, 12 passed in 0.46s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_arm_hybrid_config_paths_and_seed"
   },
   {
@@ -141,7 +173,7 @@
    "file": "polaris/19_g4_hybrid.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 12 passed in 2.49s",
+   "summary": "1 failed, 13 passed in 4.10s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_data_position - AssertionError:..."
   },
   {
@@ -149,7 +181,7 @@
    "file": "polaris/19_g4_hybrid.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 13 passed in 2.97s",
+   "summary": "1 failed, 14 passed in 4.99s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_hybrid_order_is_the_native_order"
   },
   {
@@ -157,7 +189,7 @@
    "file": "polaris/19_g4_hybrid.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 13 passed in 2.98s",
+   "summary": "1 failed, 14 passed in 5.22s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_hybrid_order_is_the_native_order"
   },
   {
@@ -165,7 +197,7 @@
    "file": "polaris/19_g4_hybrid.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 14 passed in 3.00s",
+   "summary": "1 failed, 15 passed in 5.40s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_trainer_sampler_reads_the_position"
   },
   {
@@ -173,15 +205,23 @@
    "file": "polaris/19_g4_compare.py",
    "env": "jax",
    "outcome": "killed",
-   "summary": "1 failed, 6 passed in 0.11s",
+   "summary": "1 failed, 7 passed in 0.20s",
    "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_verdict_ebops_gate - assert (Fa..."
+  },
+  {
+   "id": "m27",
+   "file": "polaris/19_g4_compare.py",
+   "env": "jax",
+   "outcome": "killed",
+   "summary": "1 failed, 16 passed in 5.39s",
+   "first_failure": "FAILED tests/polaris/test_g4_compare.py::test_run_refuses_an_init_whose_forward_check_fails"
   },
   {
    "id": "m20",
    "file": "src/hepattn/keras/callbacks.py",
    "env": "hybrid",
    "outcome": "killed",
-   "summary": "1 failed in 3.14s",
+   "summary": "1 failed in 5.54s",
    "first_failure": "FAILED tests/keras/test_beta_pid.py::test_controller_state_survives_a_checkpoint"
   },
   {
@@ -189,7 +229,7 @@
    "file": "src/hepattn/keras/callbacks.py",
    "env": "hybrid",
    "outcome": "killed",
-   "summary": "1 failed in 3.07s",
+   "summary": "1 failed in 5.63s",
    "first_failure": "FAILED tests/keras/test_beta_pid.py::test_controller_state_survives_a_checkpoint"
   }
  ],
