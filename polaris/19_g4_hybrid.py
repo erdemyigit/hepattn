@@ -355,6 +355,9 @@ def standalone_forward(config: str, ckpt: str, batch: str, out_prefix: str, devi
     def tensors(arrays):
         return {k: torch.from_numpy(v).to(device) for k, v in arrays.items()}
 
+    # The torch submodules (posenc.B, input nets) must already be on ``device``: load_keras_state runs a forward
+    # on ``device`` inputs to build the keras layers.
+    model.to(device)
     load_keras_state(model, ckpt, tensors(inputs))
     model.to(device)
     written = {}
