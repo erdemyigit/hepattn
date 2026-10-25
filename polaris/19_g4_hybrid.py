@@ -29,6 +29,7 @@ resume from a step checkpoint continues the epoch where it stopped (Lightning re
 loader at the start of the epoch otherwise). ``limit_train_batches`` must be an integer multiple of the accumulation.
 """
 
+import contextlib
 import csv
 import json
 import math
@@ -309,6 +310,64 @@ class G4Kill(pl.Callback):
             os._exit(75)
 
 
+FORWARD_MODES = ("quant", "float", "ulp")
+
+
+def read_batch(path: str) -> dict[str, np.ndarray]:
+    """The ``in::<key>`` arrays of an npz (``hybrid_forward.npz``): the init batch."""
+    with np.load(path) as data:
+        return {k.removeprefix("in::"): data[k] for k in data.files if k.startswith("in::")}
+
+
+def ulp_up(inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Every float32 input moved one ulp up (``np.nextafter``): the size of a platform's rounding difference."""
+    return {k: np.nextafter(v, np.float32(np.inf)) if v.dtype == np.float32 else v for k, v in inputs.items()}
+
+
+@contextlib.contextmanager
+def quantizers_off():
+    """Every HGQ2 ``Quantizer`` returns its input (float mode: the converted weights without rounding, WRAP or tables)."""
+    from hgq.quantizer import Quantizer  # noqa: PLC0415
+
+    original = Quantizer.call
+    Quantizer.call = lambda self, inputs, training=None: inputs  # noqa: ARG005  (Quantizer.call signature)
+    try:
+        yield
+    finally:
+        Quantizer.call = original
+
+
+def standalone_forward(config: str, ckpt: str, batch: str, out_prefix: str, device: str, modes: list[str]) -> dict[str, str]:
+    """``forward`` command: the hybrid model from the config and a Lightning checkpoint, eval mode, on ``device``, without
+    Lightning (on the CPU it equals the init stage's Lightning forward bit for bit). Writes ``<out_prefix>_<mode>.npz``.
+    """
+    import yaml  # noqa: PLC0415
+
+    from hepattn.experiments.clic.port_to_keras import build_keras_maskformer_from_config, load_keras_state  # noqa: PLC0415
+    from hepattn.keras import set_keras_default_device  # noqa: PLC0415
+
+    torch.set_float32_matmul_precision("highest")
+    set_keras_default_device(device)
+    cfg = yaml.safe_load(Path(config).read_text())["model"]["model"]
+    model = build_keras_maskformer_from_config(cfg, quant=cfg["init_args"].get("quant")).eval()
+    inputs = read_batch(batch)
+
+    def tensors(arrays):
+        return {k: torch.from_numpy(v).to(device) for k, v in arrays.items()}
+
+    load_keras_state(model, ckpt, tensors(inputs))
+    model.to(device)
+    written = {}
+    for mode in modes:
+        with torch.no_grad(), quantizers_off() if mode == "float" else contextlib.nullcontext():
+            outputs = flatten(model(tensors(ulp_up(inputs) if mode == "ulp" else inputs)))
+        path = f"{out_prefix}_{mode}.npz"
+        np.savez(path, **{k: v.detach().cpu().numpy() for k, v in outputs.items()})
+        written[mode] = path
+    print("RESULT " + json.dumps({"device": device, "written": written, "torch": torch.__version__}), flush=True)
+    return written
+
+
 def g4_callbacks(command: str) -> list[pl.Callback]:
     if command == "init":
         return [G4SaveInit(os.environ["G4_INIT_DIR"])]
@@ -335,8 +394,19 @@ def _init_with_g4(self, *args, **kwargs):
 
 def main(argv: list[str]) -> int:
     command, rest = argv[0], argv[1:]
+    if command == "forward":
+        import argparse  # noqa: PLC0415
+
+        p = argparse.ArgumentParser(prog="19_g4_hybrid.py forward")
+        for name in ("--config", "--ckpt", "--batch", "--out-prefix"):
+            p.add_argument(name, required=True)
+        p.add_argument("--device", default="cpu")
+        p.add_argument("--modes", default=",".join(FORWARD_MODES))
+        a = p.parse_args(rest)
+        standalone_forward(a.config, a.ckpt, a.batch, a.out_prefix, a.device, a.modes.split(","))
+        return 0
     if command not in {"init", "fit"}:
-        raise SystemExit(f"usage: 19_g4_hybrid.py init|fit <LightningCLI arguments>, got {command!r}")
+        raise SystemExit(f"usage: 19_g4_hybrid.py init|fit <LightningCLI arguments> | forward ..., got {command!r}")
     _EXTRA_CALLBACKS[:] = g4_callbacks(command)
     sys.argv[1:] = []  # the CLI gets its arguments through args= only
     pl.Trainer.__init__ = _init_with_g4

@@ -39,8 +39,9 @@ epoch: BetaPID did not step (beta stayed at init_beta, steps.csv after the resum
 bit for bit (loss, LR, beta). The native driver has no such case (it resumed bit for bit across an epoch boundary).
 
 Verdict (``verdict``). Preconditions (else INVALID): every gate arm has its validation row at K; the LR of every
-matched logged update agrees between JAX and hybrid A (``LR_RTOL``); the converted weights reproduce the hybrid's mask
-and class logits on the init batch (``FORWARD_RTOL`` of max |logit|). Gate 1, validation loss at K: the plan asks for the
+matched logged update agrees between JAX and hybrid A (``LR_RTOL``); in float mode (every HGQ2 Quantizer the identity)
+the converted weights reproduce the hybrid's outputs on the init batch on every platform (``FLOAT_RTOL``; the
+quantized comparison is reported, see ``FLOAT_RTOL``). Gate 1, validation loss at K: the plan asks for the
 JAX value "within the spread of two hybrid seeds". With two exchangeable runs X1, X2 and a third X3 from the same
 normal distribution, P(X3 in [min, max]) = 1/3: the literal rule fails a correct port two times in three. So the band
 is M +- c |D| (M, D the mean and difference of the hybrids); (X3 - M) / |D| = sqrt(3/4) T with T standard Cauchy, so
@@ -79,11 +80,17 @@ GATE_ARMS = ("hybrid-a", "hybrid-b", "jax")
 TINY = {"dim": 16, "heads": 2, "enc_layers": 1, "dec_layers": 1, "linformer_k": 8, "nodes": 64, "queries": 16}
 C_DEFAULT = 5.47  # band half-width in |D|: 90% coverage of an exchangeable third run (module docstring)
 LR_RTOL = 1e-4  # native schedule in float32 (~6e-8 relative), torch OneCycleLR in float64
-# Converted weights vs the hybrid on the init batch, |diff| / max|logit| per mask / class logit output. A quantized
-# network turns float ulps into whole LSB steps: measured 0.0115 / 2.24 = 5e-3 (final mask logits, tiny CPU init, one
-# datalane step 2^-8 x 3), 0 for the class logits; a mis-mapped tensor gives O(1): S7 controls 1.20 (one weight bit
-# less) and 10.6 (unconverted model) on mask logits of max ~2. 0.05 sits 10x from both.
-FORWARD_RTOL = 0.05
+# Forward check of the converted weights (``forward_check``), on the init batch. The QUANTIZED model is chaotic at the
+# init weights: a 1-ulp change of the float inputs moves the hybrid's own final mask logits by up to 235 (scale 125,
+# median 1.6) and flips 19k of 768k layer-0 attention-mask entries (production size, CPU, 32 real events,
+# docs/hgq/port_log/G4.md "Forward check"), because rounding ties flip one LSB and a WRAP-overflowing lane (the
+# softmax inverse-table input: sums up to 42 into a +-16 lane) turns that into full-range jumps. A quantized
+# hybrid-vs-native comparison therefore cannot gate; it is reported next to the hybrid's own 1-ulp spread.
+# The GATE is float mode (every HGQ2 Quantizer the identity, the same converted weights): measured max |diff| /
+# max |value| 2.3e-6 per output and 0 mask flips (= the 1-ulp spread of float mode, 2.1e-6); 1e-4 is a 40x margin.
+FLOAT_RTOL = 1e-4
+FLIP_FRAC = 1e-4  # boolean outputs (attention masks): differing fraction allowed in float mode (measured 0)
+PLATFORMS = {"gpu": ("cuda", None), "cpu": ("cpu", "cpu")}  # name: (torch device, JAX_PLATFORMS)
 DEGENERATE = 1e-6  # |D| / |M| below this: the two hybrids coincide and the band is empty -> inconclusive
 # EBOPs band floor, in log10(EBOPs / setpoint): 0.01 dex (2.3%), 1/22 of the initial distance to the setpoint
 # (log10(2.511e11 / 1.5e11) = 0.224, 03_make_config.py). EBOPs move in discrete bit steps, so two hybrids can coincide
@@ -184,6 +191,8 @@ def make_config(s: dict, init_dir: Path) -> Path:
         cfg["data"]["dummy_data"] = True
         # a larger LR, so that a few dummy-data steps move the loss and the beta controller (as 16_jax_smoke --tiny)
         cfg["model"]["lrs_config"].update(initial=2e-4, max=2e-3, end=2e-5, pct_start=0.3)
+    if s.get("accelerator"):
+        cfg["trainer"]["accelerator"] = s["accelerator"]
     out = init_dir / "config.yaml"
     out.write_text(yaml.safe_dump(cfg, sort_keys=False))
     return out
@@ -237,6 +246,7 @@ def settings_from(args) -> dict:
     )
     s = {key: getattr(args, key) for key in keys}
     s["data_dir"] = args.data_dir
+    s["accelerator"] = getattr(args, "accelerator", "")
     return s
 
 
@@ -273,10 +283,8 @@ def cmd_init(args) -> int:
     cmd += ["--out", native, "--report", init_dir / "convert_report.json", "--overwrite"]
     if run_logged(cmd, jax_env, log) != 0:
         raise SystemExit(f"conversion failed; see {log}")
-    cmd = [args.jax_python, __file__, "native-forward", "--config", config, "--ckpt", native, "--hybrid", init_dir / "hybrid_forward.npz"]
-    cmd += ["--out", init_dir / "forward_check.json"]
-    if run_logged(cmd, jax_env, log) != 0:
-        raise SystemExit(f"native forward check failed; see {log}")
+    platforms = ["cpu"] if (s["tiny"] or s.get("accelerator") == "cpu") else ["gpu", "cpu"]
+    check = run_forward_check(init_dir, platforms, args.hybrid_python, args.jax_python, log)
 
     files = {p.name: sha256(p) for p in sorted(init_dir.iterdir()) if p.is_file() and p.suffix in {".yaml", ".ckpt", ".npz", ".json"}}
     manifest = {
@@ -291,12 +299,12 @@ def cmd_init(args) -> int:
         "init_ckpt": str(init_dir / "hybrid_init.ckpt"),
         "native_init": str(native),
         "files_sha256": files,
-        "forward_check": json.loads((init_dir / "forward_check.json").read_text()),
+        "forward_check": check,
         "target_ebops": target_ebops(config),
         "complete": True,
     }
     manifest_path.write_text(json.dumps(manifest, indent=1) + "\n")
-    print(json.dumps({k: manifest[k] for k in ("tag", "git", "seeds", "files_sha256", "forward_check")}, indent=1))
+    print(json.dumps({k: manifest[k] for k in ("tag", "git", "seeds", "files_sha256")} | {"forward": summarize_forward(check)}, indent=1))
     return 0
 
 
@@ -317,12 +325,18 @@ def target_ebops(config: Path) -> float | None:
 
 
 def forward_errors(ref: dict, got: dict) -> dict:
-    """Per output: max |native - hybrid| (padded mask-logit slots excluded), the reference scale, flips for booleans."""
+    """Per output: max and median |got - ref| (padded mask-logit slots excluded), the reference scale; flips for booleans.
+
+    Raises:
+        KeyError: If the output keys differ.
+    """
     import numpy as np  # noqa: PLC0415
 
+    if set(ref) != set(got):
+        raise KeyError(f"output keys differ: {sorted(set(ref) ^ set(got))}")
     out = {}
     for key, value in ref.items():
-        other = np.asarray(got[key])
+        value, other = np.asarray(value), np.asarray(got[key])
         if value.dtype == bool:
             out[key] = {"flips": int((value != other).sum()), "n": int(value.size)}
             continue
@@ -330,55 +344,178 @@ def forward_errors(ref: dict, got: dict) -> dict:
         if not keep.any():
             continue
         diff = np.abs(value[keep].astype(np.float64) - other[keep].astype(np.float64))
-        out[key] = {"max_abs": float(diff.max()), "ref_max_abs": float(np.abs(value[keep]).max())}
+        scale = float(np.abs(value[keep]).max())
+        out[key] = {
+            "max_abs": float(diff.max()),
+            "q50_abs": float(np.median(diff)),
+            "ref_max_abs": scale,
+            "frac_gt_1pct": float((diff > 0.01 * scale).mean()),
+        }
     return out
 
 
-def forward_ok(errors: dict, rtol: float = FORWARD_RTOL) -> bool:
-    """The precondition: every mask / class logit within ``rtol`` of its max |value|."""
-    logits = {k: v for k, v in errors.items() if "logit" in k and "max_abs" in v}
-    return bool(logits) and all(v["max_abs"] <= rtol * max(v["ref_max_abs"], 1.0) for v in logits.values())
+def float_ok(errors: dict, rtol: float = FLOAT_RTOL, flip_frac: float = FLIP_FRAC) -> bool:
+    """The float-mode gate: every float output within ``rtol`` of its max |value|, booleans within ``flip_frac``."""
+    floats = [v for v in errors.values() if "max_abs" in v]
+    flips = [v for v in errors.values() if "flips" in v]
+    return (
+        bool(floats)
+        and all(v["max_abs"] <= rtol * max(v["ref_max_abs"], 1e-12) for v in floats)
+        and all(v["flips"] <= flip_frac * v["n"] for v in flips)
+    )
+
+
+def forward_ok(check: dict | None) -> bool:
+    """The precondition from ``forward_check.json``: float mode passes on every platform (recomputed with this file's
+    tolerances). An old-format check (quantized only, no ``platforms``) does not pass: re-run ``init --redo-forward``.
+    """
+    platforms = (check or {}).get("platforms") or {}
+    return bool(platforms) and all(float_ok(p["float"]) for p in platforms.values())
+
+
+def load_npz(path: Path) -> dict:
+    import numpy as np  # noqa: PLC0415
+
+    with np.load(path) as data:
+        return {k: data[k] for k in data.files}
+
+
+def run_forward_check(init_dir: Path, platforms: list[str], hybrid_python: str, jax_python: str, log: Path) -> dict:
+    """The forward matrix on the init batch (``hybrid_forward.npz`` in:: keys): per platform the hybrid (quant, float,
+    quant +1 ulp; standalone ``19_g4_hybrid.py forward``) and the native model (quant, float); float hybrid vs native is
+    the gate, the rest is reported (module docstring, ``FLOAT_RTOL``). Writes ``forward_check.json``.
+
+    Raises:
+        SystemExit: If a forward process fails.
+    """
+    config, batch = init_dir / "config.yaml", init_dir / "hybrid_forward.npz"
+    fdir = init_dir / "forward"
+    fdir.mkdir(exist_ok=True)
+    out: dict = {"platforms": {}, "cross_platform": {}, "float_rtol": FLOAT_RTOL, "flip_frac": FLIP_FRAC}
+    outputs: dict = {}
+    for name in platforms:
+        device, jax_platforms = PLATFORMS[name]
+        hyb = fdir / f"hybrid_{name}"
+        cmd = [hybrid_python, HYBRID_SCRIPT, "forward", "--config", config, "--ckpt", init_dir / "hybrid_init.ckpt", "--batch", batch]
+        cmd += ["--out-prefix", hyb, "--device", device]
+        if run_logged(cmd, env_with_src(KERAS_BACKEND="torch"), log) != 0:
+            raise SystemExit(f"hybrid forward on {name} failed; see {log}")
+        nat = fdir / f"native_{name}"
+        cmd = [
+            jax_python,
+            __file__,
+            "native-forward",
+            "--config",
+            config,
+            "--ckpt",
+            init_dir / "native_init.npz",
+            "--batch",
+            batch,
+            "--out-prefix",
+            nat,
+        ]
+        env = env_with_src(KERAS_BACKEND="jax", **({"JAX_PLATFORMS": jax_platforms} if jax_platforms else {}))
+        if run_logged(cmd, env, log) != 0:
+            raise SystemExit(f"native forward on {name} failed; see {log}")
+        h = {m: load_npz(Path(f"{hyb}_{m}.npz")) for m in ("quant", "float", "ulp")}
+        n = {m: load_npz(Path(f"{nat}_{m}.npz")) for m in ("quant", "float")}
+        outputs[name] = (h, n)
+        errors = forward_errors(h["float"], n["float"])
+        out["platforms"][name] = {
+            "float": errors,
+            "float_ok": float_ok(errors),
+            "quantized": forward_errors(h["quant"], n["quant"]),
+            "hybrid_quantized_1ulp": forward_errors(h["quant"], h["ulp"]),
+        }
+    if len(outputs) == 2:
+        (hg, ng), (hc, nc) = outputs["gpu"], outputs["cpu"]
+        for mode in ("quant", "float"):
+            out["cross_platform"][f"hybrid_gpu_vs_cpu_{mode}"] = forward_errors(hc[mode], hg[mode])
+            out["cross_platform"][f"native_gpu_vs_cpu_{mode}"] = forward_errors(nc[mode], ng[mode])
+    lightning = {k.removeprefix("out::"): v for k, v in load_npz(batch).items() if k.startswith("out::")}
+    first = platforms[0]
+    out["lightning_init_vs_standalone"] = {"platform": first, "errors": forward_errors(lightning, outputs[first][0]["quant"])}
+    out["ok"] = forward_ok(out)
+    (init_dir / "forward_check.json").write_text(json.dumps(out, indent=1) + "\n")
+    return out
+
+
+def summarize_forward(check: dict, key: str = "final.mask.pflow_node_logit") -> dict:
+    """One line per comparison for the console: max / median |diff| of ``key`` and the float gate."""
+    rows = {}
+    for name, p in check.get("platforms", {}).items():
+        for what in ("float", "quantized", "hybrid_quantized_1ulp"):
+            e = p[what].get(key, {})
+            rows[f"{name}:{what}"] = {"max_abs": e.get("max_abs"), "q50_abs": e.get("q50_abs"), "ref_max_abs": e.get("ref_max_abs")}
+        rows[f"{name}:float_ok"] = p["float_ok"]
+    for what, errors in check.get("cross_platform", {}).items():
+        e = errors.get(key, {})
+        rows[what] = {"max_abs": e.get("max_abs"), "q50_abs": e.get("q50_abs")}
+    rows["ok"] = check.get("ok")
+    return rows
 
 
 def cmd_native_forward(args) -> int:
-    """(JAX env) The native model from the converted checkpoint on the hybrid's init batch.
+    """(JAX env, internal) The native model from the converted checkpoint on the init batch, quantized and in float
+    mode (every HGQ2 ``Quantizer`` the identity): ``<out-prefix>_quant.npz`` / ``_float.npz``. ``--control`` changes one
+    variable after loading (``transpose:<path substring>`` or ``scale:<path substring>:<factor>``): a check of the gate.
 
     Raises:
-        SystemExit: If the native and hybrid output keys differ.
+        SystemExit: If ``--control`` names no variable or more than one.
     """
     import jax  # noqa: PLC0415
     import numpy as np  # noqa: PLC0415
 
     jax.config.update("jax_default_matmul_precision", "highest")
+    from hgq.quantizer import Quantizer  # noqa: PLC0415
+
     from hepattn.keras_native import checkpoint as nckpt  # noqa: PLC0415
     from hepattn.keras_native.config import load_config  # noqa: PLC0415
 
-    with np.load(args.hybrid) as data:
-        inputs = {k.removeprefix("in::"): data[k] for k in data.files if k.startswith("in::")}
-        ref = {k.removeprefix("out::"): data[k] for k in data.files if k.startswith("out::")}
+    inputs = {k.removeprefix("in::"): v for k, v in load_npz(Path(args.batch)).items() if k.startswith("in::")}
     rc = load_config([args.config])
     model = rc.build_model()
     model(inputs, training=False)
     (tv, ntv, _), _meta = nckpt.load_checkpoint(args.ckpt, model, None, expect_config_hash=rc.model_hash)
     nckpt.assign_state(model, None, (tv, ntv, []))
-    got = {}
+    if args.control:
+        kind, sub, *rest = args.control.split(":")
+        hits = [v for v in model.variables if sub in v.path]
+        if len(hits) != 1:
+            raise SystemExit(f"--control {args.control}: {len(hits)} variables match")
+        value = np.asarray(hits[0].value)
+        hits[0].assign(value.T if kind == "transpose" else value * float(rest[0]))
+        print(f"control: {kind} {hits[0].path}", flush=True)
 
-    def walk(tree, prefix=""):
+    def flat(tree, prefix=""):
+        res = {}
         for key, value in tree.items():
-            name = f"{prefix}{key}"
-            if isinstance(value, dict):
-                walk(value, f"{name}.")
-            else:
-                got[name] = np.asarray(value)
+            res.update(flat(value, f"{prefix}{key}.") if isinstance(value, dict) else {f"{prefix}{key}": np.asarray(value)})
+        return res
 
-    walk(model(inputs, training=False))
-    if set(ref) != set(got):
-        raise SystemExit(f"output keys differ: {sorted(set(ref) ^ set(got))}")
-    errors = forward_errors(ref, got)
-    result = {"events": int(next(iter(inputs.values())).shape[0]), "errors": errors, "ok": forward_ok(errors), "device": str(jax.devices()[0])}
-    Path(args.out).write_text(json.dumps(result, indent=1) + "\n")
-    print("RESULT " + json.dumps(result))
+    np.savez(f"{args.out_prefix}_quant.npz", **flat(model(inputs, training=False)))
+    original = Quantizer.call
+    Quantizer.call = lambda self, x, training=None: x  # noqa: ARG005  (Quantizer.call signature)
+    try:
+        np.savez(f"{args.out_prefix}_float.npz", **flat(model(inputs, training=False)))
+    finally:
+        Quantizer.call = original
+    print("RESULT " + json.dumps({"device": str(jax.devices()[0]), "prefix": args.out_prefix}), flush=True)
     return 0
+
+
+def cmd_forward_check(args) -> int:
+    """``forward-check``: the forward matrix of an init directory (also run by ``init``); updates the manifest if any."""
+    tag_dir = Path(args.root) / args.tag
+    check = run_forward_check(tag_dir / "init", args.platforms.split(","), args.hybrid_python, args.jax_python, tag_dir / "init" / "forward.log")
+    manifest_path = tag_dir / "manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text())
+        manifest["forward_check"] = check
+        manifest["files_sha256"]["forward_check.json"] = sha256(tag_dir / "init" / "forward_check.json")
+        manifest_path.write_text(json.dumps(manifest, indent=1) + "\n")
+    print(json.dumps(summarize_forward(check), indent=1))
+    return 0 if check["ok"] else 1
 
 
 # --------------------------------------------------------------------------------------------- run
@@ -408,6 +545,11 @@ def cmd_run(args) -> int:
     if arm_done(arm_dir, s["k"]):
         print(f"{args.arm}: done (step {s['k']})")
         return 0
+    if not (args.ignore_forward or forward_ok(manifest.get("forward_check"))):
+        raise SystemExit(
+            f"{args.arm}: the init's forward check does not pass (float mode, every platform): run the forward stage "
+            "(forward-check) first, or pass --ignore-forward"
+        )
     job = os.environ.get("PBS_JOBID", "local")
     log = arm_dir / "logs" / f"{job}.log"
     if backend == "hybrid":
@@ -573,7 +715,7 @@ def verdict(arms: dict[str, dict], *, k: int, accum: int, target: float | None, 
     pre["lr_steps_compared"] = len(lr)
     pre["lr_max_rel_diff"] = max(lr) if lr else None
     pre["lr_ok"] = bool(lr) and max(lr) <= LR_RTOL
-    pre["forward_ok"] = bool(forward) and forward_ok(forward["errors"])  # recomputed: the tolerance is this file's
+    pre["forward_ok"] = forward_ok(forward)  # recomputed: the tolerances are this file's
     out["preconditions"] = pre
 
     # gate 1: validation loss at K, and the same test at every matched validation step
@@ -682,6 +824,7 @@ def parse_args(argv=None):
     common(init)
     init.add_argument("--data-dir", default="")
     init.add_argument("--tiny", action="store_true", help="tiny sizes, dummy events, CPU")
+    init.add_argument("--accelerator", default="", help="trainer.accelerator of the hybrid (default: the config's, gpu); cpu for a CPU check")
     init.add_argument("--k", type=int, default=5000)
     init.add_argument("--epoch-steps", type=int, default=500)
     init.add_argument("--batch", type=int, default=32)
@@ -704,6 +847,7 @@ def parse_args(argv=None):
     run.add_argument("--hybrid-python", default=sys.executable)
     run.add_argument("--jax-python", default=sys.executable)
     run.add_argument("--compile-cache", default=os.environ.get("JAX_COMPILATION_CACHE_DIR", ""))
+    run.add_argument("--ignore-forward", action="store_true", help="train although the forward check failed")
 
     status = sub.add_parser("status")
     common(status)
@@ -720,17 +864,31 @@ def parse_args(argv=None):
         help="band half-width c in units of |hybrid A - hybrid B| (5.47: 90%% coverage; 1.5: [min - D, max + D], 67%%; 0.5: strict [min, max], 33%%)",
     )
 
-    fwd = sub.add_parser("native-forward", help="(internal, JAX env) converted weights vs the hybrid init outputs")
+    fwd = sub.add_parser("native-forward", help="(internal, JAX env) the converted model on the init batch, quantized and float")
     fwd.add_argument("--config", required=True)
     fwd.add_argument("--ckpt", required=True)
-    fwd.add_argument("--hybrid", required=True)
-    fwd.add_argument("--out", required=True)
+    fwd.add_argument("--batch", required=True, help="npz with the in::<key> arrays (hybrid_forward.npz)")
+    fwd.add_argument("--out-prefix", required=True)
+    fwd.add_argument("--control", default="", help="transpose:<substr> or scale:<substr>:<factor> (a check of the gate)")
+
+    fc = sub.add_parser("forward-check", help="the forward matrix of an init (hybrid vs native, quantized / float, per platform)")
+    common(fc)
+    fc.add_argument("--platforms", default="gpu,cpu", help="gpu, cpu or both (the init job uses both on Polaris)")
+    fc.add_argument("--hybrid-python", default=sys.executable)
+    fc.add_argument("--jax-python", default=sys.executable)
     return p.parse_args(argv)
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    return {"init": cmd_init, "run": cmd_run, "status": cmd_status, "report": cmd_report, "native-forward": cmd_native_forward}[args.command](args)
+    return {
+        "init": cmd_init,
+        "run": cmd_run,
+        "status": cmd_status,
+        "report": cmd_report,
+        "native-forward": cmd_native_forward,
+        "forward-check": cmd_forward_check,
+    }[args.command](args)
 
 
 if __name__ == "__main__":

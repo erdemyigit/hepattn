@@ -79,12 +79,17 @@ def series(val: dict[int, float], *, ebops: float = 1.6e11, lr_scale: float = 1.
     return {"metrics": metrics, "steps": steps, "segments": segs}
 
 
-GOOD_FORWARD = {
-    "errors": {
-        "final.mask.pflow_node_logit": {"max_abs": 0.0115, "ref_max_abs": 2.24},
-        "final.classification.pflow_logit": {"max_abs": 0.0, "ref_max_abs": 0.8},
-    }
+# float-mode forward check, measured at production size on the CPU (G4.md "Forward check"): hybrid vs native
+FLOAT_MEASURED = {
+    "final.mask.pflow_node_logit": {"max_abs": 4.292e-05, "ref_max_abs": 18.94},
+    "final.regression.pflow_proxy_regr": {"max_abs": 4.883e-04, "ref_max_abs": 2480.0},
+    "layer_0.attn_mask": {"flips": 0, "n": 768000},
 }
+# controls, measured the same way: one decoder-layer-3 kernel x 1.01 (worst output 1.1e-2 of its scale) and one
+# encoder kernel transposed (20730 layer-0 mask flips, outputs at 100% of their scale)
+FLOAT_SCALED_KERNEL = {**FLOAT_MEASURED, "final.regression.pflow_proxy_regr": {"max_abs": 0.0112 * 2480.0, "ref_max_abs": 2480.0}}
+FLOAT_FLIPS = {**FLOAT_MEASURED, "layer_0.attn_mask": {"flips": 20730, "n": 768000}}
+GOOD_FORWARD = {"platforms": {"gpu": {"float": FLOAT_MEASURED}, "cpu": {"float": FLOAT_MEASURED}}}
 
 
 def arms(jax_val: float = 15.05, *, a: float = 15.0, b: float = 15.2, **jax_kwargs) -> dict:
@@ -112,15 +117,30 @@ def test_verdict_preconditions(g4):
     v = g4.verdict(arms(15.05, lr_scale=1.001), k=K, accum=ACCUM, target=TARGET, forward=GOOD_FORWARD)
     assert v["status"] == "INVALID" and not v["preconditions"]["lr_ok"]
     assert v["preconditions"]["lr_max_rel_diff"] == pytest.approx(1e-3)
-    bad = {"errors": {"final.mask.pflow_node_logit": {"max_abs": 1.2, "ref_max_abs": 2.24}}}  # S7 control: one weight bit less
+    bad = {"platforms": {"gpu": {"float": FLOAT_MEASURED}, "cpu": {"float": FLOAT_SCALED_KERNEL}}}  # one platform fails
     assert g4.verdict(arms(15.05), k=K, accum=ACCUM, target=TARGET, forward=bad)["status"] == "INVALID"
+    old_format = {"errors": FLOAT_MEASURED, "ok": True}  # the quantized-only check of init f6930a6: re-run the forward check
+    assert g4.verdict(arms(15.05), k=K, accum=ACCUM, target=TARGET, forward=old_format)["status"] == "INVALID"
     assert g4.verdict(arms(15.05), k=K, accum=ACCUM, target=TARGET, forward=None)["status"] == "INVALID"
 
 
-def test_forward_tolerance(g4):
-    assert g4.forward_ok(GOOD_FORWARD["errors"])  # measured LSB flips (tiny CPU init)
-    assert not g4.forward_ok({"final.mask.pflow_node_logit": {"max_abs": 0.2, "ref_max_abs": 2.24}})
-    assert not g4.forward_ok({"final.regression.pflow_regr": {"max_abs": 0.0, "ref_max_abs": 1.0}})  # no logit compared
+def test_float_gate(g4):
+    assert g4.float_ok(FLOAT_MEASURED)
+    assert not g4.float_ok(FLOAT_SCALED_KERNEL)
+    assert not g4.float_ok(FLOAT_FLIPS)
+    assert not g4.float_ok({"layer_0.attn_mask": {"flips": 0, "n": 768000}})  # nothing float compared
+    assert g4.forward_ok(GOOD_FORWARD) and not g4.forward_ok(None) and not g4.forward_ok({"platforms": {}})
+
+
+def test_forward_errors(g4):
+    np = pytest.importorskip("numpy")
+    ref = {"m": np.array([1.0, -2.0, 1e31, 4.0], np.float32), "b": np.array([True, False, True])}
+    got = {"m": np.array([1.5, -2.0, -5.0, 3.0], np.float32), "b": np.array([True, True, True])}
+    e = g4.forward_errors(ref, got)
+    assert e["m"] == {"max_abs": 1.0, "q50_abs": 0.5, "ref_max_abs": 4.0, "frac_gt_1pct": pytest.approx(2 / 3)}  # 1e31 padding slot left out
+    assert e["b"] == {"flips": 1, "n": 3}
+    with pytest.raises(KeyError, match="output keys differ"):
+        g4.forward_errors(ref, {"m": got["m"]})
 
 
 def test_verdict_incomplete_and_inconclusive(g4):
@@ -255,3 +275,21 @@ def test_trainer_sampler_reads_the_position(hyb):
     pos[0] = (2, 10)
     assert list(sampler) == hyb.epoch_order(1000, 42, 2, 4, 10) and len(sampler) == 1000 - 40
     assert sampler.history == [(0, 0), (2, 10)]
+
+
+def test_run_refuses_an_init_whose_forward_check_fails(g4, tmp_path):
+    tag = tmp_path / "t"
+    tag.mkdir()
+    manifest = {
+        "complete": True,
+        "settings": {"k": 10, "tiny": True},
+        "seeds": {"a": 1, "b": 2},
+        "forward_check": {"errors": FLOAT_MEASURED, "ok": False},
+    }
+    (tag / "manifest.json").write_text(__import__("json").dumps(manifest))
+    with pytest.raises(SystemExit, match="forward check does not pass"):
+        g4.main(["run", "--root", str(tmp_path), "--tag", "t", "--arm", "jax"])
+    manifest["forward_check"] = {"platforms": {"cpu": {"float": FLOAT_SCALED_KERNEL}}}
+    (tag / "manifest.json").write_text(__import__("json").dumps(manifest))
+    with pytest.raises(SystemExit, match="forward check does not pass"):
+        g4.main(["run", "--root", str(tmp_path), "--tag", "t", "--arm", "hybrid-a"])

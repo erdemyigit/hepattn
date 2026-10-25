@@ -81,7 +81,7 @@ ARGS=(-A "$PBS_PROJECT" -l "filesystems=$PBS_FILESYSTEMS" -q "$QUEUE"
 # the submit shell's environment. The knobs that are set (an empty value counts: SMOKE_XLA_FLAGS= drops the flag) go
 # into a file of `export` lines, and the job gets only that file's path (-v SUBMIT_ENV_FILE=...), because qsub -v
 # splits its list at commas (G3_JOBS holds commas).
-JOB_VARS=(G3_JOBS G3_ARGS G3_DATA_FILE SMOKE_ARGS SMOKE_XLA_FLAGS PROF_VARIANTS PROF_ARGS PROF_XLA_FLAGS G4_STAGE G4_TAG G4_ROOT G4_ARGS G4_ARMS JAX_COMPILATION_CACHE_DIR)
+JOB_VARS=(G3_JOBS G3_ARGS G3_DATA_FILE SMOKE_ARGS SMOKE_XLA_FLAGS PROF_VARIANTS PROF_ARGS PROF_XLA_FLAGS G4_STAGE G4_TAG G4_ROOT G4_ARGS G4_ARMS G4_PLATFORMS JAX_COMPILATION_CACHE_DIR)
 ENV_FILE=""
 for v in "${JOB_VARS[@]}"; do
   [ -n "${!v+x}" ] || continue

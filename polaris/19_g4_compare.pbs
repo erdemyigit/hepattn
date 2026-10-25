@@ -16,10 +16,14 @@
 #   G4_STAGE=init   G4_TAG=g4a bash polaris/submit.sh 19_g4_compare.pbs      # ~15 min: config, hybrid init, conversion
 #   G4_STAGE=train  G4_TAG=g4a bash polaris/submit.sh 19_g4_compare.pbs --depend afterok:<init job>
 #   G4_STAGE=report G4_TAG=g4a bash polaris/submit.sh 19_g4_compare.pbs      # also run by the train stage at the end
+#   G4_STAGE=forward G4_TAG=g4a bash polaris/submit.sh 19_g4_compare.pbs     # ~15 min: the forward check of an init again
+# The init stage's forward check (also the forward stage) compares the converted weights with the hybrid on the init
+# batch on GPU and CPU: float mode (quantizers off) is the gate, the quantized outputs are reported next to the
+# hybrid's own 1-ulp spread, and hybrid / native GPU vs CPU (logs/g4_<tag>_forward_<jobid>.json; manifest updated).
 # train runs every arm of G4_ARMS on its own GPU of this node (default: hybrid-a hybrid-b jax jax-b on GPUs 0-3), each
 # resuming from its own last checkpoint, so a chain of train jobs (--depend afterany:<previous>) continues the run;
 # a train job that finds every arm done only writes the report. When the gate arms are done, it writes the report.
-# (submit.sh hands G4_STAGE, G4_TAG, G4_ROOT, G4_ARGS, G4_ARMS and JAX_COMPILATION_CACHE_DIR to the job.)
+# (submit.sh hands G4_STAGE, G4_TAG, G4_ROOT, G4_ARGS, G4_ARMS, G4_PLATFORMS and JAX_COMPILATION_CACHE_DIR to the job.)
 #   G4_ARGS  extra options of the stage's command (init: e.g. "--num-train 400000"; report: e.g. "--band 1.5")
 #   G4_ARMS  arms to train (drop jax-b to leave GPU 3 idle: G4_ARMS="hybrid-a hybrid-b jax")
 #   G4_ROOT  run directories (default $WORK_ROOT/g4); the report goes to logs/g4_<tag>.json
@@ -92,10 +96,17 @@ case "$STAGE" in
     report
     echo "G4-TRAIN-EXIT-$fail"
     ;;
+  forward)
+    PYTHONPATH="$REPO/src" "${G4[@]}" forward-check --root "$ROOT" --tag "$TAG" --platforms "${G4_PLATFORMS:-gpu,cpu}" \
+      --hybrid-python "$HPY" --jax-python "$JPY" ${G4_ARGS:-}
+    code=$?
+    cp "$ROOT/$TAG/init/forward_check.json" "logs/g4_${TAG}_forward_${JOB}.json"
+    echo "G4-FORWARD-EXIT-$code"
+    ;;
   report)
     report "${G4_ARGS:-}"
     echo "G4-REPORT-EXIT-$?"
     ;;
   *)
-    echo "ERROR: G4_STAGE must be init, train or report, got $STAGE"; exit 1 ;;
+    echo "ERROR: G4_STAGE must be init, train, forward or report, got $STAGE"; exit 1 ;;
 esac
