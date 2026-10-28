@@ -32,6 +32,21 @@ Env overrides:
     HGQ_WARMUP_EPOCHS  beta ramp length, in epochs (default 1.0)
     DATA_DIR       CLIC ROOT directory            (default $HGQ_DATA or ./data/clic)
     CKPT_DIR       checkpoint output directory    (default ./hgq_ckpts)
+    HGQ_OPTIMIZER  AdamW | Lion                   (default AdamW)
+    HGQ_LR_MAX     OneCycle peak LR               (default 5e-5)
+    HGQ_WEIGHT_DECAY  weight decay                (default: the model config's lrs_config.weight_decay)
+    HGQ_WEIGHT_B0  initial weight bitwidth b0 of the kbi weight quantizers (default 8; part of the model hash)
+    HGQ_QUANTIZER_LR_SCALE  LR multiplier of the trainable quantizer variables (bitwidths), JAX driver only
+                   (keras_native/optim.py; unset: not written, 1)
+
+Another trained model (a QAT warm start):
+    HGQ_SOURCE_CONFIG  the config.yaml a float run saved (SaveConfig). Its model, data and task settings replace
+                   base.yaml + linformer.yaml (HGQ_ATTN is then not allowed); run-specific keys are dropped (ckpt_path,
+                   the logger's directories, default_root_dir) and so is the matcher's GPU device_solver. The beta
+                   setpoints above belong to the base.yaml + linformer.yaml model, so this mode needs
+                   HGQ_MODEL_EBOPS (EBOPs of the quantized model at the converted weights), HGQ_TARGET_EBOPS and
+                   HGQ_INIT_BETA; HGQ_MAX_BETA / HGQ_MIN_BETA default to the same 2.585 decades above / below
+                   HGQ_INIT_BETA. Convert the checkpoint with convert_to_native --target-config <this output>.
 """
 
 import math
@@ -50,6 +65,13 @@ if not SRC.exists() or not OVERLAY.exists():
 ATTN = os.environ.get("HGQ_ATTN", "linformer").lower()
 if ATTN not in {"linformer", "torch"}:
     raise SystemExit(f"HGQ_ATTN must be 'linformer' or 'torch', got {ATTN!r}")
+SOURCE = os.environ.get("HGQ_SOURCE_CONFIG")
+if SOURCE:
+    if "HGQ_ATTN" in os.environ:
+        raise SystemExit("HGQ_ATTN selects base.yaml (+ linformer.yaml); with HGQ_SOURCE_CONFIG the model comes from that file")
+    missing = [k for k in ("HGQ_MODEL_EBOPS", "HGQ_TARGET_EBOPS", "HGQ_INIT_BETA") if k not in os.environ]
+    if missing:
+        raise SystemExit(f"HGQ_SOURCE_CONFIG needs {missing}: the default setpoints belong to the base.yaml + linformer.yaml model")
 
 DATA_DIR = os.environ.get("DATA_DIR", os.environ.get("HGQ_DATA", str(REPO / "data/clic")))
 CKPT_DIR = os.environ.get("CKPT_DIR", str(REPO / "hgq_ckpts"))
@@ -94,6 +116,12 @@ MAX_BETA = float(os.environ.get("HGQ_MAX_BETA", "3.3e-8"))
 # Floor: the same 2.585 decades below INIT_BETA. It must be > 0: the JAX driver reads EBOPs as
 # penalty / beta (KERAS_JAX_PLAN.md section 3.6). The old default was 0.
 MIN_BETA = float(os.environ.get("HGQ_MIN_BETA", "2.3e-13"))
+if SOURCE:
+    # another model: its own measured EBOPs and setpoints (required above); ceiling and floor by the same rule
+    MODEL_EBOPS = float(os.environ["HGQ_MODEL_EBOPS"])
+    HEADROOM_DECADES = math.log10(1.0e-7 / 2.6e-10)
+    MAX_BETA = float(os.environ.get("HGQ_MAX_BETA", INIT_BETA * 10**HEADROOM_DECADES))
+    MIN_BETA = float(os.environ.get("HGQ_MIN_BETA", INIT_BETA / 10**HEADROOM_DECADES))
 # HGQ2's default integral gain of 2e-3 is tuned for hundred-epoch runs. Gain for roughly one decade per
 # ten epochs at the initial error log10(MODEL_EBOPS / TARGET_EBOPS) = log10(2.511e11 / 1.5e11) = 0.224:
 # 1 / (10 x 0.224) = 0.45, rounded to 0.5 (the old model's error was 0.224 too, by the same 40% rule).
@@ -135,6 +163,12 @@ WARMUP_STEPS = max(1, round(WARMUP_EPOCHS * STEPS_PER_EPOCH))
 # Reference point: 5e-5 at effective batch 128 (matches the group's float baseline).
 LR_MAX = 5.0e-5
 CLIP = 0.1
+OPTIMIZER = os.environ.get("HGQ_OPTIMIZER", "AdamW")
+if OPTIMIZER not in {"AdamW", "Lion"}:
+    raise SystemExit(f"HGQ_OPTIMIZER must be AdamW or Lion, got {OPTIMIZER!r}")
+LR_MAX = float(os.environ.get("HGQ_LR_MAX", LR_MAX))
+WEIGHT_DECAY = os.environ.get("HGQ_WEIGHT_DECAY")
+QUANTIZER_LR_SCALE = os.environ.get("HGQ_QUANTIZER_LR_SCALE")
 
 
 def merge(base: dict, overlay: dict) -> dict:
@@ -149,11 +183,27 @@ def merge(base: dict, overlay: dict) -> dict:
     return out
 
 
-cfg = yaml.safe_load(SRC.read_text())
-if ATTN == "linformer":
-    cfg = merge(cfg, yaml.safe_load(OVERLAY.read_text()))
+def from_saved_run(path: str) -> dict:
+    """A float run's saved config.yaml as the generator's input: the run-specific keys dropped (the resume
+    ``ckpt_path``, the logger's directories and keys, ``default_root_dir``) and the matcher's GPU ``device_solver``.
+    """
+    src = yaml.safe_load(pathlib.Path(path).read_text())
+    src.pop("ckpt_path", None)
+    t = src["trainer"]
+    t.pop("default_root_dir", None)
+    t["logger"] = {"class_path": "hepattn.utils.loggers.MyCometLogger", "init_args": {"project": "hepattn-clic"}}
+    src["model"]["model"]["init_args"]["matcher"]["init_args"].pop("device_solver", None)
+    return src
 
-cfg["name"] = "CLIC_pflow_HGQ_polaris" if ATTN == "linformer" else "CLIC_pflow_HGQ_dense_polaris"
+
+if SOURCE:
+    cfg = from_saved_run(SOURCE)
+    cfg["name"] = f"{cfg.get('name') or 'source'}_HGQ_polaris"
+else:
+    cfg = yaml.safe_load(SRC.read_text())
+    if ATTN == "linformer":
+        cfg = merge(cfg, yaml.safe_load(OVERLAY.read_text()))
+    cfg["name"] = "CLIC_pflow_HGQ_polaris" if ATTN == "linformer" else "CLIC_pflow_HGQ_dense_polaris"
 
 d = cfg["data"]
 d["train_path"] = f"{DATA_DIR}/train_clic_fix.root"
@@ -220,8 +270,12 @@ if isinstance(t.get("logger"), dict):
     t["logger"].setdefault("init_args", {})["online"] = False
 
 m = cfg["model"]
-m["optimizer"] = "AdamW"
+m["optimizer"] = OPTIMIZER
 m["lrs_config"]["max"] = LR_MAX
+if WEIGHT_DECAY is not None:
+    m["lrs_config"]["weight_decay"] = float(WEIGHT_DECAY)
+if QUANTIZER_LR_SCALE is not None:
+    m["lrs_config"]["quantizer_lr_scale"] = float(QUANTIZER_LR_SCALE)
 
 net = m["model"]["init_args"]
 net_cls = m["model"]
@@ -244,8 +298,11 @@ net["matcher"]["init_args"]["default_solver"] = "scipy"
 
 # HGQ2 quantization spec. q_type/place are SELECTORS in HGQ2 scopes; the type is
 # chosen via default_q_type.
+# HGQ_WEIGHT_B0: a warm start from trained float weights keeps more of their precision (small CLIC reference model,
+# polaris/21_warmstart_check.py qinit, 32 val events with integer bits traced on them: matched loss 6.32 at b0 8,
+# 3.860 at b0 12, float 3.857); beta then trims the bits.
 net["quant"] = {
-    "weight": {"default_q_type": "kbi", "b0": 8, "i0": 2},
+    "weight": {"default_q_type": "kbi", "b0": int(os.environ.get("HGQ_WEIGHT_B0", "8")), "i0": 2},
     "datalane": {"default_q_type": "kif", "i0": 4, "f0": 8},
     "table": {"default_q_type": "kif", "i0": 2, "f0": 10},
     "ebops": {"beta0": 0.0},
@@ -301,12 +358,17 @@ for task in net["tasks"]["init_args"]["modules"]:
 DST.write_text(yaml.safe_dump(cfg, sort_keys=False))
 
 print(f"WROTE {DST}")
-print(f"  model      {'base.yaml + linformer.yaml (masked linformer, phi sort)' if ATTN == 'linformer' else 'base.yaml (dense attention)'}")
+if SOURCE:
+    print(f"  model      {SOURCE} (dim {net['dim']}, {OPTIMIZER} wd {m['lrs_config']['weight_decay']})")
+else:
+    print(f"  model      {'base.yaml + linformer.yaml (masked linformer, phi sort)' if ATTN == 'linformer' else 'base.yaml (dense attention)'}")
 print(f"  data       {DATA_DIR}")
 print(f"  ckpts      {CKPT_DIR}")
 print(f"  batch      {BATCH} x accum {ACCUM} x devices {DEVICES} = effective {BATCH * ACCUM * DEVICES}")
 print(f"  precision  {PRECISION}")
 print(f"  lr max     {LR_MAX:.3e}   clip {CLIP}   (Lightning averages over accum: no rescaling)")
+if QUANTIZER_LR_SCALE is not None:
+    print(f"  quantizer  LR x {float(QUANTIZER_LR_SCALE):g} (JAX driver only)")
 print(f"  epochs     {EPOCHS}")
 if BETA_MODE == "pid":
     print(f"  beta       PID -> target {TARGET_EBOPS:.3e} EBOPs (model at init: {MODEL_EBOPS:.4e}; PROVISIONAL, BETA_SETPOINTS.md)")
