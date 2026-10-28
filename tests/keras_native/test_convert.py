@@ -675,3 +675,28 @@ def test_renorm_lane_check_counts_a_dropped_entry(hybrid, monkeypatch):
     lane = report["renorm_lane"]
     assert lane["dropped_entries"] == 1, lane
     assert lane["s_c_max"] == 64 + 2.0**-12 + 2.0**-14 and lane["s_c_max_at"] == core.E.path, lane
+
+
+# ------------------------------------------------------------------------------------------- GPU matcher solver in the source
+
+
+def test_a_source_trained_with_a_gpu_matcher_solver_converts(org, tmp_path):
+    """A run saved with ``device_solver: jv`` (the small CLIC reference run) converts like the same run without it.
+
+    The torch Matcher checks for the CUDA ``torch-linear-assignment`` build in ``__init__``; the converter drops the key
+    (it never matches) and reports it. The target is the source config without the key (the native driver refuses it).
+    """
+    import yaml  # noqa: PLC0415
+
+    cfg = yaml.safe_load((ORG / "config.yaml").read_text())
+    cfg["model"]["model"]["init_args"]["matcher"]["init_args"]["device_solver"] = "jv"
+    source = tmp_path / "config.yaml"
+    source.write_text(yaml.safe_dump(cfg))
+    # control: the source as saved does not instantiate here (jsonargparse wraps the Matcher's RuntimeError)
+    with pytest.raises((RuntimeError, ValueError), match="torch-linear-assignment"):
+        C.instantiate_torch_model(C.source_model_section([source]))
+    _, nmodel, report = C.convert([source], ORG / "model.ckpt", target_config=[ORG / "config.yaml"], verify=False)
+    assert report["source_device_solver_dropped"] == "jv"
+    assert "source_device_solver_dropped" not in org["report"]
+    for a, b in zip(nmodel.variables, org["nmodel"].variables, strict=True):
+        assert a.path == b.path and np.array_equal(np.asarray(a.value), np.asarray(b.value)), a.path

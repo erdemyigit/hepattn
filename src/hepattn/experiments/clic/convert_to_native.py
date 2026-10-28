@@ -38,11 +38,15 @@ it for another model.
 For a quantized target the report also holds ``renorm_lane`` (``renorm_lane_check``: the largest masked-Linformer
 column energy and the count of nonzero E entries the renorm lane rounds away; a nonzero count also warns).
 
+A source matcher's GPU ``device_solver`` is dropped before the torch model is instantiated (``without_device_solver``;
+reported as ``source_device_solver_dropped``): conversion never matches. The native target config must not have one.
+
 Checkpoints are read with ``torch.load(weights_only=True)`` (no pickled code runs). This module imports torch, so it
 lives outside ``hepattn.keras_native`` (import-hygiene rule); keras runs on JAX (set when ``KERAS_BACKEND`` is unset).
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import operator
@@ -620,6 +624,19 @@ def source_model_section(config_paths: list[str | Path]) -> dict:
     return resolved["model"]
 
 
+def without_device_solver(model_entry: dict) -> tuple[dict, str | None]:
+    """A copy of a model entry without the matcher's GPU ``device_solver`` (and the value dropped).
+
+    The torch source model is only loaded and run forward here; its matcher is never called. A run trained with
+    ``device_solver: jv`` (``torch-linear-assignment``, a CUDA build) would otherwise fail to instantiate on a host
+    without that build (the Matcher checks it in ``__init__``).
+    """
+    entry = copy.deepcopy(model_entry)
+    matcher = (entry.get("init_args") or {}).get("matcher")
+    args = matcher.get("init_args") if isinstance(matcher, dict) else None
+    return entry, (args.pop("device_solver", None) if isinstance(args, dict) else None)
+
+
 def instantiate_torch_model(model_entry: dict) -> nn.Module:
     """Instantiate the torch MaskFormer of a ``class_path`` / ``init_args`` entry with jsonargparse (as LightningCLI)."""
     from jsonargparse import ArgumentParser  # noqa: PLC0415
@@ -734,7 +751,9 @@ def convert(
     nmodel = rc.build_model()
     nmodel(inputs, training=False)
     state, info = read_lightning_state(ckpt_path)
+    dropped_solver = None
     if kind == TORCH_SOURCE:
+        model_entry, dropped_solver = without_device_solver(model_entry)
         tmodel = instantiate_torch_model(model_entry)
         portable_attention(tmodel)  # for the verify forward on the CPU
         result = tmodel.load_state_dict(state, strict=True)
@@ -750,6 +769,8 @@ def convert(
         report["renorm_lane"] = lane
         if lane["dropped_entries"]:
             warnings.warn(f"renorm lane premise fails: {lane}; see docs/hgq/FPGA_STATUS.md footnote 5", stacklevel=2)
+    if dropped_solver is not None:
+        report["source_device_solver_dropped"] = dropped_solver
     report["checkpoint"] = {"path": str(ckpt_path), "sha256": _sha256(ckpt_path), **info}
     report["config"] = [str(p) for p in config]
     report["target_config"] = [str(p) for p in (target_config or config)]
