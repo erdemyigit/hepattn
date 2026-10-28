@@ -389,6 +389,7 @@ class OptimizerConfig:
     clip_norm: float | None
     accumulate_grad_batches: int
     epsilon: float = 1e-8
+    quantizer_lr_scale: float = 1.0  # native only (optim.py)
 
 
 @dataclass(frozen=True)
@@ -513,6 +514,7 @@ def _optimizer(model: dict, trainer: dict) -> OptimizerConfig:
         skip_scheduler=bool(lrs.get("skip_scheduler", False)),
         clip_norm=None if clip is None else float(clip),
         accumulate_grad_batches=int(trainer.get("accumulate_grad_batches") or 1),
+        quantizer_lr_scale=float(lrs.get("quantizer_lr_scale", 1.0)),
     )
 
 

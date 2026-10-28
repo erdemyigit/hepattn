@@ -11,6 +11,10 @@ settings (``gradient_clip_val``, ``accumulate_grad_batches``) with Keras optimiz
   ``exclude_from_weight_decay(var_list=...)``. ``var_names=["quantizer"]`` would match ``variable.name`` (HGQ2 names
   its bitwidths ``b``, ``i``, ``f``) and exclude nothing. HGQ2's ``beta`` is non-trainable, so no update touches it.
 - ``global_clipnorm`` = ``gradient_clip_val`` (``gradient_clip_algorithm: norm``).
+- ``lrs_config.quantizer_lr_scale`` (native only, default 1: the stock Keras optimizer): the same trainable quantizer
+  variables (bitwidths, in bit units) step with ``learning_rate x quantizer_lr_scale``. AdamW and Lion move a variable
+  by about the LR per step whatever its gradient, so at a fine-tuning LR a bitwidth moves a fraction of a bit per
+  thousand steps; the scale lets the bitwidths move at their own rate (``ScaledLRMixin``). The hybrid ignores the key.
 - ``accumulate_grad_batches = k > 1`` -> ``gradient_accumulation_steps = k``: Keras AVERAGES the k micro-batch gradients,
   then clips and applies (``base_optimizer.apply``); Lightning also averages (it divides each micro-batch loss by k,
   ``lightning/pytorch/loops/optimization/automatic.py``) and clips at the optimizer step.
@@ -102,6 +106,29 @@ def quantizer_variables(model) -> list:
     return [v for v in model.trainable_variables if "quantizer" in v.path]
 
 
+class ScaledLRMixin:
+    """``update_step`` with the learning rate times ``lr_scale`` for the variables given to ``scale_variables``."""
+
+    lr_scale: float = 1.0
+
+    def scale_variables(self, var_list, lr_scale: float) -> None:
+        self.lr_scale = float(lr_scale)
+        self._scaled_keys = {self._var_key(v) for v in var_list}
+
+    def update_step(self, gradient, variable, learning_rate):
+        if self._var_key(variable) in getattr(self, "_scaled_keys", ()):
+            learning_rate = ops.multiply(learning_rate, self.lr_scale)
+        return super().update_step(gradient, variable, learning_rate)
+
+
+class ScaledAdamW(ScaledLRMixin, keras.optimizers.AdamW):
+    pass
+
+
+class ScaledLion(ScaledLRMixin, keras.optimizers.Lion):
+    pass
+
+
 def learning_rate(lrs_config: dict, total_steps: int, steps_per_update: int = 1):
     """The hepattn ``lrs_config`` LR: a ``OneCycleLR`` (initial -> max -> end), or the constant ``initial`` with ``skip_scheduler``."""
     if lrs_config.get("skip_scheduler"):
@@ -132,7 +159,8 @@ def build_optimizer(
     Args:
         model: The built native model.
         optimizer: ``AdamW`` or ``Lion`` (case-insensitive).
-        lrs_config: hepattn ``lrs_config`` (``initial``, ``max``, ``end``, ``pct_start``, ``weight_decay``, ``skip_scheduler``).
+        lrs_config: hepattn ``lrs_config`` (``initial``, ``max``, ``end``, ``pct_start``, ``weight_decay``, ``skip_scheduler``;
+            optional ``quantizer_lr_scale``).
         total_steps: Optimizer steps of the whole run (Lightning ``estimated_stepping_batches``).
         clip_norm: Global gradient-norm clip, or None.
         accumulate: Micro-batches per optimizer step.
@@ -153,11 +181,16 @@ def build_optimizer(
         "global_clipnorm": None if clip_norm is None else float(clip_norm),
         "gradient_accumulation_steps": accumulate if accumulate > 1 else None,
     }
+    scale = float(lrs_config.get("quantizer_lr_scale", 1.0))
+    if not scale > 0:
+        raise ValueError(f"quantizer_lr_scale must be > 0, got {scale}")
     if kind == "adamw":
-        opt = keras.optimizers.AdamW(beta_1=0.9, beta_2=0.999, epsilon=float(adam_epsilon), **common)
+        opt = (keras.optimizers.AdamW if scale == 1.0 else ScaledAdamW)(beta_1=0.9, beta_2=0.999, epsilon=float(adam_epsilon), **common)
     else:
-        opt = keras.optimizers.Lion(beta_1=0.9, beta_2=0.99, **common)
+        opt = (keras.optimizers.Lion if scale == 1.0 else ScaledLion)(beta_1=0.9, beta_2=0.99, **common)
     opt.exclude_from_weight_decay(var_list=quantizer_variables(model))
+    if scale != 1.0:
+        opt.scale_variables(quantizer_variables(model), scale)
     opt.build(model.trainable_variables)
     return opt
 
