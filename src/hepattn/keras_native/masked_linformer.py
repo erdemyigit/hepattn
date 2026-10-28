@@ -111,11 +111,22 @@ class SeqProjection(keras.layers.Layer):
         return head, tail
 
     def energy(self, training=None):
+        """``W = E[:n]^2 / sum_all_rows E^2`` per column; ``1 / n`` in a column that the quantizer set to 0.
+
+        Such a column projects nothing, so its rescale only has to stay finite: with ``W = 1 / n`` a mask row that
+        selects m rows keeps ``m / n`` and the rescale is ``sqrt(n / m)``. The division never sees the zero column
+        (double ``where``): the old guard ``E^2 / max(S, 1e-30)`` had a finite forward, but its derivative in S,
+        ``-E^2 / max(S, 1e-30)^2``, is 0 / 0 in float32 (1e-60 underflows), and the NaN reached every weight of the
+        column through the quantizer. A trained projection has such columns: a column smaller than half a
+        quantization step everywhere is set to 0 (the small CLIC reference model has 3 in its decoder F).
+        """
         head, tail = self.rows(training)
         full2 = ops.sum(ops.square(head), 0)
         if tail is not None:
             full2 = full2 + ops.sum(ops.square(tail), 0)
-        return ops.square(head) / ops.maximum(full2, 1e-30)  # guard a column the quantizer set to 0
+        nonzero = full2 > 0
+        w = ops.square(head) / ops.where(nonzero, full2, 1.0)
+        return ops.where(nonzero, w, 1.0 / head.shape[0])
 
     def assign_full(self, proj) -> None:
         """Load a (seq_len, k) projection. Rows past n are dropped when this projection has no tail.

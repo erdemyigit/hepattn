@@ -827,3 +827,54 @@ def test_core_choice_and_call_mismatches():
         build(core="project_unmasked", same_shape=True, kv_len=150)(q, kv_mask=np.ones((1, 150), bool))
     with pytest.raises(ValueError, match="built length"):
         build()(q, kv[:, :100], kv[:, :100], attn_mask=np.ones((1, 150, 100), bool))
+
+
+# ------------------------------------------------------------------------------------------ a projection column set to 0
+def _old_energy(self, training=None):
+    """The guard before the fix: ``E^2 / max(S, 1e-30)`` (its derivative in S is 0 / 0 in float32 at S = 0)."""
+    head, tail = self.rows(training)
+    full2 = keras.ops.sum(keras.ops.square(head), 0)
+    if tail is not None:
+        full2 = full2 + keras.ops.sum(keras.ops.square(tail), 0)
+    return keras.ops.square(head) / keras.ops.maximum(full2, 1e-30)
+
+
+@pytest.mark.parametrize("shape", ["q_ca", "enc"])
+def test_a_projection_column_quantized_to_zero_has_finite_gradients(shape, monkeypatch):
+    """A trained E / F column below half a quantization step everywhere (the small CLIC reference model has three in
+    its decoder F) is set to 0 by the kernel quantizer. The renorm must keep every gradient finite and the forward as it
+    was; control: the old guard gives non-finite gradients for that column's weights.
+    """
+    nattn = native_attention(shape, None, spec=PROD_SPEC)
+    x = make_inputs(shape, 31, sort=shape == "q_ca")
+    core = next(c for c in nattn._flatten_layers(include_self=False, recursive=True) if isinstance(c, nml.AttendCore | nml.ProjectCore))  # noqa: SLF001
+    col = 5
+    for proj in (core.E, core.F):
+        kernel = n(proj.proj.kernel).copy()
+        kernel[:, col] = 1e-3 * np.sign(kernel[:, col])  # 2**-8 is half a step at the 7-bit fractional cap
+        proj.proj.kernel.assign(kernel)
+        if proj.tail is not None:
+            tail = n(proj.tail).copy()
+            tail[:, col] = 1e-3
+            proj.tail.assign(tail)
+        head, tail = proj.rows(True)
+        assert not n(head)[:, col].any() and (tail is None or not n(tail)[:, col].any()), "the column is not quantized to 0"
+
+    def grads():
+        def loss_fn(tv, ntv):
+            args = (x["q"],) if shape in SELF else (x["q"], x["kv"], x["kv"])
+            out, _ = nattn.stateless_call(tv, ntv, *args, kv_mask=x["kv_mask"], attn_mask=x["attn_mask"], kv_sort_idx=x["kv_sort_idx"], training=True)
+            return keras.ops.mean(keras.ops.square(out)), out
+
+        tv = [v.value for v in nattn.trainable_variables]
+        ntv = [v.value for v in nattn.non_trainable_variables]
+        (_, out), g = jax.value_and_grad(loss_fn, has_aux=True)(tv, ntv)
+        bad = sorted({v.path.split("/")[-2] for v, gg in zip(nattn.trainable_variables, g, strict=True) if not np.isfinite(n(gg)).all()})
+        return n(out), bad
+
+    out, bad = grads()
+    assert bad == [], bad
+    monkeypatch.setattr(nml.SeqProjection, "energy", _old_energy)
+    old_out, old_bad = grads()
+    assert old_bad, "control: the old guard should give non-finite gradients"
+    np.testing.assert_array_equal(out, old_out)
