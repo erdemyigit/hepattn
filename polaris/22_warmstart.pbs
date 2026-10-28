@@ -1,0 +1,94 @@
+#!/bin/bash -l
+#PBS -N hgq_ws
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=01:00:00
+#PBS -r y
+# NOTE: -q and -l walltime= below are FALLBACKS for a bare qsub.
+# submit.sh overrides both (WS_QUEUE / WS_WALLTIME in the submit shell, else QUEUE_DEBUG and 1 h).
+#PBS -q debug
+#PBS -j oe
+#PBS -o logs/22_warmstart.log
+#
+# QAT warm start from a float Lightning checkpoint on the JAX driver (polaris/22_warmstart.py has the stages):
+#   WS_STAGE=init  WS_TAG=ws1 bash polaris/submit.sh 22_warmstart.pbs   # config, conversion, CPU parity gate, smoke on GPU 0
+#   WS_STAGE=pilot WS_TAG=ws1 bash polaris/submit.sh 22_warmstart.pbs   # the arms of WS_ARMS, one per GPU, then the report
+#   WS_STAGE=report WS_TAG=ws1 bash polaris/submit.sh 22_warmstart.pbs
+# (submit.sh hands WS_STAGE, WS_TAG, WS_ROOT, WS_SOURCE, WS_ARGS, WS_ARMS and JAX_COMPILATION_CACHE_DIR to the job.)
+#   WS_SOURCE  directory with the float run's config.yaml and its checkpoint as model.ckpt (default $WORK_ROOT/warmstart/source)
+#   WS_ARGS    extra options of 22_warmstart.py init (setpoints, --k, --batch, ...); the init needs the three setpoints
+#   WS_ARMS    pilot arms (default: adamw adamw-q20 lion-6e5 lion-6e4 on GPUs 0-3)
+#   WS_ROOT    run directories (default $WORK_ROOT/warmstart/runs); the report goes to logs/ws_<tag>.json
+# Env: $REPO/.venv-jax (ONE-TIME SETUP in 16_jax_smoke.pbs). -r y: a requeued pilot resumes from the arms' checkpoints.
+set -uo pipefail
+cd "${PBS_O_WORKDIR:-$PWD}"
+source polaris/env.sh
+if [ -n "${SUBMIT_ENV_FILE:-}" ]; then
+  echo "job variables from $SUBMIT_ENV_FILE:"; cat "$SUBMIT_ENV_FILE"
+  source "$SUBMIT_ENV_FILE"
+fi
+export PYTHONNOUSERSITE=1 TORCHDYNAMO_DISABLE=1
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-$WORK_ROOT/jax_cache}"
+
+source polaris/repo_dir.sh
+REPO="$HEPATTN_DIR"; cd "$REPO"
+mkdir -p logs
+JPY="$REPO/.venv-jax/bin/python"
+[ -x "$JPY" ] || { echo "ERROR: $JPY missing; see ONE-TIME SETUP in polaris/16_jax_smoke.pbs"; exit 1; }
+[ -f polaris/22_warmstart.py ] || { echo "ERROR: $REPO has no polaris/22_warmstart.py (update the clone)"; exit 1; }
+TAG="${WS_TAG:?set WS_TAG (the name of this warm-start run) in the submit shell}"
+ROOT="${WS_ROOT:-$WORK_ROOT/warmstart/runs}"
+SRC="${WS_SOURCE:-$WORK_ROOT/warmstart/source}"
+STAGE="${WS_STAGE:-pilot}"
+WS=("$JPY" polaris/22_warmstart.py)
+JOB="${PBS_JOBID:-local}"
+echo "=== warm start $STAGE tag=$TAG root=$ROOT job=$JOB node=$(hostname) clone=$REPO ($(git -C "$REPO" rev-parse --short HEAD)) ==="
+nvidia-smi --query-gpu=index,name,memory.total --format=csv
+free -g | head -2
+
+report() {
+  PYTHONPATH="$REPO/src" "${WS[@]}" report --root "$ROOT" --tag "$TAG" --out "logs/ws_${TAG}.json"
+}
+
+case "$STAGE" in
+  init)
+    PYTHONPATH="$REPO/src" "${WS[@]}" init --root "$ROOT" --tag "$TAG" --jax-python "$JPY" \
+      --source-config "$SRC/config.yaml" --ckpt "$SRC/model.ckpt" --data-dir "$DATA_ROOT" ${WS_ARGS:-}
+    code=$?
+    echo "WS-INIT-EXIT-$code"
+    [ "$code" = 0 ] || exit "$code"
+    # smoke: 60 optimizer steps of the validated recipe from the converted weights on GPU 0, validation on 512 events
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$REPO/src" "${WS[@]}" run --root "$ROOT" --tag "$TAG" --arm adamw --run-name smoke \
+      --max-steps 60 --num-val 512 --jax-python "$JPY" --compile-cache "$JAX_COMPILATION_CACHE_DIR"
+    echo "WS-SMOKE-EXIT-$?"
+    nvidia-smi --query-gpu=index,memory.used --format=csv
+    report
+    ;;
+  pilot)
+    read -r -a ARMS <<< "${WS_ARMS:-adamw adamw-q20 lion-6e5 lion-6e4}"
+    NGPU=$(nvidia-smi -L | wc -l)
+    [ "${#ARMS[@]}" -le "$NGPU" ] || { echo "ERROR: ${#ARMS[@]} arms > $NGPU GPUs"; exit 1; }
+    pids=()
+    for i in "${!ARMS[@]}"; do
+      arm="${ARMS[$i]}"
+      echo "  GPU $i -> $arm  (logs/ws_${TAG}_${arm}_${JOB}.out; child output in $ROOT/$TAG/$arm/logs/)"
+      CUDA_VISIBLE_DEVICES="$i" PYTHONPATH="$REPO/src" "${WS[@]}" run --root "$ROOT" --tag "$TAG" --arm "$arm" \
+        --jax-python "$JPY" --compile-cache "$JAX_COMPILATION_CACHE_DIR" > "logs/ws_${TAG}_${arm}_${JOB}.out" 2>&1 &
+      pids+=($!)
+    done
+    ( while sleep 300; do echo "[$(date +%H:%M)] $(free -g | awk 'NR==2{print "mem used " $3 " / " $2 " GB"}') | $(nvidia-smi --query-gpu=memory.used --format=csv,noheader | tr '\n' ' ')"; done ) &
+    mon=$!
+    fail=0
+    for p in "${pids[@]}"; do wait "$p" || fail=$((fail + 1)); done
+    kill "$mon" 2>/dev/null
+    report
+    echo "WS-PILOT-EXIT-$fail"
+    ;;
+  report)
+    report
+    echo "WS-REPORT-EXIT-$?"
+    ;;
+  *)
+    echo "ERROR: WS_STAGE must be init, pilot or report, got $STAGE"; exit 1 ;;
+esac
