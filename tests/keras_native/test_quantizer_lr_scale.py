@@ -1,4 +1,5 @@
-"""``lrs_config.quantizer_lr_scale`` (``keras_native.optim``): the trainable quantizer variables step with LR x scale.
+"""``lrs_config.quantizer_lr_scale`` (``keras_native.optim``): the trainable quantizer variables step with LR x scale;
+``lrs_config.quantizer_epsilon``: and with their own AdamW epsilon (tests at the end).
 
 A first optimizer step from zero state moves a variable by exactly ``lr x sign(g)`` for Lion and by ``lr x g / (|g| +
 eps')`` (~ lr) for AdamW, whatever |g|; so after one step the quantizer variables moved ``scale`` times as far as the
@@ -116,3 +117,54 @@ def test_jitted_train_step_on_a_quantized_maskformer():
     # sign updates: exactly lr x scale / lr per element (float32 rounding of |new - old| aside)
     np.testing.assert_allclose(max(q_moved), scale * lr, rtol=1e-2)
     np.testing.assert_allclose(max(w_moved), lr, rtol=1e-2)
+
+
+def moves(model, opt, grad_value: float, steps: int, jit: bool) -> tuple[np.ndarray, np.ndarray]:
+    """Total |change| of the quantizer and of the other variables after ``steps`` stateless steps with constant grads."""
+    import jax  # noqa: PLC0415
+
+    apply = jax.jit(opt.stateless_apply) if jit else opt.stateless_apply
+    tv0 = [np.asarray(v.value) for v in model.trainable_variables]
+    tv, ov = [v.value for v in model.trainable_variables], [v.value for v in opt.variables]
+    grads = [keras.ops.full(v.shape, grad_value) for v in model.trainable_variables]
+    for _ in range(steps):
+        tv, ov = apply(ov, grads, tv)
+    qids = {id(v) for v in quantizer_variables(model)}
+    moved = [(id(v) in qids, np.abs(np.asarray(n, np.float64) - o).ravel()) for v, n, o in zip(model.trainable_variables, tv, tv0, strict=True)]
+    return np.concatenate([m for q, m in moved if q]), np.concatenate([m for q, m in moved if not q])
+
+
+@pytest.mark.parametrize("jit", [False, True])
+def test_quantizer_epsilon_is_the_adamw_epsilon_of_the_quantizer_group(jit):
+    """Gradients of 1e-10 (below eps 1e-8, as the clipped bitwidth gradients of the warm start, ~1e-10): over 3 steps the
+    quantizer variables move as a stock AdamW with epsilon 1e-14 moves them (~lr per step), the others as one with
+    epsilon 1e-8 (~3e-4 lr per step); the second and third steps show that the epsilon is restored after each variable.
+    """
+    g, steps = 1e-10, 3
+    lrs = {**LRS, "max": 1.0, "initial": 1.0, "end": 1.0}  # |change| ~1 per step: float32 resolves it on values ~0.5
+    model = toy_model()
+    grouped = build_optimizer(model, optimizer="AdamW", lrs_config={**lrs, "quantizer_epsilon": 1e-14}, total_steps=10)
+    assert isinstance(grouped, ScaledAdamW)
+    q, other = moves(model, grouped, g, steps, jit)
+    ref_q, _ = moves(model, build_optimizer(model, optimizer="AdamW", lrs_config=lrs, total_steps=10, adam_epsilon=1e-14), g, steps, jit)
+    _, ref_other = moves(model, build_optimizer(model, optimizer="AdamW", lrs_config=lrs, total_steps=10), g, steps, jit)
+    np.testing.assert_allclose(q, ref_q, rtol=1e-5)
+    np.testing.assert_allclose(other, ref_other, rtol=1e-3, atol=1e-7)
+    # non-vacuous: the two epsilons give steps 3 orders of magnitude apart (~1 vs ~3e-4 per step at this LR of 1)
+    assert q.min() > 2.5 and other.max() < 3e-3, (q.min(), other.max())
+
+
+def test_quantizer_epsilon_needs_adamw_and_a_positive_value():
+    with pytest.raises(ValueError, match="quantizer_epsilon"):
+        build_optimizer(toy_model(), optimizer="Lion", lrs_config={**LRS, "quantizer_epsilon": 1e-12}, total_steps=10)
+    with pytest.raises(ValueError, match="quantizer_epsilon"):
+        build_optimizer(toy_model(), optimizer="AdamW", lrs_config={**LRS, "quantizer_epsilon": 0.0}, total_steps=10)
+
+
+def test_config_and_loop_pass_the_quantizer_epsilon_on(tmp_path):
+    cfg = yaml.safe_load((REPO_ROOT / "tests/keras_native/s6_fixtures/polaris_normalised.yaml").read_text())
+    assert nconfig.load_config(write(tmp_path / "a.yaml", cfg)).optimizer.quantizer_epsilon is None
+    cfg["model"]["lrs_config"]["quantizer_epsilon"] = 1e-12
+    rc = nconfig.load_config(write(tmp_path / "b.yaml", cfg))
+    assert rc.optimizer.quantizer_epsilon == 1e-12
+    assert loop.lrs_config(rc)["quantizer_epsilon"] == 1e-12

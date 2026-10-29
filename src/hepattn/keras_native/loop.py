@@ -257,6 +257,7 @@ def lrs_config(rc: RunConfig) -> dict:
         "weight_decay": o.weight_decay,
         "skip_scheduler": o.skip_scheduler,
         "quantizer_lr_scale": o.quantizer_lr_scale,
+        "quantizer_epsilon": o.quantizer_epsilon,
     }
 
 

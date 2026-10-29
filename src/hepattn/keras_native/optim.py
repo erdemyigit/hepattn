@@ -15,6 +15,11 @@ settings (``gradient_clip_val``, ``accumulate_grad_batches``) with Keras optimiz
   variables (bitwidths, in bit units) step with ``learning_rate x quantizer_lr_scale``. AdamW and Lion move a variable
   by about the LR per step whatever its gradient, so at a fine-tuning LR a bitwidth moves a fraction of a bit per
   thousand steps; the scale lets the bitwidths move at their own rate (``ScaledLRMixin``). The hybrid ignores the key.
+- ``lrs_config.quantizer_epsilon`` (native only, AdamW; default: the optimizer's epsilon): the epsilon of the same
+  variables' AdamW step. AdamW is scale-free only while ``sqrt(v) >> eps``. With ``gradient_clip_val`` 0.1 and global
+  norms of 1e2-4e3 (the small CLIC model at its QAT warm start, ``polaris/23_ws_diag.py grads``) every gradient is
+  scaled by ~1e-3 and the bitwidth gradients end at ~1e-10, 100x below eps 1e-8: there the step is ~``lr m / eps`` <<
+  lr, and the weights (clipped gradients ~1e-4) are not affected. Lion has no epsilon (the key is refused).
 - ``accumulate_grad_batches = k > 1`` -> ``gradient_accumulation_steps = k``: Keras AVERAGES the k micro-batch gradients,
   then clips and applies (``base_optimizer.apply``); Lightning also averages (it divides each micro-batch loss by k,
   ``lightning/pytorch/loops/optimization/automatic.py``) and clips at the optimizer step.
@@ -107,18 +112,29 @@ def quantizer_variables(model) -> list:
 
 
 class ScaledLRMixin:
-    """``update_step`` with the learning rate times ``lr_scale`` for the variables given to ``scale_variables``."""
+    """``update_step`` with the learning rate times ``lr_scale`` and, if given, the epsilon ``group_epsilon`` for the
+    variables given to ``scale_variables``.
+    """
 
     lr_scale: float = 1.0
+    group_epsilon: float | None = None
 
-    def scale_variables(self, var_list, lr_scale: float) -> None:
+    def scale_variables(self, var_list, lr_scale: float, epsilon: float | None = None) -> None:
         self.lr_scale = float(lr_scale)
+        self.group_epsilon = None if epsilon is None else float(epsilon)
         self._scaled_keys = {self._var_key(v) for v in var_list}
 
     def update_step(self, gradient, variable, learning_rate):
-        if self._var_key(variable) in getattr(self, "_scaled_keys", ()):
-            learning_rate = ops.multiply(learning_rate, self.lr_scale)
-        return super().update_step(gradient, variable, learning_rate)
+        if self._var_key(variable) not in getattr(self, "_scaled_keys", ()):
+            return super().update_step(gradient, variable, learning_rate)
+        learning_rate = ops.multiply(learning_rate, self.lr_scale)
+        if self.group_epsilon is None:
+            return super().update_step(gradient, variable, learning_rate)
+        epsilon, self.epsilon = self.epsilon, self.group_epsilon  # Adam reads self.epsilon while the step is traced
+        try:
+            return super().update_step(gradient, variable, learning_rate)
+        finally:
+            self.epsilon = epsilon
 
 
 class ScaledAdamW(ScaledLRMixin, keras.optimizers.AdamW):
@@ -160,14 +176,15 @@ def build_optimizer(
         model: The built native model.
         optimizer: ``AdamW`` or ``Lion`` (case-insensitive).
         lrs_config: hepattn ``lrs_config`` (``initial``, ``max``, ``end``, ``pct_start``, ``weight_decay``, ``skip_scheduler``;
-            optional ``quantizer_lr_scale``).
+            optional ``quantizer_lr_scale``, ``quantizer_epsilon``).
         total_steps: Optimizer steps of the whole run (Lightning ``estimated_stepping_batches``).
         clip_norm: Global gradient-norm clip, or None.
         accumulate: Micro-batches per optimizer step.
         adam_epsilon: AdamW epsilon (torch default 1e-8; Keras default 1e-7).
 
     Raises:
-        ValueError: For an unknown optimizer or ``accumulate < 1``.
+        ValueError: For an unknown optimizer, ``accumulate < 1``, ``quantizer_lr_scale <= 0`` or a ``quantizer_epsilon``
+            that is not > 0 or not with AdamW.
     """
     kind = optimizer.lower()
     if kind not in SUPPORTED_OPTIMIZERS:
@@ -184,13 +201,17 @@ def build_optimizer(
     scale = float(lrs_config.get("quantizer_lr_scale", 1.0))
     if not scale > 0:
         raise ValueError(f"quantizer_lr_scale must be > 0, got {scale}")
+    q_eps = lrs_config.get("quantizer_epsilon")
+    if q_eps is not None and (kind != "adamw" or not float(q_eps) > 0):
+        raise ValueError(f"quantizer_epsilon must be > 0 and needs AdamW, got {q_eps} with {optimizer}")
+    grouped = scale != 1.0 or q_eps is not None
     if kind == "adamw":
-        opt = (keras.optimizers.AdamW if scale == 1.0 else ScaledAdamW)(beta_1=0.9, beta_2=0.999, epsilon=float(adam_epsilon), **common)
+        opt = (ScaledAdamW if grouped else keras.optimizers.AdamW)(beta_1=0.9, beta_2=0.999, epsilon=float(adam_epsilon), **common)
     else:
-        opt = (keras.optimizers.Lion if scale == 1.0 else ScaledLion)(beta_1=0.9, beta_2=0.99, **common)
+        opt = (ScaledLion if grouped else keras.optimizers.Lion)(beta_1=0.9, beta_2=0.99, **common)
     opt.exclude_from_weight_decay(var_list=quantizer_variables(model))
-    if scale != 1.0:
-        opt.scale_variables(quantizer_variables(model), scale)
+    if grouped:
+        opt.scale_variables(quantizer_variables(model), scale, None if q_eps is None else float(q_eps))
     opt.build(model.trainable_variables)
     return opt
 
