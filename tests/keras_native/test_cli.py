@@ -67,7 +67,7 @@ def test_fit_writes_checkpoints_logs_and_summary(runs):
     assert sorted(p.name for p in (run1 / "ckpts").glob("step-*.npz")) == [f"step-{s:09d}.npz" for s in (2, 4, 6, 8, 10, 12)]
     assert len(list((run1 / "ckpts").glob("epoch-*.npz"))) == 3
     assert (first["global_step"], first["epoch"]) == (12, 3)
-    assert first["compile_counts"] == {"train": 2, "eval": 0, "predict": 0, "val": 1, "tail": 1, "bits": 1}
+    assert first["compile_counts"] == {"train": 2, "eval": 0, "predict": 0, "val": 1, "tail": 1, "bits": 1, "calibrate": 0}
     run = json.loads((run1 / "run.json").read_text())
     assert run["versions"]["hepattn_file"].startswith(str(REPO / "src"))
     assert run["settings"]["matmul_precision"] == "highest"

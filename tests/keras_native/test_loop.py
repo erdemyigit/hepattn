@@ -144,7 +144,7 @@ def test_control_a_lost_piece_of_resume_state_changes_the_run(run_a, tmp_path, t
 
 def test_trace_counts_over_the_run(run_a):
     """Three epochs (more than the gate's one): 2 train programs (EBOPs on / off), 1 val (= eval + predict), 1 tail."""
-    assert run_a["counts"] == {"train": 2, "eval": 0, "predict": 0, "val": 1, "tail": 1, "bits": 1}
+    assert run_a["counts"] == {"train": 2, "eval": 0, "predict": 0, "val": 1, "tail": 1, "bits": 1, "calibrate": 0}
     # control: a val batch of another shape is a new trace, so the counter sees retraces
     t = run_a["trainer"]
     batch = next(iter(run_a["val"].epoch(0)))

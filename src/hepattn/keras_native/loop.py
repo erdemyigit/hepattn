@@ -29,6 +29,10 @@ Logged values (names as the hybrid logs them):
   by a loss-only program (``tail`` trace) from the same forward.
 - ``train/ebops`` / ``val/ebops``: ``penalty / beta`` of the latest EBOPs-active step (plan 3.6; HGQ2's uint32
   ``_ebops`` saturates on JAX). NaN while no active step with beta > 0 has run.
+- ``val_cal/*`` (``LoopSettings.val_calibration`` = N > 0): the same validation with the WRAP integer bits traced over
+  the first N train micro-batches (``Trainer.calibrated_ntv``) instead of those training left (a running maximum of
+  the recent batches, decaying ``i_decay_speed`` per call), which ``val/*`` uses: events outside that range wrap.
+  ``val_cal/ebops`` is the EBOPs at the traced bits.
 - ``{stage}/bits_{b,f,i}_{mean,min,max,n}``: ``BitwidthMonitor`` over every model variable whose last path segment is
   ``b``, ``f`` or ``i`` (trainable and non-trainable: the hybrid reads ``named_parameters``, which includes both).
 - val metrics: ``metrics.ClicMetrics("val", pool_layers=...)`` on ``predict`` of the matched outputs; train task
@@ -51,6 +55,7 @@ CLIC torch-DataLoader source is ``hepattn.experiments.clic.main_jax`` (torch sta
 """
 
 import csv
+import itertools
 import json
 import math
 import time
@@ -65,6 +70,7 @@ import jax
 import jax.numpy as jnp
 import keras
 import numpy as np
+from hgq.utils.minmax_trace import TrainingFlagWrapper
 
 from hepattn.keras_native import checkpoint as ckpt
 from hepattn.keras_native import profile
@@ -108,6 +114,7 @@ class LoopSettings:
     donate: bool = True
     pool_layers: bool = True  # ClicMetrics: the hybrid's pooled values (S6a decision 5)
     prefetch: int = 0  # train batches read ahead in a background thread (data.prefetch); 0: none
+    val_calibration: int = 0  # train micro-batches traced into the WRAP integer bits for ``val_cal/*``; 0: none
 
     @classmethod
     def from_run_config(cls, rc: RunConfig, run_dir: str | Path, **overrides) -> "LoopSettings":
@@ -318,11 +325,14 @@ class Trainer:
         loss_fn = maskformer_loss(rc.task_specs, n_jobs=rc.matcher_n_jobs, host_fn=host_fn, target_object=target_object)
         self.steps = TrainStep(model, optimizer, loss_fn, matmul_precision=settings.matmul_precision, donate=settings.donate)
         self.schedule = learning_rate(lrs_config(rc), self.total_steps, steps_per_update=self.k)
-        self._traces = {"val": 0, "tail": 0, "bits": 0}
+        self._traces = {"val": 0, "tail": 0, "bits": 0, "calibrate": 0}
         self._val = jax.jit(self._val_impl)
         self._tail = jax.jit(self._tail_impl)
         self._bits = jax.jit(self._bits_impl)
         self._bit_index = self._bit_positions(model)
+        self._calibrate = jax.jit(self._calibrate_impl)
+        self._wrap_index = self._wrap_positions(model)
+        self._cal_inputs: list = []
 
         self.has_ebops = len(self.steps.ebops_leaves) > 0
         self.ebops_every = rc.quant.ebops_every_n_steps
@@ -403,9 +413,10 @@ class Trainer:
             )
         return out
 
-    def bit_stats(self, stage: str) -> dict[str, float]:
-        """``BitwidthMonitor`` values of the current state."""
-        stats = self._bits(self.state.tv, self.state.ntv)
+    def bit_stats(self, stage: str, state: TrainState | None = None) -> dict[str, float]:
+        """``BitwidthMonitor`` values of ``state`` (default: the current state)."""
+        state = self.state if state is None else state
+        stats = self._bits(state.tv, state.ntv)
         out = {}
         for suffix, (mean, lo, hi) in stats.items():
             ti, ni = self._bit_index[suffix]
@@ -418,8 +429,73 @@ class Trainer:
         return out
 
     def compile_counts(self) -> dict[str, int]:
-        """Traces of every jitted program: ``train`` (one per ``ebops_on``), ``val`` (eval + predict), ``tail``, ``bits``."""
+        """Traces of every jitted program: ``train`` (one per ``ebops_on``), ``val`` (eval + predict), ``tail``, ``bits``,
+        ``calibrate`` (``val_calibration``).
+        """
         return {**self.steps.compile_counts(), **self._traces}
+
+    # ------------------------------------------------------------------------------------------- WRAP calibration
+
+    @staticmethod
+    def _wrap_positions(model) -> tuple[list[int], list[int]]:
+        """Positions in the non-trainable variables of the integer bits ``_i`` and keep-negative bits ``_k`` of the
+        quantizers whose integer bits HGQ2 sets from the data (WRAP overflow; ``minmax_trace._reset_minmax``'s choice).
+        """
+        position = {id(v): n for n, v in enumerate(model.non_trainable_variables)}
+        quantizers = [q for q in model._flatten_layers(include_self=False, recursive=True) if hasattr(q, "_i_decay_speed") and q.trainable]  # noqa: SLF001
+        return [position[id(q._i)] for q in quantizers], [position[id(q._k)] for q in quantizers]  # noqa: SLF001
+
+    def _calibrate_impl(self, tv, ntv, inputs):
+        """One ``hgq.utils.trace_minmax`` batch (``training='tracing'``): every WRAP quantizer keeps the max of its stored
+        and this batch's minimal integer bits and ORs in the batch's signs. Returns the variables and the EBOPs term.
+        """
+        self._traces["calibrate"] += 1
+        leaves = self.steps.ebops_leaves
+        with self._precision(), leaves.enabled(True):
+            _, ntv, losses = self.steps.model.stateless_call(tv, ntv, inputs, training=TrainingFlagWrapper("tracing"), return_losses=True)
+        penalty, _ = leaves.split_losses(losses)
+        return ntv, sum(penalty, jnp.zeros((), jnp.float32))
+
+    def calibrated_ntv(self, train: DataSource, n: int) -> tuple[list, float | None]:
+        """The non-trainable variables of the current state with the WRAP integer bits fixed as a deployment fixes them.
+
+        In training mode HGQ2 sets each WRAP quantizer's integer bits to max(stored - ``i_decay_speed``, the batch's
+        minimal ones) (kif datalanes: 0.01 per call, so a running maximum of the recent batches), and eval mode uses the
+        stored ones: an event outside the recent batches' range wraps. Here they are traced (``trace_minmax``: reset to
+        -1e9 and unsigned, then the max over batches) over the first ``n`` train micro-batches of epoch 0, a fixed
+        calibration set (read once and kept). ``self.state`` is not changed, so training and resume are unaffected.
+
+        Returns:
+            The variables, and the EBOPs at those integer bits (``penalty / beta`` of the last traced batch; None at
+            beta 0 or without EBOPs leaves).
+
+        Raises:
+            ValueError: If ``n < 1`` or the train split has fewer than ``n`` micro-batches.
+        """
+        if n < 1:
+            raise ValueError(f"calibration needs n >= 1 train micro-batches, got {n}")
+        if len(self._cal_inputs) < n:
+            batches = train.epoch(0, 0)
+            try:
+                # copies: a CPU array may alias the loader's shared memory (one file descriptor per batch kept)
+                self._cal_inputs = [jax.tree_util.tree_map(lambda x: jnp.array(x, copy=True), b.inputs) for b in itertools.islice(batches, n)]
+            finally:
+                close = getattr(batches, "close", None)
+                if close is not None:
+                    close()
+            if len(self._cal_inputs) < n:
+                raise ValueError(f"the train split gave {len(self._cal_inputs)} < {n} calibration micro-batches")
+        i_pos, k_pos = self._wrap_index
+        ntv = list(self.state.ntv)
+        for p in i_pos:
+            ntv[p] = jnp.full(ntv[p].shape, -1e9, ntv[p].dtype)
+        for p in k_pos:
+            ntv[p] = jnp.zeros(ntv[p].shape, ntv[p].dtype)
+        penalty = None
+        for inputs in self._cal_inputs[:n]:
+            ntv, penalty = self._calibrate(self.state.tv, ntv, inputs)
+        ebops = float(penalty) / self.beta if self.has_ebops and self.beta else None
+        return ntv, ebops
 
     # ------------------------------------------------------------------------------------------- beta and EBOPs
 
@@ -634,7 +710,7 @@ class Trainer:
                 self.epoch, self.batch = epoch + 1, 0
             with prof.phase("epoch_end"):
                 prof.wait(self.state, "drain")
-                self._on_epoch_end(epoch, val if ended else None, epochs_csv)
+                self._on_epoch_end(epoch, val if ended else None, epochs_csv, train)
             if not ended:  # max_steps inside an epoch: Lightning runs no validation there
                 break
         if self.step_manager is not None and self.step_manager.write_last:
@@ -727,21 +803,28 @@ class Trainer:
         self._t_log, self._micro_since_log = time.perf_counter(), 0
         return row
 
-    def validate(self, val: DataSource) -> dict[str, float]:
+    def validate(self, val: DataSource, *, state: TrainState | None = None, stage: str = "val", ebops: float | None = None) -> dict[str, float]:
         """One validation epoch: event-weighted losses, ``ClicMetrics``, EBOPs and bitwidth monitors.
+
+        Args:
+            val: The validation split.
+            state: The variables to evaluate (default: the current state), e.g. with calibrated integer bits.
+            stage: Prefix of the logged names.
+            ebops: The ``{stage}/ebops`` value (default: the latest training read-out).
 
         Raises:
             RuntimeError: If the split gives no events.
         """
         prof = self.prof
-        metrics = ClicMetrics("val", pool_layers=self.s.pool_layers)
+        state = self.state if state is None else state
+        metrics = ClicMetrics(stage, pool_layers=self.s.pool_layers)
         sums: dict[str, float] = defaultdict(float)
         events = 0
         for i, batch in enumerate(self._batches(val, 0, 0, train=False)):
             if self.s.limit_val_batches is not None and i >= self.s.limit_val_batches:
                 break
             with self._jit_phase("forward"):
-                res = self._val(self.state, batch.inputs, batch.targets)
+                res = self._val(state, batch.inputs, batch.targets)
             prof.wait(res, "device")  # the losses are read on the host below
             n = batch.num_real
             task, losses = res["task"], res["losses"]
@@ -751,7 +834,7 @@ class Trainer:
                     targets = {k: v[:n] for k, v in batch.targets.items()}
                     task, losses = self._tail(outputs, targets)
             with prof.phase("device_get"):
-                terms = jax.device_get({"val/loss": task, "val/quant_ebops_loss": res["regularization"], **_flat_losses(losses, "val")})
+                terms = jax.device_get({f"{stage}/loss": task, f"{stage}/quant_ebops_loss": res["regularization"], **_flat_losses(losses, stage)})
             for key, value in terms.items():
                 sums[key] += float(value) * n
             events += n
@@ -762,20 +845,26 @@ class Trainer:
         out = {key: total / events for key, total in sums.items()}
         with prof.phase("metrics_compute"):
             out.update(metrics.compute())
-        ebops = self.last_ebops
-        out["val/ebops"] = math.nan if ebops is None else ebops
+        ebops = self.last_ebops if ebops is None else ebops
+        out[f"{stage}/ebops"] = math.nan if ebops is None else ebops
         with self._jit_phase("bits"):
-            out.update(self.bit_stats("val"))
+            out.update(self.bit_stats(stage, state))
         self.val_events = events
         return out
 
-    def _on_epoch_end(self, epoch: int, val: DataSource | None, epochs_csv: CsvLog) -> None:
-        """Validation (a complete epoch only), the ``MetricsCsvWriter`` row, then the epoch / last checkpoints."""
+    def _on_epoch_end(self, epoch: int, val: DataSource | None, epochs_csv: CsvLog, train: DataSource | None = None) -> None:
+        """Validation (a complete epoch only; with ``val_calibration`` also ``val_cal/*`` at calibrated WRAP integer
+        bits), the ``MetricsCsvWriter`` row, then the epoch / last checkpoints.
+        """
         prof = self.prof
         validated = val is not None and (epoch + 1) % self.s.check_val_every_n_epoch == 0
         if validated:
             with prof.phase("val"):
                 self.last_val = self.validate(val)
+            if self.s.val_calibration > 0 and train is not None:
+                with prof.phase("val_cal"):
+                    ntv, ebops = self.calibrated_ntv(train, self.s.val_calibration)
+                    self.last_val.update(self.validate(val, state=self.state._replace(ntv=ntv), stage="val_cal", ebops=ebops))
             with prof.phase("csv"):
                 epochs_csv.append({**self.train_logs, **self.epoch_logs, **self.last_val, "epoch": float(epoch), "step": float(self.global_step)})
         # Lightning ModelCheckpoint._should_save_on_train_epoch_end: with check_val_every_n_epoch != 1 it saves only at

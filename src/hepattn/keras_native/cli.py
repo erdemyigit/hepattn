@@ -90,6 +90,11 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--ckpt-save-top-k", type=int, help="step checkpoints kept (-1: all)")
     fit.add_argument("--no-donate", action="store_true", help="do not donate the state to the train step")
     fit.add_argument("--prefetch", type=int, default=0, help="train batches read ahead in a background thread (0: none)")
+    fit.add_argument(
+        "--val-calibration",
+        type=int,
+        help="also validate with the WRAP integer bits traced over the first N train micro-batches (val_cal/*; loop.Trainer.calibrated_ntv)",
+    )
     prof = fit.add_argument_group("profiling (docs/hgq/port_log/PROF.md; off by default: no added sync)")
     prof.add_argument("--profile-phases", metavar="CSV", help="record the loop phases: one row per phase to CSV, summary to CSV.json")
     prof.add_argument("--profile-sync", action="store_true", help="also block on every train step and transfer (device time per step)")
@@ -229,6 +234,7 @@ def fit(args: argparse.Namespace, data_factory: DataFactory) -> dict:
         donate=not args.no_donate,
         pool_layers=not args.metrics_per_layer,
         prefetch=args.prefetch,
+        val_calibration=args.val_calibration,
     )
     dummy = True if args.dummy_data else None
     train = data_factory(rc, "train", seed=settings.seed, dummy_data=dummy)
