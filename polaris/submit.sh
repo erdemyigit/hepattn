@@ -63,7 +63,8 @@ case "$BASE" in
   # G4: init ~15 min in debug; a train job runs the 4 arms in parallel and resumes, so the queue and walltime are chosen
   # in the submit shell: G4_QUEUE=preemptable G4_WALLTIME=14:00:00 for one long job, or the 1 h debug default for a chain
   19_g4_compare.pbs)    DEF_QUEUE="${G4_QUEUE:-${QUEUE_DEBUG:-debug}}"; DEF_WALL="${G4_WALLTIME:-01:00:00}" ;;
-  # warm start: init (conversion, CPU parity, 60-step smoke) and the pilot arms each fit the 1 h debug job
+  # warm start: init (conversion, CPU parity, 60-step smoke) and the ws1 pilot arms each fit the 1 h debug job; a long
+  # run (ws2: 20k steps) sets WS_QUEUE / WS_WALLTIME (one node: preemptable or capacity; prod needs >= 10 nodes)
   22_warmstart.pbs)     DEF_QUEUE="${WS_QUEUE:-${QUEUE_DEBUG:-debug}}"; DEF_WALL="${WS_WALLTIME:-01:00:00}" ;;
   *)            DEF_QUEUE="${QUEUE_DEBUG:-debug}";      DEF_WALL="${WALLTIME_SMOKE:-00:20:00}" ;;
 esac
@@ -83,7 +84,7 @@ ARGS=(-A "$PBS_PROJECT" -l "filesystems=$PBS_FILESYSTEMS" -q "$QUEUE"
 # the submit shell's environment. The knobs that are set (an empty value counts: SMOKE_XLA_FLAGS= drops the flag) go
 # into a file of `export` lines, and the job gets only that file's path (-v SUBMIT_ENV_FILE=...), because qsub -v
 # splits its list at commas (G3_JOBS holds commas).
-JOB_VARS=(G3_JOBS G3_ARGS G3_DATA_FILE SMOKE_ARGS SMOKE_XLA_FLAGS PROF_VARIANTS PROF_ARGS PROF_XLA_FLAGS G4_STAGE G4_TAG G4_ROOT G4_ARGS G4_ARMS G4_PLATFORMS WS_STAGE WS_TAG WS_ROOT WS_SOURCE WS_ARGS WS_ARMS JAX_COMPILATION_CACHE_DIR)
+JOB_VARS=(G3_JOBS G3_ARGS G3_DATA_FILE SMOKE_ARGS SMOKE_XLA_FLAGS PROF_VARIANTS PROF_ARGS PROF_XLA_FLAGS G4_STAGE G4_TAG G4_ROOT G4_ARGS G4_ARMS G4_PLATFORMS WS_STAGE WS_TAG WS_ROOT WS_SOURCE WS_ARGS WS_ARMS WS_SMOKE_ARM JAX_COMPILATION_CACHE_DIR)
 ENV_FILE=""
 for v in "${JOB_VARS[@]}"; do
   [ -n "${!v+x}" ] || continue

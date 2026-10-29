@@ -14,10 +14,11 @@
 #   WS_STAGE=init  WS_TAG=ws1 bash polaris/submit.sh 22_warmstart.pbs   # config, conversion, CPU parity gate, smoke on GPU 0
 #   WS_STAGE=pilot WS_TAG=ws1 bash polaris/submit.sh 22_warmstart.pbs   # the arms of WS_ARMS, one per GPU, then the report
 #   WS_STAGE=report WS_TAG=ws1 bash polaris/submit.sh 22_warmstart.pbs
-# (submit.sh hands WS_STAGE, WS_TAG, WS_ROOT, WS_SOURCE, WS_ARGS, WS_ARMS and JAX_COMPILATION_CACHE_DIR to the job.)
+# (submit.sh hands WS_STAGE, WS_TAG, WS_ROOT, WS_SOURCE, WS_ARGS, WS_ARMS, WS_SMOKE_ARM and JAX_COMPILATION_CACHE_DIR to the job.)
 #   WS_SOURCE  directory with the float run's config.yaml and its checkpoint as model.ckpt (default $WORK_ROOT/warmstart/source)
 #   WS_ARGS    extra options of 22_warmstart.py init (setpoints, --k, --batch, ...); the init needs the three setpoints
 #   WS_ARMS    pilot arms (default: adamw adamw-q20 lion-6e5 lion-6e4 on GPUs 0-3)
+#   WS_SMOKE_ARM  the arm of the init's 60-step smoke (default adamw)
 #   WS_ROOT    run directories (default $WORK_ROOT/warmstart/runs); the report goes to logs/ws_<tag>.json
 # Env: $REPO/.venv-jax (ONE-TIME SETUP in 16_jax_smoke.pbs). -r y: a requeued pilot resumes from the arms' checkpoints.
 set -uo pipefail
@@ -59,7 +60,7 @@ case "$STAGE" in
     echo "WS-INIT-EXIT-$code"
     [ "$code" = 0 ] || exit "$code"
     # smoke: 60 optimizer steps of the validated recipe from the converted weights on GPU 0, validation on 512 events
-    CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$REPO/src" "${WS[@]}" run --root "$ROOT" --tag "$TAG" --arm adamw --run-name smoke \
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$REPO/src" "${WS[@]}" run --root "$ROOT" --tag "$TAG" --arm "${WS_SMOKE_ARM:-adamw}" --run-name smoke \
       --max-steps 60 --num-val 512 --jax-python "$JPY" --compile-cache "$JAX_COMPILATION_CACHE_DIR"
     echo "WS-SMOKE-EXIT-$?"
     nvidia-smi --query-gpu=index,memory.used --format=csv

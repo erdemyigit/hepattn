@@ -136,3 +136,16 @@ def test_weight_b0_knob(tmp_path):
     assert default["model"]["model"]["init_args"]["quant"]["weight"] == {"default_q_type": "kbi", "b0": 8, "i0": 2}
     assert twelve["model"]["model"]["init_args"]["quant"]["weight"]["b0"] == 12
     assert load_config([tmp_path / "b8.yaml"]).model_hash != load_config([tmp_path / "b12.yaml"]).model_hash
+
+
+def test_datalane_overflow_knob(tmp_path):
+    os.environ.setdefault("KERAS_BACKEND", "jax")
+    from hepattn.keras_native.config import load_config  # noqa: PLC0415
+
+    default, sat = generate(tmp_path, "wrap"), generate(tmp_path, "sat", HGQ_DATALANE_OVERFLOW="sat")
+    assert default["model"]["model"]["init_args"]["quant"]["datalane"] == {"default_q_type": "kif", "i0": 4, "f0": 8}
+    assert sat["model"]["model"]["init_args"]["quant"]["datalane"]["overflow_mode"] == "SAT"
+    rc_wrap, rc_sat = load_config([tmp_path / "wrap.yaml"]), load_config([tmp_path / "sat.yaml"])
+    assert rc_wrap.model_hash != rc_sat.model_hash
+    proc = run(tmp_path, "bad", HGQ_DATALANE_OVERFLOW="CLAMP")
+    assert proc.returncode != 0 and "HGQ_DATALANE_OVERFLOW" in proc.stderr

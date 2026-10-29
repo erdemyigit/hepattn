@@ -36,6 +36,8 @@ Env overrides:
     HGQ_LR_MAX     OneCycle peak LR               (default 5e-5)
     HGQ_WEIGHT_DECAY  weight decay                (default: the model config's lrs_config.weight_decay)
     HGQ_WEIGHT_B0  initial weight bitwidth b0 of the kbi weight quantizers (default 8; part of the model hash)
+    HGQ_DATALANE_OVERFLOW  overflow mode of the kif datalane quantizers, e.g. SAT (trainable integer bits); unset: not
+                   written, HGQ2's default WRAP (integer bits set from each training batch); part of the model hash
     HGQ_QUANTIZER_LR_SCALE  LR multiplier of the trainable quantizer variables (bitwidths), JAX driver only
                    (keras_native/optim.py; unset: not written, 1)
 
@@ -307,6 +309,11 @@ net["quant"] = {
     "table": {"default_q_type": "kif", "i0": 2, "f0": 10},
     "ebops": {"beta0": 0.0},
 }
+if os.environ.get("HGQ_DATALANE_OVERFLOW"):
+    OVERFLOW = os.environ["HGQ_DATALANE_OVERFLOW"].upper()
+    if OVERFLOW not in {"WRAP", "SAT", "SAT_SYM"}:
+        raise SystemExit(f"HGQ_DATALANE_OVERFLOW must be WRAP, SAT or SAT_SYM, got {OVERFLOW!r}")
+    net["quant"]["datalane"]["overflow_mode"] = OVERFLOW
 
 # BetaPID and BetaScheduler both write every quantized layer's _beta, and BetaScheduler
 # writes per batch -- i.e. after BetaPID's epoch-start write -- so exactly one of them
