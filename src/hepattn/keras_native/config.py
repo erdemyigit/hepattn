@@ -391,6 +391,7 @@ class OptimizerConfig:
     epsilon: float = 1e-8
     quantizer_lr_scale: float = 1.0  # native only (optim.py)
     quantizer_epsilon: float | None = None  # native only (optim.py); None: ``epsilon``
+    quantizer_l1: float | None = None  # native only: HGQ2 bitwidth-regularizer strength (``QuantSpec.bit_l1``); None: HGQ2's 1e-8
 
 
 @dataclass(frozen=True)
@@ -480,8 +481,26 @@ class RunConfig:
         return config_hash(model_description(self.model_section))
 
     def build_model(self) -> MaskFormer:
-        """``maskformer.from_config`` of the model section (unbuilt; call it on one batch to build)."""
-        return from_config(self.model_section)
+        """``maskformer.from_config`` of the model section (unbuilt; call it on one batch to build).
+
+        ``lrs_config.quantizer_l1`` goes into the quant spec as ``bit_l1`` here, not in the model section: it only adds
+        loss terms, so runs that differ in it share the model hash and warm-start from one init.
+
+        Raises:
+            ConfigError: If ``quantizer_l1`` is set for a float model or next to a ``quant.bit_l1`` of the model.
+        """
+        l1 = self.optimizer.quantizer_l1
+        if l1 is None:
+            return from_config(self.model_section)
+        section = copy.deepcopy(self.model_section)
+        init_args = section["model"].get("init_args", section["model"])
+        quant = init_args.get("quant")
+        if quant is None:
+            raise ConfigError("lrs_config.quantizer_l1 needs a quantized model (model.init_args.quant)")
+        if quant.get("bit_l1") is not None:
+            raise ConfigError("set the bitwidth-regularizer strength once: lrs_config.quantizer_l1 or quant.bit_l1")
+        init_args["quant"] = {**quant, "bit_l1": l1}
+        return from_config(section)
 
 
 def _callbacks(trainer: dict) -> dict[str, dict]:
@@ -517,6 +536,7 @@ def _optimizer(model: dict, trainer: dict) -> OptimizerConfig:
         accumulate_grad_batches=int(trainer.get("accumulate_grad_batches") or 1),
         quantizer_lr_scale=float(lrs.get("quantizer_lr_scale", 1.0)),
         quantizer_epsilon=None if lrs.get("quantizer_epsilon") is None else float(lrs["quantizer_epsilon"]),
+        quantizer_l1=None if lrs.get("quantizer_l1") is None else float(lrs["quantizer_l1"]),
     )
 
 

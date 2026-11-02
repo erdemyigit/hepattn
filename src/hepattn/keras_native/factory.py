@@ -48,6 +48,12 @@ class QuantSpec:
             lookup table is sized from it (``2 * cap + 4`` input bits); hls4ml caps a table
             at 1e6 entries, so 7 is the largest deployable value. Raise it only for
             precision studies.
+        bit_l1: strength of HGQ2's bitwidth regularizer. None keeps HGQ2's defaults: ``MonoL1(1e-8)``, i.e.
+            ``1e-8 x sum(bits)``, on the ``b`` of KBI, the ``i`` and ``f`` of KIF and the ``m`` and ``e`` of float
+            quantizers (``hgq.quantizer.config``; KBI ``i`` has none). A number replaces each of these with
+            ``MonoL1(bit_l1)`` through the quantizer config fields (``br`` / ``ir`` / ``fr`` / ``mr`` / ``er``) and
+            leaves the others without one; 0 removes them. It adds loss terms only: no variable or forward changes.
+            Runs set it with ``lrs_config.quantizer_l1`` (``config.RunConfig.build_model``), which keeps the model hash.
     """
 
     weight: dict[str, Any] = field(default_factory=dict)
@@ -55,6 +61,7 @@ class QuantSpec:
     table: dict[str, Any] = field(default_factory=dict)
     ebops: dict[str, Any] = field(default_factory=dict)
     seq_proj_frac_cap: int = 7
+    bit_l1: float | None = None
 
 
 class EinsumOp(keras.layers.Layer):
@@ -123,6 +130,9 @@ class LayerFactory:
             yield
             return
         with ExitStack() as stack:
+            if self.quant.bit_l1 is not None:
+                for scope in bit_l1_scopes(self.quant.bit_l1):
+                    stack.enter_context(scope)
             if self.quant.weight:
                 stack.enter_context(QuantizerConfigScope(place="weight", **self.quant.weight))
             if self.quant.datalane:
@@ -216,6 +226,31 @@ class LayerFactory:
         """
         base = QuantizerConfig("kif", "weight")
         return QuantizerConfig("kif", "weight", i0=base["i0"], f0=min(base["f0"], max_frac_bits), fc=MinMax(-24, max_frac_bits))
+
+
+BIT_REGULARIZER_KEYS = ("br", "ir", "fr", "mr", "er", "e0r")
+
+
+def bit_l1_scopes(l1: float) -> list[QuantizerConfigScope]:
+    """One ``QuantizerConfigScope`` per HGQ2 (quantizer type, place) default that has bitwidth regularizers.
+
+    Each sets the keys whose current default is not None to ``MonoL1(l1)`` (None for ``l1 == 0``).
+
+    Raises:
+        ValueError: For ``l1 < 0`` (MonoL1 would push the bitwidths up).
+    """
+    from hgq.quantizer.config import default_configs  # noqa: PLC0415  (the live defaults the scopes edit)
+    from hgq.regularizers import MonoL1  # noqa: PLC0415
+
+    if not l1 >= 0:
+        raise ValueError(f"bit_l1 must be >= 0, got {l1}")
+    reg = MonoL1(l1) if l1 > 0 else None
+    scopes = []
+    for (q_type, place), conf in default_configs.items():
+        keys = {k: reg for k in BIT_REGULARIZER_KEYS if conf.get(k) is not None}
+        if keys:
+            scopes.append(QuantizerConfigScope(q_type=q_type, place=place, **keys))
+    return scopes
 
 
 def _fixed_config(place: str, int_bits: int, frac_bits: int, homogeneous: bool = True) -> QuantizerConfig:
