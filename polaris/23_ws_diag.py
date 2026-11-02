@@ -20,6 +20,8 @@ r"""CPU diagnostics of the QAT warm start (ws2): bitwidth gradients, and the WRA
             (b) traced over the first N train batches (``Trainer.calibrated_ntv``, ``val_cal/loss``), for each N of
             ``--cal-batches``, (c) none: the training-mode forward on the val events (a WRAP lane only rounds in
             training, no overflow), which is what ``train/loss`` measures. EBOPs at each set of integer bits.
+``census``  At ``--cal-batches`` calibrated integer bits: EBOPs per leaf, integer bits per WRAP quantizer, val_cal loss,
+            and which WRAP lanes the val events overflow (wrap). ``census-diff`` compares two census runs (two code trees).
 """
 
 import argparse
@@ -418,6 +420,89 @@ def cmd_honest(args) -> int:
     return 0
 
 
+def cmd_census(args) -> int:
+    """Calibrated WRAP integer bits of the init (``Trainer.calibrated_ntv`` over ``--cal-batches``), and what they do.
+
+    Writes: total and per-leaf EBOPs; per WRAP quantizer (variable path) the sum and max of its integer bits; the val
+    loss at those bits (``val_cal/loss``) and in training mode (no overflow); and the wrap census: tracing the val
+    events on top of the calibrated bits (max(stored, batch)) gives, per quantizer, the lanes whose val range needs
+    more integer bits than the calibration traced, i.e. the lanes that wrap in ``val_cal``. Run it with the same
+    ``polaris/23_ws_diag.py`` on two code trees (``PYTHONPATH``) and compare the JSONs (``census-diff``).
+    """
+    import jax  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
+
+    jax.config.update("jax_default_matmul_precision", "highest")
+    _, t, train, val = setup(args, num_train=int(args.cal_batches * args.batch * 1.05) + 2 * args.batch, num_val=int(args.val_batches * args.batch))
+    model = t.steps.model
+    t._set_beta(1.0)  # noqa: SLF001  (EBOPs read-out = penalty)
+    i_pos, _ = t._wrap_index  # noqa: SLF001
+    paths = [v.path for v in model.non_trainable_variables]
+    ntv, ebops = t.calibrated_ntv(train, args.cal_batches)
+    leaves = t.steps.ebops_leaves
+    out = {"config": args.config, "init": args.init, "batch": args.batch, "cal_batches": args.cal_batches, "ebops": ebops}
+    out["leaf_ebops"] = {leaf.name: int(np.asarray(ntv[i])) for leaf, i in zip(leaves.leaves, leaves.ebops_index, strict=True)}
+    i_cal = {paths[p]: np.asarray(ntv[p], np.float64) for p in i_pos}
+    out["wrap_i"] = {k: {"sum": float(v.sum()), "max": float(v.max()), "n": int(v.size)} for k, v in i_cal.items()}
+    res = t.validate(val, state=t.state._replace(ntv=ntv), stage="v")
+    out["val_cal_loss"] = res["v/loss"]
+    print(f"RESULT ebops {ebops:.4e} val_cal/loss {res['v/loss']:.4f}", flush=True)
+    # wrap census: the val events traced on top of the calibrated bits
+    traced = list(ntv)
+    for batch in val.epoch(0):
+        traced, _ = t._calibrate(t.state.tv, traced, batch.inputs)  # noqa: SLF001
+    wraps = {}
+    for p in i_pos:
+        d = np.asarray(traced[p], np.float64) - i_cal[paths[p]]
+        if (d > 0).any():
+            wraps[paths[p]] = {"lanes": int((d > 0).sum()), "n": int(d.size), "max_extra_bits": float(d.max())}
+    out["val_wraps"] = wraps
+    print(f"RESULT wrapping quantizers on val: {len(wraps)} of {len(i_pos)}", flush=True)
+    # no overflow: the training-mode forward on the val events
+    fwd = jax.jit(lambda tv, ntv, x: model.stateless_call(tv, ntv, x, training=True)[0])
+    tot, events = 0.0, 0
+    for batch in val.epoch(0):
+        outputs = fwd(t.state.tv, t.state.ntv, batch.inputs)
+        n = batch.num_real
+        outputs = jax.tree_util.tree_map(lambda x, n=n: x[:n], outputs)
+        task, _ = t._tail(outputs, {k: v[:n] for k, v in batch.targets.items()})  # noqa: SLF001
+        tot += float(task) * n
+        events += n
+    out["training_mode_val_loss"] = tot / events
+    print(f"RESULT training_mode_on_val: loss {tot / events:.4f}", flush=True)
+    Path(args.out).write_text(json.dumps(out, indent=1) + "\n")
+    return 0
+
+
+def cmd_census_diff(args) -> int:
+    """Per-leaf EBOPs and per-quantizer integer-bit changes between two ``census`` JSONs (``--base``, ``--new``)."""
+    base, new = (json.loads(Path(p).read_text()) for p in (args.base, args.new))
+    leaves = sorted(base["leaf_ebops"], key=lambda k: new["leaf_ebops"].get(k, 0) - base["leaf_ebops"][k])
+    moved = [(k, base["leaf_ebops"][k], new["leaf_ebops"][k]) for k in leaves if new["leaf_ebops"][k] != base["leaf_ebops"][k]]
+    quant = []
+    for k, b in base["wrap_i"].items():
+        n = new["wrap_i"][k]
+        if n["sum"] != b["sum"]:
+            quant.append((k, b["sum"], n["sum"], b["max"], n["max"]))
+    quant.sort(key=lambda r: r[2] - r[1])
+    summary = {
+        "ebops": [base["ebops"], new["ebops"]],
+        "val_cal_loss": [base["val_cal_loss"], new["val_cal_loss"]],
+        "training_mode_val_loss": [base["training_mode_val_loss"], new["training_mode_val_loss"]],
+        "val_wrapping_quantizers": [len(base["val_wraps"]), len(new["val_wraps"])],
+        "leaves_moved": len(moved),
+        "leaves": len(base["leaf_ebops"]),
+        "quantizers_moved": len(quant),
+        "quantizers": len(base["wrap_i"]),
+        "top_leaves": [{"leaf": k, "base": b, "new": n} for k, b, n in moved[: args.top]],
+        "top_quantizers": [{"var": k, "sum_i": [b, n], "max_i": [bm, nm]} for k, b, n, bm, nm in quant[: args.top]],
+    }
+    print(json.dumps(summary, indent=1))
+    if args.out:
+        Path(args.out).write_text(json.dumps(summary, indent=1) + "\n")
+    return 0
+
+
 def ebops_at(t, ntv) -> float:
     """EBOPs at max(the stored integer bits of ``ntv``, the first calibration batch's): HGQ2 computes EBOPs only in a
     forward that also sets the integer bits; a tracing forward keeps max(stored, batch).
@@ -434,7 +519,7 @@ def ebops_at(t, ntv) -> float:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(prog="23_ws_diag", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("grads", "honest", "ste"):
+    for name in ("grads", "honest", "ste", "census"):
         p = sub.add_parser(name)
         p.add_argument("--config", required=True, help="the init's config.yaml (22_warmstart.py init)")
         p.add_argument("--init", required=True, help="the converted init.npz")
@@ -468,14 +553,23 @@ def parse_args(argv=None):
     h.add_argument("--cal-batches", type=int, nargs="+", default=[1, 4, 16, 64])
     h.add_argument("--running", type=int, default=250, help="training-mode forwards for the running integer bits (a); 0: skip")
     h.add_argument("--margins", type=int, nargs="*", default=[], help="integer-bit margins on the largest calibration")
+    c = sub.choices["census"]
+    c.add_argument("--val-batches", type=int, default=8)
+    c.add_argument("--cal-batches", type=int, default=256)
+    d = sub.add_parser("census-diff")
+    d.add_argument("--base", required=True)
+    d.add_argument("--new", required=True)
+    d.add_argument("--top", type=int, default=15)
+    d.add_argument("--out")
     return parser.parse_args(argv)
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    if args.command != "replay" and os.environ.get("KERAS_BACKEND") != "jax":
+    if args.command not in {"replay", "census-diff"} and os.environ.get("KERAS_BACKEND") != "jax":
         raise SystemExit("KERAS_BACKEND must be jax")
-    return {"grads": cmd_grads, "replay": cmd_replay, "honest": cmd_honest, "ste": cmd_ste}[args.command](args)
+    commands = {"grads": cmd_grads, "replay": cmd_replay, "honest": cmd_honest, "ste": cmd_ste, "census": cmd_census, "census-diff": cmd_census_diff}
+    return commands[args.command](args)
 
 
 if __name__ == "__main__":
