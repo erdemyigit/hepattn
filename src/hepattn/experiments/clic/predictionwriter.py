@@ -65,6 +65,35 @@ def load_convert_h5(filepath):
         )
 
 
+def write_root(h5_path) -> Path:
+    """The prediction ROOT file (``event_tree``: ``mpflow``, ``proxy``, ``pred_ind``, ``event_number``) next to ``h5_path``,
+    the file the performance code reads.
+    """
+    h5_path = Path(h5_path)
+    print("Loading predictions...")
+    event_number, pflow_class, pflow_ptetaphi, proxy_ptetaphi, pflow_indicator = load_convert_h5(h5_path.as_posix())
+    root_path = h5_path.with_suffix(".root")
+    print("Writing to ROOT file")
+    with uproot.recreate(root_path.as_posix()) as f:
+        f["event_tree"] = {
+            "mpflow": {
+                "pt": ak.Array(pflow_ptetaphi[..., 0]),
+                "eta": ak.Array(pflow_ptetaphi[..., 1]),
+                "phi": ak.Array(pflow_ptetaphi[..., 2]),
+                "class": ak.Array(pflow_class),
+            },
+            "proxy": {
+                "pt": ak.Array(proxy_ptetaphi[..., 0]),
+                "eta": ak.Array(proxy_ptetaphi[..., 1]),
+                "phi": ak.Array(proxy_ptetaphi[..., 2]),
+            },
+            "pred_ind": ak.Array(pflow_indicator),
+            "event_number": ak.Array(event_number)[: len(pflow_indicator)],
+        }
+    print(f"Wrote ROOT file to {root_path}")
+    return root_path
+
+
 class PflowPredictionWriter(Callback):
     def __init__(self) -> None:
         super().__init__()
@@ -218,24 +247,4 @@ class PflowPredictionWriter(Callback):
         if self.writer is not None:
             print(f"Wrote predictions to {self.output_path}")
             self.writer.close()
-        print("Loading predictions...")
-        event_number, pflow_class, pflow_ptetaphi, proxy_ptetaphi, pflow_indicator = load_convert_h5(self.output_path.as_posix())
-        root_path = self.output_path.with_suffix(".root").as_posix()
-        print("Writing to ROOT file")
-        with uproot.recreate(root_path) as f:
-            f["event_tree"] = {
-                "mpflow": {
-                    "pt": ak.Array(pflow_ptetaphi[..., 0]),
-                    "eta": ak.Array(pflow_ptetaphi[..., 1]),
-                    "phi": ak.Array(pflow_ptetaphi[..., 2]),
-                    "class": ak.Array(pflow_class),
-                },
-                "proxy": {
-                    "pt": ak.Array(proxy_ptetaphi[..., 0]),
-                    "eta": ak.Array(proxy_ptetaphi[..., 1]),
-                    "phi": ak.Array(proxy_ptetaphi[..., 2]),
-                },
-                "pred_ind": ak.Array(pflow_indicator),
-                "event_number": ak.Array(event_number)[: len(pflow_indicator)],
-            }
-        print(f"Wrote ROOT file to {root_path}")
+        write_root(self.output_path)
