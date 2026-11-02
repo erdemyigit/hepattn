@@ -1,4 +1,4 @@
-"""polaris/22_warmstart.py arm configs (ws2): the arm's optimizer keys, BetaPID arguments and PeriodicEBOPs cadence are
+"""polaris/22_warmstart.py arm configs (ws2, ws3): the arm's optimizer keys, BetaPID arguments and PeriodicEBOPs cadence are
 written over the init's config, other BetaPID arguments are kept, and a ``"model": "sat"`` arm trains the init's SAT
 model (its config and init), which an init without ``--sat-cal-batches`` does not have.
 """
@@ -94,3 +94,14 @@ def test_the_sat_arm_trains_the_sat_model(ws, manifest, tmp_path):
     del manifest["sat"]
     with pytest.raises(SystemExit, match="sat-cal-batches"):
         ws.arm_model(manifest, "ws2-sat")
+
+
+def test_ws3_arms_set_target_beta_range_lr_scale_and_l1(ws, manifest, tmp_path):
+    t8, q4, l0 = (written(ws, manifest, arm, tmp_path) for arm in ("ws3-t8", "ws3-t8-q4", "ws3-t8-l0"))
+    for cfg in (t8, q4, l0):
+        assert every(cfg) == 1 and cfg["model"]["lrs_config"]["quantizer_epsilon"] == 1e-12
+        assert pid_args(cfg) == {"target_ebops": 1.6e8, "init_beta": 1e-9, "i": 0.5, "max_beta": 1e-5, "min_beta": 1e-12}
+    assert t8["model"]["lrs_config"]["quantizer_lr_scale"] == 20.0 and q4["model"]["lrs_config"]["quantizer_lr_scale"] == 4.0
+    assert "quantizer_l1" not in t8["model"]["lrs_config"] and l0["model"]["lrs_config"]["quantizer_l1"] == 0.0
+    targets = sorted(pid_args(written(ws, manifest, f"ws3-t{d}", tmp_path))["target_ebops"] for d in (6, 7, 9))
+    assert targets == [1.6e6, 1.6e7, 1.6e9]

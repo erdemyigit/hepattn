@@ -76,8 +76,9 @@ QUEUE="${QUEUE:-$DEF_QUEUE}"
 LOGDIR="$(dirname "$HERE")/logs"
 mkdir -p "$LOGDIR"
 
+# LOG_NAME: another log file name, for jobs of one script that run at the same time (PBS writes -o at the job end)
 ARGS=(-A "$PBS_PROJECT" -l "filesystems=$PBS_FILESYSTEMS" -q "$QUEUE"
-      -l "walltime=$DEF_WALL" -o "$LOGDIR/${BASE%.pbs}.log")
+      -l "walltime=$DEF_WALL" -o "$LOGDIR/${LOG_NAME:-${BASE%.pbs}}.log")
 [ -n "$DEPEND" ] && ARGS+=(-W "depend=$DEPEND")
 
 # Job knobs that the .pbs scripts read (16_jax_smoke, 17_g3_step, 18_loop_profile, 19_g4_compare). qsub runs here without -V, so the job does not see

@@ -11,7 +11,7 @@ Stages (``22_warmstart.pbs`` runs them on Polaris, ``WS_STAGE``):
             integer bits, no wrap; ``HGQ_DATALANE_OVERFLOW``), converts the checkpoint into it and seeds its integer
             and sign bits from the WRAP model's, traced over the first N train micro-batches (``seed-sat``):
             ``init_sat.npz``, used by the arms with ``"model": "sat"``.
-``run``     One arm (``ARMS``: optimizer, peak LR, weight decay, quantizer LR scale and epsilon, BetaPID settings, the
+``run``     One arm (``ARMS``: optimizer, peak LR, weight decay, quantizer LR scale, epsilon and L1, BetaPID settings, the
             model) with ``main_jax fit --init-from`` (``--resume last`` when the arm has a checkpoint); ``--max-steps``
             caps it (the smoke). With the init's ``--val-calibration N`` every validation is repeated with the WRAP
             integer bits traced over N train micro-batches (``val_cal/*``). ``DONE`` at K.
@@ -63,6 +63,33 @@ ARMS = {
     "ws2-e1": {**WS2, "every": 1, "pid": {"init_beta": 8.9e-10 / 8}},
     "ws2-sat": {**WS2, "pid": {"init_beta": 8.9e-10}, "model": "sat"},
 }
+# ws3: a loss-vs-EBOPs scan from the ws2-e1 recipe (EBOPs term on every step, bitwidth epsilon 1e-12), with padded
+# tokens zeroed before the WRAP lanes. In ws2 the EBOPs went below the 2.9e10 target and kept falling with beta at the
+# PID floor: HGQ2's bit L1 (MonoL1 1e-8, at ~lr steps with epsilon 1e-12) set the end point. The axis is therefore the
+# BetaPID target, one decade apart from ws2-e1's end (1.6e10) down to one VU13P fully unrolled (1.728e6 CLB LUTs, AMD
+# DS890 v4.10 Table 15; 1 EBOP ~ 1 LUT, Chang Sun 2026-11-02), with the L1 at HGQ2's default. Beta starts where the
+# EBOPs pull per bit equals the per-batch task-gradient noise of the median f (23_ws_diag.py grads: logged 9.8e-9 at
+# every 8, i.e. 1.2e-9 per step) and may rise to 1e-5 (HGQ2 penalty per bit = beta x the partner bits, median ~570).
+WS3 = {**WS2, "every": 1}
+
+
+def _target(target: float, **pid) -> dict:
+    return {"pid": {"target_ebops": target, "init_beta": 1e-9, "max_beta": 1e-5, "min_beta": 1e-12, **pid}}
+
+
+ARMS.update({
+    "ws3-t9": {**WS3, **_target(1.6e9)},
+    "ws3-t8": {**WS3, **_target(1.6e8)},
+    "ws3-t7": {**WS3, **_target(1.6e7)},
+    "ws3-t6": {**WS3, **_target(1.6e6)},
+    # Chang's bitwidth LR scale 3-5 (here 4), at the two nearest targets: an Adam-type step moves a bit by at most
+    # ~lr x scale, so 4 allows ~5x less bitwidth change than 20 in the same steps
+    "ws3-t9-q4": {**WS3, "quantizer_lr_scale": 4.0, **_target(1.6e9)},
+    "ws3-t8-q4": {**WS3, "quantizer_lr_scale": 4.0, **_target(1.6e8)},
+    # control: HGQ2's bit L1 off (lrs_config.quantizer_l1 0), beta alone
+    "ws3-t8-l0": {**WS3, "quantizer_l1": 0.0, **_target(1.6e8)},
+    "ws3-t5e8": {**WS3, **_target(5e8)},  # half a decade between t9 and t8
+})  # fmt: skip
 COLUMNS = (
     "train/loss", "train/ebops", "val/loss", "val/ebops", "val_cal/loss", "val_cal/ebops", "train/quant_beta", "train/pid_ebops",
     "val/bits_f_mean", "val/bits_b_mean", "val/bits_i_mean", "time/ms_per_micro_batch",
@@ -289,7 +316,7 @@ def arm_config(manifest: dict, arm: str, arm_dir: Path) -> Path:
     cfg["model"]["optimizer"] = recipe["optimizer"]
     lrs = cfg["model"]["lrs_config"]
     lrs["max"], lrs["weight_decay"] = recipe["max"], recipe["weight_decay"]
-    for key in ("quantizer_lr_scale", "quantizer_epsilon"):
+    for key in ("quantizer_lr_scale", "quantizer_epsilon", "quantizer_l1"):
         if key in recipe:
             lrs[key] = recipe[key]
     for key, name, update in (("pid", "BetaPID", recipe.get("pid")), ("every", "PeriodicEBOPs", {"every_n_steps": recipe.get("every")})):
