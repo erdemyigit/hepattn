@@ -36,6 +36,12 @@ from .mf_golden_utils import (
 from .parity_utils import record_measurement
 from .porting import port_maskformer
 
+
+@pytest.fixture(scope="module", autouse=True)
+def _as_the_hybrid(hybrid_padding):
+    """The golden files come from the hybrid, which has no zero fill of padded rows (conftest ``hybrid_padding``)."""
+
+
 MEASURED = json.loads((GOLDEN_DIR / "mf_measured.json").read_text())
 CHAOTIC = {"prod"}
 LAYER0_KEYS = {f"free.{LAYER0_LOGIT}", "free.flips.layer_0.attn_mask"}

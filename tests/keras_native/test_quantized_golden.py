@@ -22,6 +22,12 @@ from .golden.cases import CASES, modes
 from .golden_utils import build_from_golden, build_native, init_state_mismatches, inputs_of, load_golden, run
 from .parity_utils import record_measurement
 
+
+@pytest.fixture(scope="module", autouse=True)
+def _as_the_hybrid(hybrid_padding):
+    """The golden files come from the hybrid, which has no zero fill of padded rows (conftest ``hybrid_padding``)."""
+
+
 # measured max |native - hybrid| per (case, mode); tolerance = 2x
 MEASURED = {
     ("dense_ffn", "float"): 1.192e-07, ("dense_ffn", "high"): 3.599e-06, ("dense_ffn", "low"): 0.0,
