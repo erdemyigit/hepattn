@@ -18,7 +18,7 @@ import keras
 
 from hepattn.keras_native.attention import build_attention
 from hepattn.keras_native.dense import Dense
-from hepattn.keras_native.encoder import COERCE_TO_TORCH, Residual
+from hepattn.keras_native.encoder import COERCE_TO_TORCH, Residual, zero_padding
 from hepattn.keras_native.factory import LayerFactory
 from hepattn.keras_native.norm import get_hybrid_norm_config
 
@@ -137,8 +137,8 @@ class MaskFormerDecoderLayer(keras.layers.Layer):
             q = self._query_self_attn(q, q_mask, training)
         if self.bidirectional_ca:
             mask_t = keras.ops.transpose(attn_mask, (0, 2, 1)) if attn_mask is not None else None
-            kv = self.kv_ca(kv, k=q, v=q, attn_mask=mask_t, q_mask=kv_mask, kv_mask=q_mask, training=training)
-            kv = self.kv_dense(kv, training=training)
+            kv = self.kv_ca(kv, k=q, v=q, attn_mask=mask_t, q_mask=kv_mask, kv_mask=q_mask, token_mask=kv_mask, training=training)
+            kv = self.kv_dense(kv, token_mask=kv_mask, training=training)
         return q, kv
 
     def _query_self_attn(self, q, q_mask, training):
@@ -249,6 +249,9 @@ class MaskFormerDecoder(keras.layers.Layer):
         outputs = {}
         attn_mask = None
         for index, layer in enumerate(self.layers):
+            # padded keys: 0 wherever the node stream enters a quantized leaf (tasks, q_ca keys/values; zero_padding)
+            x["key_embed"] = zero_padding(x["key_embed"], x["key_valid"])
+            x[f"{input_name}_embed"] = x["key_embed"]
             layer_out = {}
             masks = {}
             for task in self.tasks:
@@ -282,4 +285,6 @@ class MaskFormerDecoder(keras.layers.Layer):
                 training=training,
             )
             x[f"{input_name}_embed"] = x["key_embed"]  # unmerge_inputs, identity for one input
+        x["key_embed"] = zero_padding(x["key_embed"], x["key_valid"])  # the final tasks read it
+        x[f"{input_name}_embed"] = x["key_embed"]
         return x, outputs

@@ -34,6 +34,18 @@ def sort_index(value, valid=None):
     return keras.ops.argsort(value, axis=-1)
 
 
+def zero_padding(x, valid):
+    """``x`` (B, N, D) with the rows of padded tokens (``valid`` (B, N) False) set to 0; ``x`` itself if ``valid`` is None.
+
+    A padded row never reaches a valid output (the attention cores drop padded keys), so this changes no valid output.
+    It keeps padded rows out of the range that a WRAP quantizer traces for its integer bits (HGQ2: training mode and
+    ``trace_minmax`` take the max over the whole tensor). Selection, not a multiply: a NaN row cannot leak.
+    """
+    if valid is None:
+        return x
+    return keras.ops.where(keras.ops.expand_dims(valid, -1), x, keras.ops.zeros_like(x))
+
+
 def gather_tokens(x, index):
     """``x[b, index[b, n]]`` for (B, N) or (B, N, D) ``x`` and a (B, N) ``index``."""
     if len(x.shape) == 2:
@@ -106,12 +118,13 @@ class Residual(keras.layers.Layer):
         if self.ls is not None:
             self.ls.build(x_shape)
 
-    def call(self, x, training=None, **kwargs):
+    def call(self, x, training=None, token_mask=None, **kwargs):
+        """``token_mask`` (B, N) bool, True = valid token: the padded rows of ``fn``'s input are 0 (``zero_padding``)."""
         if self.norm is not None and self.post_norm:
             x = self.norm(x)
-            h = self.fn(x, training=training, **kwargs)
+            h = self.fn(zero_padding(x, token_mask), training=training, **kwargs)
         else:
-            h = self.fn(self.norm(x) if self.norm is not None else x, training=training, **kwargs)
+            h = self.fn(zero_padding(self.norm(x) if self.norm is not None else x, token_mask), training=training, **kwargs)
         aux = None
         is_tuple = isinstance(h, tuple)
         if is_tuple:
@@ -170,10 +183,10 @@ class EncoderLayer(keras.layers.Layer):
 
     def call(self, x, kv_mask=None, attn_mask=None, initial_v=None, training=None):
         """Returns ``(x, initial_v)``; ``initial_v`` is the value-residual cache (None without value residual)."""
-        h = self.attn(x, kv_mask=kv_mask, attn_mask=attn_mask, initial_v=initial_v, training=training)
+        h = self.attn(x, token_mask=kv_mask, kv_mask=kv_mask, attn_mask=attn_mask, initial_v=initial_v, training=training)
         if isinstance(h, tuple):
             h, initial_v = h
-        return self.dense(h, training=training), initial_v
+        return self.dense(h, token_mask=kv_mask, training=training), initial_v
 
 
 class Encoder(keras.layers.Layer):
