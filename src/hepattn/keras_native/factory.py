@@ -131,7 +131,7 @@ class LayerFactory:
             return
         with ExitStack() as stack:
             if self.quant.bit_l1 is not None:
-                for scope in bit_l1_scopes(self.quant.bit_l1):
+                for scope in _bit_l1_scopes(self.quant.bit_l1):
                     stack.enter_context(scope)
             if self.quant.weight:
                 stack.enter_context(QuantizerConfigScope(place="weight", **self.quant.weight))
@@ -228,10 +228,10 @@ class LayerFactory:
         return QuantizerConfig("kif", "weight", i0=base["i0"], f0=min(base["f0"], max_frac_bits), fc=MinMax(-24, max_frac_bits))
 
 
-BIT_REGULARIZER_KEYS = ("br", "ir", "fr", "mr", "er", "e0r")
+_BIT_REGULARIZER_KEYS = ("br", "ir", "fr", "mr", "er", "e0r")
 
 
-def bit_l1_scopes(l1: float) -> list[QuantizerConfigScope]:
+def _bit_l1_scopes(l1: float) -> list[QuantizerConfigScope]:
     """One ``QuantizerConfigScope`` per HGQ2 (quantizer type, place) default that has bitwidth regularizers.
 
     Each sets the keys whose current default is not None to ``MonoL1(l1)`` (None for ``l1 == 0``).
@@ -247,7 +247,7 @@ def bit_l1_scopes(l1: float) -> list[QuantizerConfigScope]:
     reg = MonoL1(l1) if l1 > 0 else None
     scopes = []
     for (q_type, place), conf in default_configs.items():
-        keys = {k: reg for k in BIT_REGULARIZER_KEYS if conf.get(k) is not None}
+        keys = {k: reg for k in _BIT_REGULARIZER_KEYS if conf.get(k) is not None}
         if keys:
             scopes.append(QuantizerConfigScope(q_type=q_type, place=place, **keys))
     return scopes
