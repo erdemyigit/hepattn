@@ -37,6 +37,24 @@ types too, so mixing numpy and ``jax.Array`` batches adds cache entries without 
 Gradient accumulation is the optimizer's (``optim.build_optimizer``): call ``train_step`` once per micro-batch; every k-th
 call applies the averaged gradient. Each call makes one host matching call.
 
+Non-finite guard (``TrainStep(skip_nonfinite=True)``, the default): an optimizer update with a non-finite loss or
+gradient is skipped inside the jitted step (``jnp.where`` on a flag, no Python branch). The flag is computed from the
+loss and from the optimizer's RESULT: the new weights, moments and accumulators are all finite exactly when the clipped
+gradient and the update are (a NaN or Inf gradient reaches every moment it touches; the global clip scales by
+``clip / max(norm, clip)``, so a non-finite norm gives a non-finite clipped gradient). Only the outputs are selected;
+nothing reads the gradients, because any extra consumer of them (a norm, ``isfinite``, a ``where``) changes XLA's
+fusion and the rounding of the update (measured on the ws4 models: 711 of 10672 arrays differ after 3 steps), while
+the output selection keeps a finite run bit for bit the run without the guard (0 of 1652 / 10672 differ).
+A skipped update leaves the trainable variables, the optimizer moments and the optimizer's ``iterations`` (so the LR
+schedule and Adam's bias correction) unchanged, and the non-trainable state (HGQ2 integer bits, EBOPs) of that step is
+not written. With accumulation over k micro-batches the non-update micro-batches only add their gradient to the
+optimizer's accumulators; a micro-batch with a non-finite gradient leaves NaN there (a non-finite loss writes NaN
+explicitly), so the averaged gradient that Keras clips at the k-th call is not finite and the whole update is skipped:
+the accumulators are reset (as after an update) and ``iterations`` goes back to the start of the window, so the next k
+micro-batches form the next window at the same LR. The check thus covers the averaged gradient of the window, the one
+the clip sees (Lightning averages, then clips once: ``optim``). ``StepOutput.skipped`` is True for a skipped update;
+``StepOutput.finite`` is False when the window so far (this micro-batch included) is not finite.
+
 PeriodicEBOPs with accumulation: compute ``ebops_on`` from the OPTIMIZER-step counter, ``(micro_step // k) % every == 0``.
 The hybrid callback uses ``trainer.global_step % every_n_steps`` (``hepattn/keras/callbacks.py`` ``PeriodicEBOPs``), and
 Lightning's ``global_step`` counts optimizer steps, so all k micro-batches of every ``every``-th update carry the EBOPs
@@ -82,6 +100,8 @@ class StepOutput(NamedTuple):
     penalty: Any  # sum of the HGQ2 EBOPs terms (beta * EBOPs); 0 when ebops_on is False
     regularization: Any  # sum of the weight-regularizer terms
     grad_norm: Any  # global norm of this (micro-)batch's gradient before clipping; NaN unless TrainStep(grad_norm=True)
+    skipped: Any = None  # bool: the guard skipped this optimizer update (train_step only; always False without the guard)
+    finite: Any = None  # bool: the accumulation window so far is finite (train_step only; None without the guard)
 
 
 class EvalOutput(NamedTuple):
@@ -111,6 +131,12 @@ def maskformer_loss_from_config(init_args: dict, *, host_fn=None) -> LossFn:
     return maskformer_loss(specs, n_jobs=n_jobs, host_fn=host_fn, target_object=init_args.get("target_object", "particle"))
 
 
+def _all_finite(values) -> jax.Array:
+    """True if every floating-point entry of ``values`` is finite."""
+    flags = [jnp.all(jnp.isfinite(v)) for v in values if jnp.issubdtype(v.dtype, jnp.floating)]
+    return jnp.all(jnp.stack(flags)) if flags else jnp.ones((), bool)
+
+
 def _global_norm(grads) -> jax.Array:
     return jnp.sqrt(sum(jnp.sum(jnp.square(g.astype(jnp.float32))) for g in grads))
 
@@ -126,12 +152,23 @@ class TrainStep:
         donate: Donate the state to ``train_step`` (as Keras' trainer does).
         grad_norm: Also return the global gradient norm (one more reduction over every gradient; the optimizer's clipping
             computes its own).
+        skip_nonfinite: Skip an update with a non-finite loss or gradient (module docstring, "Non-finite guard").
 
     Raises:
         ValueError: If the model is not built or the optimizer is not built for its trainable variables.
     """
 
-    def __init__(self, model, optimizer, loss_fn: LossFn, *, matmul_precision: str | None = "highest", donate: bool = True, grad_norm: bool = False):
+    def __init__(
+        self,
+        model,
+        optimizer,
+        loss_fn: LossFn,
+        *,
+        matmul_precision: str | None = "highest",
+        donate: bool = True,
+        grad_norm: bool = False,
+        skip_nonfinite: bool = True,
+    ):
         if not model.built:
             raise ValueError("build the model eagerly (one call on a real batch) before creating the jitted steps")
         tracked = optimizer._trainable_variables if optimizer.built else []  # noqa: SLF001
@@ -143,6 +180,13 @@ class TrainStep:
         self.loss_fn = loss_fn
         self.matmul_precision = matmul_precision
         self.with_grad_norm = grad_norm
+        self.skip_nonfinite = skip_nonfinite
+        # positions in optimizer.variables: the iteration counter and the accumulator of each trainable variable
+        ovars = optimizer.variables
+        self._k = int(optimizer.gradient_accumulation_steps or 1)
+        self._iter_pos = next(i for i, v in enumerate(ovars) if v is optimizer._iterations)  # noqa: SLF001
+        acc = list(getattr(optimizer, "_accumulated_gradients", None) or []) if self._k > 1 else []
+        self._acc_pos = [next(i for i, v in enumerate(ovars) if v is a) for a in acc]
         self.ebops_leaves = EbopsLeaves(model)
         self._traces = {"train": 0, "eval": 0, "predict": 0}  # incremented at trace time only (Python side effect)
         self._train = jax.jit(self._train_impl, static_argnames=("ebops_on",), donate_argnums=(0,) if donate else ())
@@ -176,9 +220,27 @@ class TrainStep:
     def _train_impl(self, state: TrainState, batch, ebops_on: bool):
         self._traces["train"] += 1
         grads, ntv, out = self._grads_impl(state, batch, ebops_on)
+        if not self.skip_nonfinite:
+            with self._precision():
+                tv, ov = self.optimizer.stateless_apply(state.ov, grads, state.tv)
+            return TrainState(tv, ntv, ov), out._replace(skipped=jnp.zeros((), bool))
         with self._precision():
             tv, ov = self.optimizer.stateless_apply(state.ov, grads, state.tv)
-        return TrainState(tv, ntv, ov), out
+        loss_ok = jnp.isfinite(out.loss)
+        acc = set(self._acc_pos)
+        if self._k > 1:
+            update = (state.ov[self._iter_pos] + 1) % self._k == 0
+            # a non-finite loss with finite gradients: mark the window in the accumulators (reset at an update anyway)
+            ov = [jnp.where(update | loss_ok, n, jnp.nan) if i in acc else n for i, n in enumerate(ov)]
+        finite = loss_ok & _all_finite([*tv, *ov])
+        skipped = ~finite if self._k == 1 else update & ~finite
+        ov = [
+            n if i in acc else jnp.where(skipped, o - (self._k - 1) if i == self._iter_pos else o, n)
+            for i, (n, o) in enumerate(zip(ov, state.ov, strict=True))
+        ]
+        tv = [jnp.where(skipped, o, n) for n, o in zip(tv, state.tv, strict=True)]
+        ntv = [jnp.where(finite, n, o) for n, o in zip(ntv, state.ntv, strict=True)]
+        return TrainState(tv, ntv, ov), out._replace(skipped=skipped, finite=finite)
 
     def _eval_impl(self, state: TrainState, batch):
         self._traces["eval"] += 1

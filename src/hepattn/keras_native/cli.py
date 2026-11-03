@@ -14,7 +14,7 @@ Several ``--config`` files merge in order, as LightningCLI does (``config.load_c
 the YAML (they are the Lightning trainer / data arguments a Polaris job sets on the command line). Everything a run
 writes goes under ``--run-dir``: ``config.yaml`` (the merged config with the command-line data, trainer, seed and
 step-checkpoint options written in, so ``fit --config <run-dir>/config.yaml`` repeats the run; ``--matmul-precision``,
-``--no-donate`` and ``--metrics-per-layer`` are in ``run.json`` only), ``run.json`` (options, versions, model hash),
+``--no-donate``, ``--metrics-per-layer`` and ``--no-skip-nonfinite`` are in ``run.json`` only), ``run.json`` (options, versions, model hash),
 ``ckpts/``, ``steps.csv`` (every logged step), ``metrics.csv`` (every validation epoch, the hybrid
 ``MetricsCsvWriter`` layout) and ``summary.json`` (counters, compile counts, persistent-cache events of the latest
 process). A later process in the same directory (a resume) writes ``config-r<n>.yaml`` / ``run-r<n>.json`` and keeps
@@ -90,6 +90,11 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--ckpt-save-top-k", type=int, help="step checkpoints kept (-1: all)")
     fit.add_argument("--no-donate", action="store_true", help="do not donate the state to the train step")
     fit.add_argument("--prefetch", type=int, default=0, help="train batches read ahead in a background thread (0: none)")
+    fit.add_argument(
+        "--no-skip-nonfinite",
+        action="store_true",
+        help="apply updates with a non-finite loss or gradient (default: skip them; YAML trainer.skip_nonfinite; loop docstring)",
+    )
     fit.add_argument(
         "--val-calibration",
         type=int,
@@ -235,6 +240,7 @@ def fit(args: argparse.Namespace, data_factory: DataFactory) -> dict:
         pool_layers=not args.metrics_per_layer,
         prefetch=args.prefetch,
         val_calibration=args.val_calibration,
+        skip_nonfinite=False if args.no_skip_nonfinite else None,
     )
     dummy = True if args.dummy_data else None
     train = data_factory(rc, "train", seed=settings.seed, dummy_data=dummy)

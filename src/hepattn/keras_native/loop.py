@@ -33,6 +33,13 @@ Logged values (names as the hybrid logs them):
   the first N train micro-batches (``Trainer.calibrated_ntv``) instead of those training left (a running maximum of
   the recent batches, decaying ``i_decay_speed`` per call), which ``val/*`` uses: events outside that range wrap.
   ``val_cal/ebops`` is the EBOPs at the traced bits.
+- ``train/nonfinite_skipped``: optimizer updates the non-finite guard skipped so far in the run (``TrainStep``,
+  ``LoopSettings.skip_nonfinite``, default on; carried by the checkpoints). A skipped update still consumes its
+  micro-batches and counts as an optimizer step here (``global_step``: data position, logging, checkpoint cadence,
+  PeriodicEBOPs, BetaPID epochs, ``total_steps``), but the optimizer's own ``iterations`` (LR schedule, Adam bias
+  correction) does not advance, so after s skips the run ends s steps short of the end of the LR schedule;
+  ``train/lr`` is logged at the optimizer's position. The EBOPs read-out (``train/ebops``, BetaPID's input) skips a
+  non-finite micro-batch and keeps the latest finite one. NaN when the guard is off.
 - ``{stage}/bits_{b,f,i}_{mean,min,max,n}``: ``BitwidthMonitor`` over every model variable whose last path segment is
   ``b``, ``f`` or ``i`` (trainable and non-trainable: the hybrid reads ``named_parameters``, which includes both).
 - val metrics: ``metrics.ClicMetrics("val", pool_layers=...)`` on ``predict`` of the matched outputs; train task
@@ -115,6 +122,7 @@ class LoopSettings:
     pool_layers: bool = True  # ClicMetrics: the hybrid's pooled values (S6a decision 5)
     prefetch: int = 0  # train batches read ahead in a background thread (data.prefetch); 0: none
     val_calibration: int = 0  # train micro-batches traced into the WRAP integer bits for ``val_cal/*``; 0: none
+    skip_nonfinite: bool = True  # skip an optimizer update with a non-finite loss or gradient (TrainStep)
 
     @classmethod
     def from_run_config(cls, rc: RunConfig, run_dir: str | Path, **overrides) -> "LoopSettings":
@@ -139,6 +147,8 @@ class LoopSettings:
             values["check_val_every_n_epoch"] = int(t["check_val_every_n_epoch"])
         if rc.seed is not None:
             values["seed"] = int(rc.seed)
+        if t.get("skip_nonfinite") is not None:  # native only
+            values["skip_nonfinite"] = bool(t["skip_nonfinite"])
         values.update({k: v for k, v in overrides.items() if v is not None})
         return cls(**values)
 
@@ -324,7 +334,9 @@ class Trainer:
         self.specs, self.target_object = rc.task_specs, target_object
         self.n_jobs, self.host_fn = rc.matcher_n_jobs, host_fn
         loss_fn = maskformer_loss(rc.task_specs, n_jobs=rc.matcher_n_jobs, host_fn=host_fn, target_object=target_object)
-        self.steps = TrainStep(model, optimizer, loss_fn, matmul_precision=settings.matmul_precision, donate=settings.donate)
+        self.steps = TrainStep(
+            model, optimizer, loss_fn, matmul_precision=settings.matmul_precision, donate=settings.donate, skip_nonfinite=settings.skip_nonfinite
+        )
         self.schedule = learning_rate(lrs_config(rc), self.total_steps, steps_per_update=self.k)
         self._traces = {"val": 0, "tail": 0, "bits": 0, "calibrate": 0}
         self._val = jax.jit(self._val_impl)
@@ -350,7 +362,11 @@ class Trainer:
         self.micro_step = 0
         self.epoch = 0  # data position: the next micro-batch is (epoch, batch)
         self.batch = 0
-        self._reading: tuple[Any, float] | None = None  # (device penalty, beta) of the latest EBOPs-active micro-batch
+        # (device penalty, beta, device finite flag or None, the previous unread reading) of the latest EBOPs-active
+        # micro-batch: the read-out takes the newest finite one
+        self._reading: tuple | None = None
+        self._skipped_base = 0  # skips before this process (checkpoint metadata)
+        self._skipped_dev = None  # device count of the skips in this process (no sync per step)
         self._ebops_value: float | None = None
         self.last_val: dict[str, float] | None = None
         self.epoch_logs: dict[str, float] = {}
@@ -512,11 +528,18 @@ class Trainer:
     @property
     def last_ebops(self) -> float | None:
         """EBOPs read-out of the latest EBOPs-active micro-batch with beta > 0 (a device sync on first access)."""
-        if self._reading is not None:
-            penalty, beta = self._reading
-            self._ebops_value = float(penalty) / beta
-            self._reading = None
+        reading, self._reading = self._reading, None
+        while reading is not None:
+            penalty, beta, finite, reading = reading
+            if finite is None or bool(finite):
+                self._ebops_value = float(penalty) / beta
+                break
         return self._ebops_value
+
+    @property
+    def nonfinite_skipped(self) -> int:
+        """Optimizer updates the non-finite guard skipped in this run (a device sync)."""
+        return self._skipped_base + (0 if self._skipped_dev is None else int(self._skipped_dev))
 
     # ------------------------------------------------------------------------------------------- checkpoints
 
@@ -537,6 +560,7 @@ class Trainer:
             # the values Lightning's callback_metrics would still hold for the next MetricsCsvWriter row
             "epoch_logs": self.epoch_logs,
             "train_logs": self.train_logs,
+            "nonfinite_skipped": self.nonfinite_skipped,
         }
 
     def restore(self, path: str | Path, *, check_seed: bool = True) -> dict:
@@ -571,6 +595,7 @@ class Trainer:
         if self.pid is not None:
             self.pid.load_state_dict(meta["beta_controller"])
         self._reading, self._ebops_value = None, meta["last_ebops"]
+        self._skipped_base, self._skipped_dev = int(meta.get("nonfinite_skipped") or 0), None
         self.last_val = meta.get("val_metrics")
         self.epoch_logs = dict(meta.get("epoch_logs") or {})
         self.train_logs = dict(meta.get("train_logs") or {})
@@ -763,7 +788,10 @@ class Trainer:
         self.micro_step += 1
         self._micro_since_log += 1
         if ebops_on and self.beta > 0:
-            self._reading = (out.penalty, self.beta)
+            self._reading = (out.penalty, self.beta, out.finite, self._reading if out.finite is not None else None)
+        if self.s.skip_nonfinite:
+            skipped = out.skipped.astype(jnp.int32)
+            self._skipped_dev = skipped if self._skipped_dev is None else self._skipped_dev + skipped
         self._last = (out, ebops_on)
         if self.trace is not None:
             with prof.phase("trace"):
@@ -789,7 +817,10 @@ class Trainer:
         with prof.phase("ebops"):
             ebops = self.last_ebops
         row["train/ebops"] = math.nan if ebops is None else ebops
-        row["train/lr"] = float(self.schedule((self.global_step - 1) * self.k)) if callable(self.schedule) else float(self.schedule)
+        skipped = self.nonfinite_skipped if self.s.skip_nonfinite else 0
+        row["train/nonfinite_skipped"] = float(skipped) if self.s.skip_nonfinite else math.nan
+        # the optimizer's position: a skipped update does not advance its iterations
+        row["train/lr"] = float(self.schedule((self.global_step - 1 - skipped) * self.k)) if callable(self.schedule) else float(self.schedule)
         row["time/ms_per_micro_batch"] = 1e3 * (now - self._t_log) / max(1, self._micro_since_log)
         with self._jit_phase("bits"):
             row.update(self.bit_stats("train"))
@@ -867,7 +898,9 @@ class Trainer:
                     ntv, ebops = self.calibrated_ntv(train, self.s.val_calibration)
                     self.last_val.update(self.validate(val, state=self.state._replace(ntv=ntv), stage="val_cal", ebops=ebops))
             with prof.phase("csv"):
-                epochs_csv.append({**self.train_logs, **self.epoch_logs, **self.last_val, "epoch": float(epoch), "step": float(self.global_step)})
+                skipped = float(self.nonfinite_skipped) if self.s.skip_nonfinite else math.nan
+                row = {**self.train_logs, **self.epoch_logs, **self.last_val, "train/nonfinite_skipped": skipped}
+                epochs_csv.append({**row, "epoch": float(epoch), "step": float(self.global_step)})
         # Lightning ModelCheckpoint._should_save_on_train_epoch_end: with check_val_every_n_epoch != 1 it saves only at
         # a validation end, so an epoch without validation writes no epoch file (it would carry the previous val/loss)
         if self.epoch_manager is not None and (validated or self.s.check_val_every_n_epoch == 1):
@@ -885,6 +918,7 @@ class Trainer:
             "global_step": self.global_step,
             "micro_step": self.micro_step,
             "epoch": self.epoch,
+            "nonfinite_skipped": self.nonfinite_skipped,
             "total_steps": self.total_steps,
             "steps_per_epoch": self.steps_per_epoch,
             "compile_counts": self.compile_counts(),

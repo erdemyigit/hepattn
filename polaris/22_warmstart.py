@@ -541,6 +541,8 @@ def cmd_report(args) -> int:
     for arm_dir in sorted(p for p in root.iterdir() if (p / "steps.csv").is_file()):
         steps, metrics = g4.read_rows(arm_dir / "steps.csv"), g4.read_rows(arm_dir / "metrics.csv")
         ms = [r["time/ms_per_micro_batch"] for r in steps if not math.isnan(r.get("time/ms_per_micro_batch", math.nan))]
+        # updates the non-finite guard skipped (cumulative; None: guard off or a run before the guard)
+        skips = [r["train/nonfinite_skipped"] for r in [*steps, *metrics] if not math.isnan(r.get("train/nonfinite_skipped", math.nan))]
         out["arms"][arm_dir.name] = {
             "steps_logged": len(steps),
             "first_train": {"step": steps[0].get("step"), **pick(steps[0])} if steps else None,
@@ -548,6 +550,7 @@ def cmd_report(args) -> int:
             "validations": [{"step": r.get("step"), "epoch": r.get("epoch"), **pick(r)} for r in metrics],
             "median_ms_per_micro_batch": statistics.median(ms) if ms else None,
             "nonfinite_train_loss": sum(1 for r in steps if not math.isfinite(r.get("train/loss", 0.0))),
+            "nonfinite_skipped": int(max(skips)) if skips else None,
             "done": (arm_dir / "DONE").is_file(),
         }
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
@@ -558,7 +561,7 @@ def cmd_report(args) -> int:
             f"{name:10s} steps {a['last_train']['step'] if a['last_train'] else 0:>6} first train/loss "
             f"{(a['first_train'] or {}).get('train/loss', float('nan')):.4f} last val/loss {last_val.get('val/loss', float('nan')):.4f} "
             f"val/ebops {last_val.get('val/ebops', float('nan')):.3e} ms/micro-batch {a['median_ms_per_micro_batch']}"
-            f" nonfinite {a['nonfinite_train_loss']}"
+            f" nonfinite {a['nonfinite_train_loss']} skipped {a['nonfinite_skipped']}"
         )
     return 0
 
