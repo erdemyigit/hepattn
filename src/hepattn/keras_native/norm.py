@@ -141,11 +141,11 @@ class DyT(keras.layers.Layer):
         self.alpha.build(tuple(input_shape))
         self.tanh.build((None, n * self.dim))
         self.affine.build(tuple(input_shape))
-        if not hasattr(self.affine, "full_output_shape"):
-            # HGQ2 0.1.9 QEinsumDense with a bias reads full_output_shape in its EBOPs, which keras 3.15 no longer sets
-            # (AttributeError in a training call); HGQ2 0.2.0 sets it in build (from compute_output_shape, which here
-            # leaves N unresolved: output_shape (None, dim))
-            self.affine.full_output_shape = (None, n, self.dim)
+        # HGQ2 QEinsumDense with a bias multiplies the bias bits by prod(full_output_shape[1:]) in its EBOPs. 0.1.9 never
+        # sets it (keras 3.15 no longer does: AttributeError in a training call); 0.2.0 sets it in build from
+        # compute_output_shape, which keeps the None of the partial output_shape (None, dim): (None, None, dim), a
+        # ValueError in a training call. So set it in both versions.
+        self.affine.full_output_shape = (None, n, self.dim)
 
     def call(self, x, training=None):
         n = x.shape[1]

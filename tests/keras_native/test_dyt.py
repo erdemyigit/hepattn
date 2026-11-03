@@ -122,6 +122,24 @@ def test_quantized_dyt_close_to_float_and_trains():
         assert float(next(v for k, v in by_path.items() if k.endswith(f"{leaf}/ebops"))) > 0, leaf
 
 
+def test_affine_ebops_count_the_bias_once_per_output():
+    """The affine leaf's EBOPs = the kernel term + mean(bias bits) x N x dim, under HGQ2 0.1.9 and 0.2.0.
+
+    HGQ2 reads the output size from ``full_output_shape``, which DyT.build sets (0.1.9 leaves it unset, 0.2.0 sets
+    (None, None, dim)). Without that, a training call raises; with a wrong N, the bias term is off by that factor.
+    """
+    dq = native_from(torch_dyt(seed=4), LayerFactory(QUANT))
+    aff = dq.affine
+    assert tuple(aff.full_output_shape) == (None, N, DIM)
+    t = np.random.default_rng(5).uniform(-1, 1, (3, N, DIM)).astype(np.float32)
+    aff(t, training=True)
+    # HGQ2 counts one event: the input bits of a batch-1 input
+    kernel_term = keras.ops.einsum(aff.ebops_equation, aff.iq.bits_((1, N, DIM)), aff.kq.bits_(keras.ops.shape(aff.kernel)))
+    bias_term = keras.ops.mean(aff.bq.bits_(keras.ops.shape(aff.bias))) * N * DIM
+    assert float(bias_term) > 0
+    assert float(aff.ebops) == pytest.approx(float(kernel_term + bias_term), rel=1e-6)
+
+
 def test_rank_and_dim_are_checked():
     d = DyT(DIM, name="d")
     with pytest.raises(ValueError, match="DyT takes"):
