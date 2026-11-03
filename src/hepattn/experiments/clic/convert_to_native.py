@@ -35,6 +35,11 @@ quantizer state; the optimizer, LR schedule, beta controller and data position s
 float checkpoint); it defaults to ``--config``. The checkpoint's config hash is the target's, so ``main_jax`` refuses
 it for another model.
 
+``--ln-to-dyt`` (torch source only) builds a target whose norms are DyT from a run with non-affine LayerNorms
+(``FastLayerNorm``): each DyT starts at the DyT init (alpha 0.5, weight 1, bias 0), every other tensor ports as above;
+the report lists the replaced norms (``ln_to_dyt``). ``port_native_state`` copies a native checkpoint into another
+native model of the same architecture (a float fine-tune into its QAT twin).
+
 For a quantized target the report also holds ``renorm_lane`` (``renorm_lane_check``: the largest masked-Linformer
 column energy and the count of nonzero E entries the renorm lane rounds away; a nonzero count also warns).
 
@@ -88,6 +93,8 @@ class _Coverage:
         self.read: set[str] = set()
         self.written: set[int] = set()
         self.dropped_rows: dict[str, int] = {}
+        self.ln_to_dyt = False  # a non-affine torch LayerNorm may fill a native DyT (at the DyT init)
+        self.replaced_norms: list[str] = []
 
 
 _COVERAGE: _Coverage | None = None
@@ -159,9 +166,32 @@ def port_dense(tdense, ndense) -> None:
 def port_norm(tnorm: nn.Module, nnorm) -> None:
     """Torch LayerNorm (affine or not, e.g. FastLayerNorm) -> keras LayerNormalization; the affine flags must agree.
 
+    Torch DyT -> native DyT (alpha, weight, bias). With ``ln_to_dyt`` (``port_torch_model``) a non-affine torch
+    LayerNorm fills a native DyT with the DyT init (alpha ``alpha_init``, weight 1, bias 0): the LN is replaced, not
+    ported, and its native name is listed in the report.
+
     Raises:
-        ConversionError: For another norm type, epsilon or affine flags.
+        ConversionError: For another norm type, epsilon or affine flags, or a DyT on one side only (without
+            ``ln_to_dyt``, or with an affine LayerNorm).
     """
+    from hepattn.keras_native.norm import DyT  # noqa: PLC0415
+    from hepattn.models.norm import DyT as TorchDyT  # noqa: PLC0415
+
+    if isinstance(nnorm, DyT):
+        if isinstance(tnorm, TorchDyT):
+            _assign(nnorm.alpha.kernel, _np(tnorm.alpha))
+            _assign(nnorm.affine.kernel, _np(tnorm.weight))
+            _assign(nnorm.affine.bias, _np(tnorm.bias))
+            return
+        if not (isinstance(tnorm, nn.LayerNorm) and _COVERAGE is not None and _COVERAGE.ln_to_dyt):
+            raise ConversionError(f"{nnorm.name}: a native DyT needs a torch DyT, or a non-affine LayerNorm with ln_to_dyt")
+        if tnorm.elementwise_affine:
+            raise ConversionError(f"{nnorm.name}: ln_to_dyt replaces non-affine LayerNorms only")
+        _assign(nnorm.alpha.kernel, np.full((1,), nnorm.alpha_init, np.float32))
+        _assign(nnorm.affine.kernel, np.ones((nnorm.dim,), np.float32))
+        _assign(nnorm.affine.bias, np.zeros((nnorm.dim,), np.float32))
+        _COVERAGE.replaced_norms.append(nnorm.name)
+        return
     if not isinstance(tnorm, nn.LayerNorm):
         raise ConversionError(f"only LayerNorm is ported, got {type(tnorm).__name__}")
     if abs(tnorm.eps - nnorm.epsilon) >= 1e-12:
@@ -409,8 +439,10 @@ def _check_loss_weights(name: str, value: np.ndarray, nmodel) -> None:
         raise ConversionError(f"{name}: {value.tolist()} differs from the native task constant {expected.tolist()} (class weights of the config)")
 
 
-def port_torch_model(tmodel: nn.Module, nmodel) -> dict:
+def port_torch_model(tmodel: nn.Module, nmodel, *, ln_to_dyt: bool = False) -> dict:
     """Port a torch MaskFormer into a built native model; returns the coverage report.
+
+    ``ln_to_dyt``: native DyT norms take the place of the torch model's non-affine LayerNorms (``port_norm``).
 
     Raises:
         ConversionError: If a torch parameter / buffer is not read, or a native weight is not written (the quantizer
@@ -418,6 +450,7 @@ def port_torch_model(tmodel: nn.Module, nmodel) -> dict:
     """
     global _COVERAGE
     coverage = _Coverage(tmodel)
+    coverage.ln_to_dyt = ln_to_dyt
     _COVERAGE = coverage
     try:
         port_maskformer(tmodel, nmodel)
@@ -445,6 +478,53 @@ def port_torch_model(tmodel: nn.Module, nmodel) -> dict:
         "native_written": len(coverage.written),
         "native_kept_initial": len(unwritten),
         "dropped_rows": coverage.dropped_rows,
+        "ln_to_dyt": coverage.replaced_norms,
+    }
+
+
+# ----------------------------------------------------------------------------------------------- native -> native
+
+
+def port_native_state(src_model, src_state: tuple[list, list], dst_model) -> dict:
+    """Copy a native model's variables into another native model of the same architecture, e.g. a float fine-tune
+    into its QAT twin (a quantized target of the same model section).
+
+    ``src_state`` is ``(tv, ntv)`` in the order of ``src_model.trainable_variables`` / ``non_trainable_variables``
+    (``checkpoint.load_checkpoint``). Each value goes, unchanged (same shape and dtype: bit for bit), to the
+    ``dst_model`` variable with the same checkpoint key (``checkpoint.variable_keys``: the path without keras'
+    auto-numbered suffixes). The quantizer state, ``beta`` and ``ebops`` of ``dst_model`` keep their initial values.
+
+    Raises:
+        ConversionError: For a source variable without a destination of the same key, shape and dtype, or a
+            destination weight (not quantizer state) that no source variable fills.
+    """
+    from hepattn.keras_native.checkpoint import variable_keys  # noqa: PLC0415
+
+    src_keys, dst_keys = variable_keys(src_model), variable_keys(dst_model)
+    by_key = {dst_keys[id(v)]: v for v in dst_model.variables}
+    tv, ntv = src_state
+    pairs = [*zip(src_model.trainable_variables, tv, strict=True), *zip(src_model.non_trainable_variables, ntv, strict=True)]
+    written: set[int] = set()
+    for var, value in pairs:
+        key = src_keys[id(var)]
+        dst = by_key.get(key)
+        if dst is None:
+            raise ConversionError(f"{key}: no variable of that key in the destination model")
+        value = np.asarray(value)
+        if tuple(dst.shape) != value.shape or np.dtype(dst.dtype) != value.dtype:
+            raise ConversionError(f"{key}: destination {tuple(dst.shape)} {dst.dtype}, source {value.shape} {value.dtype}")
+        dst.assign(value)
+        written.add(id(dst))
+    qstate = quantizer_state_ids(dst_model)
+    unwritten = [dst_keys[id(v)] for v in dst_model.variables if id(v) not in written and id(v) not in qstate]
+    if unwritten:
+        raise ConversionError(f"{len(unwritten)} destination weights were not written: {unwritten[:8]}")
+    return {
+        "source": "native",
+        "source_variables": len(pairs),
+        "native_variables": len(dst_model.variables),
+        "native_written": len(written),
+        "native_kept_initial": len(dst_model.variables) - len(written),
     }
 
 
@@ -734,10 +814,12 @@ def convert(
     *,
     target_config: list[str | Path] | None = None,
     verify: bool = True,
+    ln_to_dyt: bool = False,
 ) -> tuple[Any, Any, dict]:
     """Build the target native model and fill it from the checkpoint. Returns ``(rc, model, report)``.
 
-    ``verify``: for a torch source into a float target, also report the forward difference on two dummy events.
+    ``verify``: for a torch source into a float target, also report the forward difference on two dummy events (not
+    with ``ln_to_dyt``: the models then differ by design). ``ln_to_dyt``: see ``port_torch_model`` (torch source only).
 
     Raises:
         ConversionError: If the checkpoint does not map one-to-one onto the target model (see the module docstring).
@@ -759,10 +841,12 @@ def convert(
         result = tmodel.load_state_dict(state, strict=True)
         if result.missing_keys or result.unexpected_keys:  # strict raises; kept for type checkers
             raise ConversionError(f"state dict mismatch: {result}")
-        report = port_torch_model(tmodel, nmodel)
-        if verify and rc.quant.spec is None:
+        report = port_torch_model(tmodel, nmodel, ln_to_dyt=ln_to_dyt)
+        if verify and rc.quant.spec is None and not ln_to_dyt:
             report["max_abs_diff"] = compare_forward(tmodel, nmodel, inputs)
     else:
+        if ln_to_dyt:
+            raise ConversionError("ln_to_dyt needs a torch source")
         report = port_hybrid_state(state, nmodel)
     lane = renorm_lane_check(nmodel)
     if lane is not None:
@@ -796,6 +880,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report", help="also write the conversion report (JSON) here")
     parser.add_argument("--overwrite", action="store_true", help="replace an existing --out")
     parser.add_argument("--no-verify", action="store_true", help="skip the torch-vs-native forward comparison")
+    parser.add_argument("--ln-to-dyt", action="store_true", help="native DyT norms replace the source's non-affine LayerNorms (DyT init)")
     return parser
 
 
@@ -809,7 +894,7 @@ def main(argv: list[str] | None = None) -> int:
     backend = os.environ.setdefault("KERAS_BACKEND", "jax")
     if backend != "jax":
         raise SystemExit(f"convert_to_native builds the keras_native model on JAX; KERAS_BACKEND is {backend!r}")
-    rc, nmodel, report = convert(args.config, args.ckpt, target_config=args.target_config, verify=not args.no_verify)
+    rc, nmodel, report = convert(args.config, args.ckpt, target_config=args.target_config, verify=not args.no_verify, ln_to_dyt=args.ln_to_dyt)
     out = write_native_checkpoint(args.out, rc, nmodel, report, overwrite=args.overwrite)
     if args.report:
         Path(args.report).write_text(json.dumps(report, indent=1, sort_keys=True, default=str) + "\n")
