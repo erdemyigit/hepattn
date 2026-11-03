@@ -144,9 +144,9 @@ class Attention(keras.layers.Layer):
             self.value_residual_mix = factory.dense(num_heads, activation="sigmoid", use_bias=True, name=sub("value_residual_mix"))
         self.q_norm = self.k_norm = self.v_norm = None
         if qkv_norm:
-            self.q_norm = make_norm(norm, name=sub("q_norm"))
-            self.k_norm = make_norm(norm, name=sub("k_norm"))
-            self.v_norm = make_norm(norm, name=sub("v_norm"))
+            self.q_norm = make_norm(norm, name=sub("q_norm"), dim=dim, factory=factory)
+            self.k_norm = make_norm(norm, name=sub("k_norm"), dim=dim, factory=factory)
+            self.v_norm = make_norm(norm, name=sub("v_norm"), dim=dim, factory=factory)
 
         if attn_type == "torch":
             self.scores_einsum = factory.einsum("bhqd,bhkd->bhqk", name=sub("scores"))
@@ -235,9 +235,9 @@ class Attention(keras.layers.Layer):
         kp = self.k_proj(k, training=training)
         vp = self.v_proj(v, training=training)
         if self.qkv_norm:
-            qp = self.q_norm(qp)
-            kp = self.k_norm(kp)
-            vp = self.v_norm(vp)
+            qp = self.q_norm(qp, training=training)
+            kp = self.k_norm(kp, training=training)
+            vp = self.v_norm(vp, training=training)
         qp = separate_heads(qp, self.num_heads)
         kp = separate_heads(kp, self.num_heads)
         vp = separate_heads(vp, self.num_heads)

@@ -179,28 +179,35 @@ class LayerFactory:
         name: str | None = None,
         kernel_initializer: Any = "glorot_uniform",
         max_frac_bits: int | None = None,
+        bias_axes: str | None = None,
+        bias_initializer: Any = "zeros",
     ) -> keras.layers.Layer:
-        """Data x parameter einsum without bias (``QEinsumDense`` / ``EinsumDense``).
+        """Data x parameter einsum (``QEinsumDense`` / ``EinsumDense``), without bias unless ``bias_axes``.
 
         ``max_frac_bits`` caps the kernel quantizer's fractional bits (see ``capped_weight_config``).
         """
-        kwargs = {"bias_axes": None, "kernel_initializer": kernel_initializer, "name": name}
+        kwargs = {"bias_axes": bias_axes, "kernel_initializer": kernel_initializer, "name": name}
+        if bias_axes is not None:
+            kwargs["bias_initializer"] = bias_initializer
         if not self.quantize:
             return keras.layers.EinsumDense(equation, output_shape, **kwargs)
         kq_conf = self.capped_weight_config(max_frac_bits) if max_frac_bits is not None else None
         return QEinsumDense(equation, output_shape, kq_conf=kq_conf, **kwargs)
 
-    def lut(self, fn: Callable, name: str | None = None, *, in_bits: tuple[int, int], out_bits: tuple[int, int]) -> keras.layers.Layer:
-        """Unary lookup table of ``fn`` on a non-negative input (``QUnaryFunctionLUT`` / ``Activation``).
+    def lut(
+        self, fn: Callable, name: str | None = None, *, in_bits: tuple[int, int], out_bits: tuple[int, int], signed: bool = False
+    ) -> keras.layers.Layer:
+        """Unary lookup table of ``fn`` (``QUnaryFunctionLUT`` / ``Activation``), on a non-negative input unless ``signed``.
 
-        ``in_bits`` / ``out_bits`` are fixed ``(integer, fractional)`` bits: one homogeneous, unsigned, saturating,
-        non-trainable quantizer each, so the table has ``2**sum(in_bits)`` entries. hls4ml's unary-LUT handler needs
-        a homogeneous power-of-two input range and a homogeneous table, and fails on inputs of rank > 2.
+        ``in_bits`` / ``out_bits`` are fixed ``(integer, fractional)`` bits: one homogeneous, saturating, non-trainable
+        quantizer each, unsigned (or both signed: ``signed``), so the table has ``2**(sum(in_bits) + signed)`` entries.
+        hls4ml's unary-LUT handler needs a homogeneous power-of-two input range and a homogeneous table, and fails on
+        inputs of rank > 2.
         """
         if not self.quantize:
             return keras.layers.Activation(fn, name=name)
-        iq = _fixed_config("datalane", *in_bits)
-        oq = _fixed_config("table", *out_bits)
+        iq = _fixed_config("datalane", *in_bits, signed=signed)
+        oq = _fixed_config("table", *out_bits, signed=signed)
         return QUnaryFunctionLUT(fn, iq_conf=iq, oq_conf=oq, allow_heterogeneous_input=False, allow_heterogeneous_table=False, name=name)
 
     def mask_einsum(self, equation: str, name: str | None = None, *, table_bits: tuple[int, int]) -> keras.layers.Layer:
@@ -253,13 +260,13 @@ def _bit_l1_scopes(l1: float) -> list[QuantizerConfigScope]:
     return scopes
 
 
-def _fixed_config(place: str, int_bits: int, frac_bits: int, homogeneous: bool = True) -> QuantizerConfig:
-    """Non-trainable unsigned saturating KIF quantizer with ``int_bits`` / ``frac_bits``.
+def _fixed_config(place: str, int_bits: int, frac_bits: int, homogeneous: bool = True, signed: bool = False) -> QuantizerConfig:
+    """Non-trainable saturating KIF quantizer with ``int_bits`` / ``frac_bits``, unsigned unless ``signed``.
 
     ``homogeneous`` gives one bitwidth for the whole tensor; otherwise one per element.
     """
     axes = {"homogeneous_axis": None, "heterogeneous_axis": ()} if homogeneous else {"homogeneous_axis": ()}
-    return QuantizerConfig("kif", place, k0=False, i0=int_bits, f0=frac_bits, overflow_mode="SAT", trainable=False, **axes)
+    return QuantizerConfig("kif", place, k0=signed, i0=int_bits, f0=frac_bits, overflow_mode="SAT", trainable=False, **axes)
 
 
 def apply_softmax(layer: keras.layers.Layer, x, attn_mask=None, training: bool = False):

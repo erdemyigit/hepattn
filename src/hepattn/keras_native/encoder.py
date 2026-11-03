@@ -85,9 +85,12 @@ class Residual(keras.layers.Layer):
         drop_path: float = 0.0,
         name: str | None = None,
         prefix: str | None = None,
+        factory: LayerFactory | None = None,
         **kwargs,
     ) -> None:
         """Args as hepattn Residual; ``prefix`` (default: ``name``) names the norm ``{prefix}_norm`` and LayerScale ``{prefix}_ls``.
+
+        ``factory`` builds the leaves of a DyT norm (the LayerNorms have none).
 
         Raises:
             ValueError: For post_norm without norm or an unknown norm.
@@ -108,7 +111,7 @@ class Residual(keras.layers.Layer):
         self.fn = fn
         self.dim = dim
         self.post_norm = post_norm
-        self.norm = make_norm(norm, name=sub("norm")) if norm else None
+        self.norm = make_norm(norm, name=sub("norm"), dim=dim, factory=factory) if norm else None
         self.ls = LayerScale(dim, layer_scale, name=sub("ls")) if layer_scale is not None else None
 
     def build(self, x_shape) -> None:
@@ -121,10 +124,10 @@ class Residual(keras.layers.Layer):
     def call(self, x, training=None, token_mask=None, **kwargs):
         """``token_mask`` (B, N) bool, True = valid token: the padded rows of ``fn``'s input are 0 (``zero_padding``)."""
         if self.norm is not None and self.post_norm:
-            x = self.norm(x)
+            x = self.norm(x, training=training)
             h = self.fn(zero_padding(x, token_mask), training=training, **kwargs)
         else:
-            h = self.fn(zero_padding(self.norm(x) if self.norm is not None else x, token_mask), training=training, **kwargs)
+            h = self.fn(zero_padding(self.norm(x, training=training) if self.norm is not None else x, token_mask), training=training, **kwargs)
         aux = None
         is_tuple = isinstance(h, tuple)
         if is_tuple:
@@ -171,7 +174,7 @@ class EncoderLayer(keras.layers.Layer):
         self.dim = dim
         attn = build_attention(dim, attn_type=attn_type, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_attn", **attn_kwargs)
         ffn = Dense(dim, factory=factory, name=f"{name}_ffn", **dense_kwargs)
-        common = {"dim": dim, "layer_scale": layer_scale, "drop_path": drop_path}
+        common = {"dim": dim, "layer_scale": layer_scale, "drop_path": drop_path, "factory": factory}
         self.attn = Residual(attn, norm=attn_norm, name=f"{name}_attn_res", prefix=f"{name}_attn", **common)
         self.dense = Residual(ffn, norm=norm, post_norm=dense_post_norm, name=f"{name}_ffn_res", prefix=f"{name}_ffn", **common)
 

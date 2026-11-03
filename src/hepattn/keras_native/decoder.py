@@ -94,7 +94,7 @@ class MaskFormerDecoderLayer(keras.layers.Layer):
             return build_attention(dim, attn_type=attn_type, qkv_norm=qkv_norm, norm=norm, factory=factory, name=f"{name}_{part}", **part_kwargs)
 
         def residual(fn, part: str, res_norm, post_norm: bool = False):
-            return Residual(fn, dim=dim, norm=res_norm, post_norm=post_norm, name=f"{name}_{part}_res", prefix=f"{name}_{part}")
+            return Residual(fn, dim=dim, norm=res_norm, post_norm=post_norm, name=f"{name}_{part}_res", prefix=f"{name}_{part}", factory=factory)
 
         def ffn(part: str):
             return Dense(dim, factory=factory, name=f"{name}_{part}", **dense_kwargs)
