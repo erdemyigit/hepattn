@@ -18,6 +18,17 @@ Stages (``22_warmstart.pbs`` runs them on Polaris, ``WS_STAGE``):
 ``report``  Per arm: the first and last logged train rows, every validation (loss, EBOPs, beta, bits), ms per
             micro-batch. ``--out`` JSON.
 
+ws4 (LayerNorm -> DyT, then QAT; options of ``init`` / ``init-qat``): ``--norm DyT`` (every norm DyT; the converter
+replaces the checkpoint's non-affine LayerNorms with DyT at its init, ``--ln-to-dyt``, and the torch parity gate is
+skipped: the models differ by design), ``--datalane-axis last`` (one datalane bitwidth per channel, ``HGQ_DATALANE_AXIS``),
+``--attn-scale-frac-bits F`` (the score scale rounded to F fractional bits), ``--float`` (the float model: no quant spec,
+no beta / EBOPs callbacks; for the float fine-tune arms ``ws4-ft-*``).
+``init-qat`` The QAT init from a float run of this script (``--from-tag``, ``--from-arm``: its ``last`` checkpoint; ``auto``:
+            the DONE arm with the lowest last ``val/loss``): the QAT config (as ``init``, from the same
+            ``--source-config``), whose model section must equal the float run's plus the quant spec, and the float
+            weights copied into it bit for bit (``transfer``: ``convert_to_native.port_native_state``; the quantizer
+            state starts at the spec's init), then ``manifest.json`` as ``init`` writes it.
+
     python polaris/22_warmstart.py init --root R --tag T --source-config RUN/config.yaml --ckpt RUN/x.ckpt --data-dir D \
         --model-ebops 4.8e10 --target-ebops 2.9e10 --init-beta 8.5e-11
     python polaris/22_warmstart.py run --root R --tag T --arm adamw [--max-steps 60 --run-name smoke]
@@ -90,10 +101,44 @@ ARMS.update({
     "ws3-t8-l0": {**WS3, "quantizer_l1": 0.0, **_target(1.6e8)},
     "ws3-t5e8": {**WS3, **_target(5e8)},  # half a decade between t9 and t8
 })  # fmt: skip
+# ws4: the float fine-tune of the LN -> DyT model (float arms: no beta), then the ws3 scan on the DyT model with one
+# datalane bitwidth per channel and the rounded attention scale. Fine-tune: AdamW at 2x / 6x / 1x ws2's peak LR
+# (5e-5), weight decay 1e-4; Lion at 1/10 of the float reference run's peak (6.2e-4, weight decay 0.1).
+ARMS.update({
+    "ws4-ft-a": {**ADAMW, "max": 1e-4},
+    "ws4-ft-b": {**ADAMW, "max": 3e-4},
+    "ws4-ft-c": ADAMW,
+    "ws4-ft-d": {"optimizer": "Lion", "max": 6.2e-5, "weight_decay": 0.1},
+    "ws4-t9": {**WS3, **_target(1.6e9)},
+    "ws4-t8": {**WS3, **_target(1.6e8)},
+    "ws4-t7": {**WS3, **_target(1.6e7)},
+    "ws4-t6": {**WS3, **_target(1.6e6)},
+})  # fmt: skip
+FLOAT_DROPPED_CALLBACKS = ("BetaPID", "BetaScheduler", "PeriodicEBOPs", "EBOPsMonitor", "BitwidthMonitor")
 COLUMNS = (
     "train/loss", "train/ebops", "val/loss", "val/ebops", "val_cal/loss", "val_cal/ebops", "train/quant_beta", "train/pid_ebops",
     "val/bits_f_mean", "val/bits_b_mean", "val/bits_i_mean", "time/ms_per_micro_batch",
 )  # fmt: skip
+
+
+def ws4_env(args) -> dict[str, str]:
+    """The ``03_make_config.py`` variables of the ws4 options that are set."""
+    env = {}
+    if getattr(args, "norm", None):
+        env["HGQ_NORM"] = args.norm
+    if getattr(args, "datalane_axis", None):
+        env["HGQ_DATALANE_AXIS"] = args.datalane_axis
+    if getattr(args, "attn_scale_frac_bits", None) is not None:
+        env["HGQ_ATTN_SCALE_FRAC_BITS"] = str(args.attn_scale_frac_bits)
+    return env
+
+
+def floatify(cfg: dict) -> dict:
+    """The float twin of a generated QAT config: no quant spec, no beta or EBOPs callbacks (``FLOAT_DROPPED_CALLBACKS``)."""
+    cfg["model"]["model"]["init_args"].pop("quant", None)
+    t = cfg["trainer"]
+    t["callbacks"] = [cb for cb in t["callbacks"] if not cb.get("class_path", "").endswith(FLOAT_DROPPED_CALLBACKS)]
+    return cfg
 
 
 def make_config(args, init_dir: Path, name: str = "config", **extra_env: str) -> Path:
@@ -112,6 +157,7 @@ def make_config(args, init_dir: Path, name: str = "config", **extra_env: str) ->
         "HGQ_PID_WARMUP_EPOCHS": str(args.pid_warmup_epochs),
         "DATA_DIR": args.data_dir,
         "CKPT_DIR": str(init_dir / "unused_ckpts"),
+        **ws4_env(args),
         **extra_env,
     }
     path = g4.generate_config(init_dir / f"generated_{name}.yaml" if name != "config" else init_dir / "generated.yaml", **env)
@@ -128,6 +174,8 @@ def make_config(args, init_dir: Path, name: str = "config", **extra_env: str) ->
         "pid_warmup_epochs": args.pid_warmup_epochs,
     }
     cfg = g4.g4_overrides(cfg, s, init_dir / "unused_ckpts")
+    if getattr(args, "float", False):
+        cfg = floatify(cfg)
     out = init_dir / f"{name}.yaml"
     out.write_text(yaml.safe_dump(cfg, sort_keys=False))
     return out
@@ -146,14 +194,21 @@ def cmd_init(args) -> int:
     cpu = g4.env_with_src(KERAS_BACKEND="jax", JAX_PLATFORMS="cpu")
     convert = [args.jax_python, "-m", "hepattn.experiments.clic.convert_to_native", "--config", args.source_config, "--ckpt", args.ckpt]
     convert += ["--target-config", config, "--out", init_dir / "init.npz", "--report", init_dir / "convert.json", "--overwrite"]
+    if args.norm:
+        convert += ["--ln-to-dyt"]
     if g4.run_logged(convert, cpu, log) != 0:
         raise SystemExit(f"conversion failed: {log}")
-    parity = [args.jax_python, REPO / "polaris/21_warmstart_check.py", "parity", "--config", args.source_config, "--ckpt", args.ckpt]
-    parity += ["--val", f"{args.data_dir}/val_clic_fix.root", "--num-events", "200", "--parity-events", "32", "--threads", "8"]
-    parity += ["--qat-config", config, "--mutant", "tensor:register_tokens:1e-3", "--out", init_dir / "parity.json"]
-    code = g4.run_logged(parity, cpu, log)
-    report = json.loads((init_dir / "parity.json").read_text())
     conv = json.loads((init_dir / "convert.json").read_text())
+    if args.norm or args.float:
+        # the torch parity gate compares the torch model with the converted float and QAT targets: a DyT target differs
+        # from the LayerNorm source by design, and a float config has no QAT target
+        code, report = 0, {"ok": None, "targets": {}, "skipped": "norm replaced or float target"}
+    else:
+        parity = [args.jax_python, REPO / "polaris/21_warmstart_check.py", "parity", "--config", args.source_config, "--ckpt", args.ckpt]
+        parity += ["--val", f"{args.data_dir}/val_clic_fix.root", "--num-events", "200", "--parity-events", "32", "--threads", "8"]
+        parity += ["--qat-config", config, "--mutant", "tensor:register_tokens:1e-3", "--out", init_dir / "parity.json"]
+        code = g4.run_logged(parity, cpu, log)
+        report = json.loads((init_dir / "parity.json").read_text())
     manifest = {
         "complete": code == 0,
         "git": g4.git_head(),
@@ -164,9 +219,10 @@ def cmd_init(args) -> int:
         "settings": {k: v for k, v in vars(args).items() if k not in {"func", "command"}},
         "config_hash": conv["config_hash"],
         "renorm_lane": conv.get("renorm_lane"),
+        "ln_to_dyt": len(conv.get("ln_to_dyt") or []),
         "parity_ok": report["ok"],
         "parity_worst": {t: e["base"]["gate"] for t, e in report["targets"].items()},
-        "files_sha256": {p.name: g4.sha256(p) for p in (config, init_dir / "init.npz", init_dir / "parity.json")},
+        "files_sha256": {p.name: g4.sha256(p) for p in (config, init_dir / "init.npz", init_dir / "parity.json") if p.is_file()},
     }
     if args.sat_cal_batches and manifest["complete"]:
         manifest["sat"] = make_sat(args, init_dir, config, log)
@@ -174,6 +230,114 @@ def cmd_init(args) -> int:
     manifest_path.write_text(json.dumps(manifest, indent=1, default=str) + "\n")
     print(json.dumps({"complete": manifest["complete"], "parity_ok": manifest["parity_ok"], "config_hash": manifest["config_hash"]}))
     return 0 if manifest["complete"] else 1
+
+
+def best_arm(root: Path) -> str:
+    """The DONE arm of ``root`` with the lowest last ``val/loss`` (``metrics.csv``).
+
+    Raises:
+        SystemExit: If no arm is DONE.
+    """
+    scored = []
+    for arm_dir in sorted(p for p in root.iterdir() if (p / "DONE").is_file() and (p / "metrics.csv").is_file()):
+        rows = [r for r in g4.read_rows(arm_dir / "metrics.csv") if math.isfinite(r.get("val/loss", math.nan))]
+        if rows:
+            scored.append((rows[-1]["val/loss"], arm_dir.name))
+    if not scored:
+        raise SystemExit(f"no DONE arm with a val/loss in {root}")
+    return min(scored)[1]
+
+
+def model_section_without_quant(config: Path) -> dict:
+    import yaml  # noqa: PLC0415
+
+    init_args = dict(yaml.safe_load(Path(config).read_text())["model"]["model"]["init_args"])
+    init_args.pop("quant", None)
+    return init_args
+
+
+def cmd_init_qat(args) -> int:
+    """``init-qat`` (module docstring): QAT config, transfer of the float run's last (or ``--from-ckpt``) weights, manifest.
+
+    Raises:
+        SystemExit: For a complete manifest of ``--tag``, ``--float``, or a QAT model section that is not the float run's.
+    """
+    root = Path(args.root) / args.tag
+    init_dir = root / "init"
+    manifest_path = root / "manifest.json"
+    if manifest_path.is_file() and json.loads(manifest_path.read_text()).get("complete"):
+        raise SystemExit(f"{manifest_path} is complete; a new init needs a new --tag")
+    if args.float:
+        raise SystemExit("init-qat builds the QAT model: no --float")
+    src_root = Path(args.root) / args.from_tag
+    arm = best_arm(src_root) if args.from_arm == "auto" else args.from_arm
+    float_config = src_root / arm / "arm_config.yaml"
+    if args.from_ckpt:
+        float_ckpt = Path(args.from_ckpt)
+    else:
+        last = json.loads((src_root / arm / "ckpts" / "last.json").read_text())
+        float_ckpt = src_root / arm / "ckpts" / last["file"]
+    init_dir.mkdir(parents=True, exist_ok=True)
+    config = make_config(args, init_dir)
+    check_onecycle(config, args.k)
+    if model_section_without_quant(config) != model_section_without_quant(float_config):
+        raise SystemExit(
+            f"the QAT model section ({config}) is not the float run's ({float_config}) plus a quant spec: check --norm / --attn-scale-frac-bits"
+        )
+    cmd = [args.jax_python, REPO / "polaris/22_warmstart.py", "transfer", "--float-config", float_config, "--float-ckpt", float_ckpt]
+    cmd += ["--qat-config", config, "--out", init_dir / "init.npz", "--report", init_dir / "transfer.json"]
+    code = g4.run_logged(cmd, g4.env_with_src(KERAS_BACKEND="jax", JAX_PLATFORMS="cpu"), init_dir / "init.log")
+    conv = json.loads((init_dir / "transfer.json").read_text()) if code == 0 else {}
+    manifest = {
+        "complete": code == 0,
+        "git": g4.git_head(),
+        "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "config": str(config),
+        "native_init": str(init_dir / "init.npz"),
+        "source": {"float_tag": args.from_tag, "float_arm": arm, "float_config": str(float_config), "float_ckpt": str(float_ckpt),
+                   "float_ckpt_sha256": g4.sha256(float_ckpt)},
+        "settings": {k: v for k, v in vars(args).items() if k not in {"func", "command"}},
+        "config_hash": conv.get("config_hash"),
+        "transfer": conv.get("report"),
+        "parity_ok": None,
+        "files_sha256": {p.name: g4.sha256(p) for p in (config, init_dir / "init.npz") if p.is_file()},
+    }  # fmt: skip
+    manifest_path.write_text(json.dumps(manifest, indent=1, default=str) + "\n")
+    print(json.dumps({"complete": manifest["complete"], "float_arm": arm, "config_hash": manifest["config_hash"]}))
+    return 0 if manifest["complete"] else 1
+
+
+def cmd_transfer(args) -> int:
+    """(called by ``init-qat``) The float checkpoint's variables into the QAT model of ``--qat-config``, bit for bit.
+
+    Raises:
+        SystemExit: If a copied value differs from its source (a check of the written model).
+    """
+    import numpy as np  # noqa: PLC0415
+
+    from hepattn.experiments.clic.convert_to_native import port_native_state, sample_batch, write_native_checkpoint  # noqa: PLC0415
+    from hepattn.keras_native import checkpoint as nckpt  # noqa: PLC0415
+    from hepattn.keras_native.config import load_config  # noqa: PLC0415
+
+    rc_f, rc_q = load_config([args.float_config]), load_config([args.qat_config])
+    inputs, _ = sample_batch(rc_q, 2)
+    fmodel, qmodel = rc_f.build_model(), rc_q.build_model()
+    fmodel(inputs, training=False)
+    qmodel(inputs, training=False)
+    (tv, ntv, _), meta = nckpt.load_checkpoint(args.float_ckpt, fmodel, None, expect_config_hash=rc_f.model_hash)
+    report = port_native_state(fmodel, (tv, ntv), qmodel)
+    report.update(float_ckpt=str(args.float_ckpt), float_step=meta.get("step"), float_config_hash=rc_f.model_hash)
+    # bit-for-bit check of the copy on the written model: every float value equals the QAT variable of its key
+    fkeys, qkeys = nckpt.variable_keys(fmodel), nckpt.variable_keys(qmodel)
+    qvalues = {qkeys[id(v)]: np.asarray(v.value) for v in qmodel.variables}
+    fvars = [*fmodel.trainable_variables, *fmodel.non_trainable_variables]
+    report["bitwise_equal"] = all(np.array_equal(np.asarray(x), qvalues[fkeys[id(v)]]) for v, x in zip(fvars, [*tv, *ntv], strict=True))
+    if not report["bitwise_equal"]:
+        raise SystemExit("transfer: a copied value differs")
+    write_native_checkpoint(args.out, rc_q, qmodel, report, overwrite=True)
+    Path(args.report).write_text(json.dumps({"config_hash": rc_q.model_hash, "report": report}, indent=1, default=str) + "\n")
+    print("RESULT " + json.dumps(report, default=str), flush=True)
+    return 0
 
 
 def make_sat(args, init_dir: Path, wrap_config: Path, log: Path) -> dict:
@@ -399,39 +563,56 @@ def cmd_report(args) -> int:
     return 0
 
 
+def _init_options(p) -> None:
+    """Options shared by ``init`` and ``init-qat`` (the generated config)."""
+    p.add_argument("--source-config", required=True, help="the float Lightning run's saved config.yaml")
+    p.add_argument("--data-dir", required=True)
+    p.add_argument("--model-ebops", type=float, required=True, help="EBOPs of the QAT model at the converted weights")
+    p.add_argument("--target-ebops", type=float, required=True)
+    p.add_argument("--init-beta", type=float, required=True)
+    p.add_argument("--weight-b0", type=int, default=12)
+    p.add_argument("--batch", type=int, default=128)
+    p.add_argument("--accum", type=int, default=1)
+    p.add_argument("--k", type=int, default=2000, help="optimizer steps per arm")
+    p.add_argument("--epoch-steps", type=int, default=250, help="optimizer steps per mini-epoch (one validation each)")
+    p.add_argument("--pid-warmup-epochs", type=int, default=2)
+    p.add_argument("--log-every", type=int, default=10)
+    p.add_argument("--ckpt-every", type=int, default=200)
+    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--num-train", type=int, default=400000, help="train events read (-1: the whole file)")
+    p.add_argument("--num-val", type=int, default=5000)
+    p.add_argument("--val-calibration", type=int, default=0, help="train micro-batches traced for val_cal/* (0: none)")
+    p.add_argument("--norm", choices=["DyT"], help="ws4: every norm DyT (a LayerNorm checkpoint converts with --ln-to-dyt)")
+    p.add_argument("--datalane-axis", choices=["last"], help="ws4: one datalane bitwidth per index of the last axis")
+    p.add_argument("--attn-scale-frac-bits", type=int, help="ws4: the attention scale rounded to this many fractional bits")
+    p.add_argument("--float", action="store_true", help="ws4: the float model (no quant spec, no beta callbacks)")
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(prog="22_warmstart", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "run", "report"):
+    for name in ("init", "init-qat", "run", "report"):
         p = sub.add_parser(name)
         p.add_argument("--root", required=True)
         p.add_argument("--tag", required=True)
-        if name in {"init", "run"}:
+        if name in {"init", "init-qat", "run"}:
             p.add_argument("--jax-python", default=sys.executable)
     seed = sub.add_parser("seed-sat", help="(called by init) the SAT model's integer bits from a traced WRAP model")
     for key in ("--wrap-config", "--wrap-init", "--sat-config", "--sat-init", "--out", "--report", "--work-dir"):
         seed.add_argument(key, required=True)
     seed.add_argument("--n", type=int, required=True, help="train micro-batches traced")
+    tr = sub.add_parser("transfer", help="(called by init-qat) float checkpoint -> QAT init")
+    for key in ("--float-config", "--float-ckpt", "--qat-config", "--out", "--report"):
+        tr.add_argument(key, required=True)
+    for name in ("init", "init-qat"):
+        _init_options(sub.choices[name])
     init = sub.choices["init"]
-    init.add_argument("--source-config", required=True, help="the float run's saved config.yaml")
     init.add_argument("--ckpt", required=True, help="its Lightning checkpoint")
-    init.add_argument("--data-dir", required=True)
-    init.add_argument("--model-ebops", type=float, required=True, help="EBOPs of the QAT model at the converted weights")
-    init.add_argument("--target-ebops", type=float, required=True)
-    init.add_argument("--init-beta", type=float, required=True)
-    init.add_argument("--weight-b0", type=int, default=12)
-    init.add_argument("--batch", type=int, default=128)
-    init.add_argument("--accum", type=int, default=1)
-    init.add_argument("--k", type=int, default=2000, help="optimizer steps per arm")
-    init.add_argument("--epoch-steps", type=int, default=250, help="optimizer steps per mini-epoch (one validation each)")
-    init.add_argument("--pid-warmup-epochs", type=int, default=2)
-    init.add_argument("--log-every", type=int, default=10)
-    init.add_argument("--ckpt-every", type=int, default=200)
-    init.add_argument("--workers", type=int, default=4)
-    init.add_argument("--num-train", type=int, default=400000)
-    init.add_argument("--num-val", type=int, default=5000)
-    init.add_argument("--val-calibration", type=int, default=0, help="train micro-batches traced for val_cal/* (0: none)")
     init.add_argument("--sat-cal-batches", type=int, default=0, help="also build the SAT-datalane model, seeded from N batches")
+    iq = sub.choices["init-qat"]
+    iq.add_argument("--from-tag", required=True, help="the float run's tag (an init with --float)")
+    iq.add_argument("--from-arm", default="auto", help="its arm; auto: the DONE arm with the lowest last val/loss")
+    iq.add_argument("--from-ckpt", help="a checkpoint of that arm instead of its last one")
     run = sub.choices["run"]
     run.add_argument("--arm", required=True, choices=sorted(ARMS))
     run.add_argument("--run-name", help="run directory name (default: the arm)")
@@ -444,7 +625,8 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    return {"init": cmd_init, "run": cmd_run, "report": cmd_report, "seed-sat": cmd_seed_sat}[args.command](args)
+    commands = {"init": cmd_init, "init-qat": cmd_init_qat, "transfer": cmd_transfer, "run": cmd_run, "report": cmd_report, "seed-sat": cmd_seed_sat}
+    return commands[args.command](args)
 
 
 if __name__ == "__main__":

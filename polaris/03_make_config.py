@@ -40,6 +40,14 @@ Env overrides:
                    written, HGQ2's default WRAP (integer bits set from each training batch); part of the model hash
     HGQ_QUANTIZER_LR_SCALE  LR multiplier of the trainable quantizer variables (bitwidths), JAX driver only
                    (keras_native/optim.py; unset: not written, 1)
+    HGQ_DATALANE_AXIS  last: the kif datalane quantizers get one bitwidth per index of the LAST axis only
+                   (heterogeneous_axis [-1], homogeneous_axis null; the features of a (B, N, C) tensor: one bitwidth
+                   per channel, shared by all tokens, which token-axis folding needs, Chang Sun 2026-11-02). Unset: not
+                   written, HGQ2's default (homogeneous_axis (0,): one bitwidth per element, per token). Model hash
+    HGQ_NORM       DyT: every encoder / decoder norm (residual and q/k/v norms) becomes DyT (keras_native only; a
+                   LayerNorm checkpoint converts with convert_to_native --ln-to-dyt). Unset: the source's norm. Model hash
+    HGQ_ATTN_SCALE_FRAC_BITS  F: the attention score scale head_dim**-0.5 rounded to F fractional bits, in the encoder
+                   and decoder attn_kwargs (scale_frac_bits; keras_native only). Unset: the exact scale. Model hash
 
 Another trained model (a QAT warm start):
     HGQ_SOURCE_CONFIG  the config.yaml a float run saved (SaveConfig). Its model, data and task settings replace
@@ -309,6 +317,21 @@ net["quant"] = {
     "table": {"default_q_type": "kif", "i0": 2, "f0": 10},
     "ebops": {"beta0": 0.0},
 }
+DATALANE_AXIS = os.environ.get("HGQ_DATALANE_AXIS")
+if DATALANE_AXIS is not None:
+    if DATALANE_AXIS != "last":
+        raise SystemExit(f"HGQ_DATALANE_AXIS must be 'last', got {DATALANE_AXIS!r}")
+    net["quant"]["datalane"].update(heterogeneous_axis=[-1], homogeneous_axis=None)
+NORM = os.environ.get("HGQ_NORM")
+if NORM is not None:
+    if NORM != "DyT":
+        raise SystemExit(f"HGQ_NORM must be 'DyT', got {NORM!r}")
+    encoder["norm"] = NORM
+    net["decoder"]["init_args"]["decoder_layer_config"]["norm"] = NORM
+SCALE_FRAC_BITS = os.environ.get("HGQ_ATTN_SCALE_FRAC_BITS")
+if SCALE_FRAC_BITS is not None:
+    encoder.setdefault("attn_kwargs", {})["scale_frac_bits"] = int(SCALE_FRAC_BITS)
+    net["decoder"]["init_args"]["decoder_layer_config"].setdefault("attn_kwargs", {})["scale_frac_bits"] = int(SCALE_FRAC_BITS)
 if os.environ.get("HGQ_DATALANE_OVERFLOW"):
     OVERFLOW = os.environ["HGQ_DATALANE_OVERFLOW"].upper()
     if OVERFLOW not in {"WRAP", "SAT", "SAT_SYM"}:

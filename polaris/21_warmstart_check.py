@@ -474,7 +474,7 @@ def cmd_qinit(args) -> int:
     targets_n = {k: v[:n_eval] for k, v in targets_all.items()}
     # --cal-include-eval: the eval events are traced too (control: separates unseen-event wrap from a tracing defect)
     cal = {k: (v if args.cal_include_eval else v[n_eval:]) for k, v in inputs_all.items()}
-    rc_q, nq, conv = convert([cfg], args.ckpt, target_config=args.qat_config, verify=False)
+    rc_q, nq, conv = convert([cfg], args.ckpt, target_config=args.qat_config, verify=False, ln_to_dyt=args.ln_to_dyt)
     leaves = EbopsLeaves(nq)
     wraps = wrap_quantizers(nq)
     report = {
@@ -570,6 +570,7 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--cal-events", type=int, default=256, help="events (after the eval events) for the integer-bit trace")
             p.add_argument("--cal-batch", type=int, default=32)
             p.add_argument("--cal-include-eval", action="store_true", help="trace the eval events as well (a control)")
+            p.add_argument("--ln-to-dyt", action="store_true", help="a DyT target from a LayerNorm checkpoint (convert_to_native)")
         if name == "parity":
             p.add_argument("--k-ulp", type=float, default=K_ULP)
             p.add_argument("--k-q50", type=float, default=K_Q50)

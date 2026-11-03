@@ -14,6 +14,7 @@
 #   WS_STAGE=init  WS_TAG=ws1 bash polaris/submit.sh 22_warmstart.pbs   # config, conversion, CPU parity gate, smoke on GPU 0
 #   WS_STAGE=pilot WS_TAG=ws1 bash polaris/submit.sh 22_warmstart.pbs   # the arms of WS_ARMS, one per GPU, then the report
 #   WS_STAGE=report WS_TAG=ws1 bash polaris/submit.sh 22_warmstart.pbs
+#   WS_STAGE=init-qat WS_TAG=ws4 WS_ARGS="--from-tag ws4f ..." bash polaris/submit.sh 22_warmstart.pbs   # QAT init from a float run, smoke
 # (submit.sh hands WS_STAGE, WS_TAG, WS_ROOT, WS_SOURCE, WS_ARGS, WS_ARMS, WS_SMOKE_ARM and JAX_COMPILATION_CACHE_DIR to the job.)
 #   WS_SOURCE  directory with the float run's config.yaml and its checkpoint as model.ckpt (default $WORK_ROOT/warmstart/source)
 #   WS_ARGS    extra options of 22_warmstart.py init (setpoints, --k, --batch, ...); the init needs the three setpoints
@@ -66,6 +67,17 @@ case "$STAGE" in
     nvidia-smi --query-gpu=index,memory.used --format=csv
     report
     ;;
+  init-qat)
+    PYTHONPATH="$REPO/src" "${WS[@]}" init-qat --root "$ROOT" --tag "$TAG" --jax-python "$JPY" \
+      --source-config "$SRC/config.yaml" --data-dir "$DATA_ROOT" ${WS_ARGS:-}
+    code=$?
+    echo "WS-INIT-EXIT-$code"
+    [ "$code" = 0 ] || exit "$code"
+    CUDA_VISIBLE_DEVICES=0 PYTHONPATH="$REPO/src" "${WS[@]}" run --root "$ROOT" --tag "$TAG" --arm "${WS_SMOKE_ARM:-adamw}" --run-name smoke \
+      --max-steps 60 --num-val 512 --jax-python "$JPY" --compile-cache "$JAX_COMPILATION_CACHE_DIR"
+    echo "WS-SMOKE-EXIT-$?"
+    report
+    ;;
   pilot)
     read -r -a ARMS <<< "${WS_ARMS:-adamw adamw-q20 lion-6e5 lion-6e4}"
     NGPU=$(nvidia-smi -L | wc -l)
@@ -91,5 +103,5 @@ case "$STAGE" in
     echo "WS-REPORT-EXIT-$?"
     ;;
   *)
-    echo "ERROR: WS_STAGE must be init, pilot or report, got $STAGE"; exit 1 ;;
+    echo "ERROR: WS_STAGE must be init, init-qat, pilot or report, got $STAGE"; exit 1 ;;
 esac

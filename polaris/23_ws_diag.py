@@ -22,6 +22,12 @@ r"""CPU diagnostics of the QAT warm start (ws2): bitwidth gradients, and the WRA
             training, no overflow), which is what ``train/loss`` measures. EBOPs at each set of integer bits.
 ``census``  At ``--cal-batches`` calibrated integer bits: EBOPs per leaf, integer bits per WRAP quantizer, val_cal loss,
             and which WRAP lanes the val events overflow (wrap). ``census-diff`` compares two census runs (two code trees).
+``datalane`` (no checkpoint, no data: dummy events) Every datalane quantizer of the model of ``--config``: its owner
+            leaf and operand, input shape, bitwidth shape, the axes with their own bitwidths, and what the last axis
+            is (``LETTER_ROLES`` of the owner's einsum letter): channel, Linformer slot or token. Token folding needs
+            one bitwidth per channel at most (Chang Sun 2026-11-02): a heterogeneous token axis is flagged.
+
+    KERAS_BACKEND=jax JAX_PLATFORMS=cpu PYTHONPATH=src python polaris/23_ws_diag.py datalane --config C.yaml --out a.json
 """
 
 import argparse
@@ -516,6 +522,126 @@ def ebops_at(t, ntv) -> float:
     return float(np.asarray(penalty)) / t.beta
 
 
+# What each einsum letter of the keras_native leaves is (masked_linformer, attention, tasks, dense, norm).
+LETTER_ROLES = {
+    **dict.fromkeys("cdef", "channel"),  # features, head dim, GLU / task features
+    "k": "slot",  # Linformer projected-sequence slot: a learned mixture of tokens
+    **dict.fromkeys("nmlq", "token"),  # nodes (n, m, l) and queries (q)
+    "h": "head",
+    "b": "batch",
+    "z": "unit",
+}
+
+
+def _operand_specs(layer) -> list[str]:
+    """Einsum letters of each input of a quantized leaf (QDense: ``...c``; a softmax / LUT: from its call site).
+
+    Raises:
+        TypeError: For another quantized leaf type.
+    """
+    from hgq.layers import QDense, QEinsum, QEinsumDense, QSoftmax, QUnaryFunctionLUT  # noqa: PLC0415
+
+    if isinstance(layer, QEinsum | QEinsumDense):
+        return layer.equation.split("->")[0].split(",")
+    if isinstance(layer, QDense):
+        return ["c"]
+    if isinstance(layer, QSoftmax | QUnaryFunctionLUT):
+        # attention softmax (b, h, q, k) over the k slots (its tables share the input shape); the incidence softmax
+        # (b, q, l) over the queries; the renorm rsqrt and DyT tanh tables are homogeneous (a flat rank-2 input)
+        if "incidence" in layer.name:
+            return ["bql"]
+        if "rsqrt" in layer.name or "tanh" in layer.name:
+            return ["bx"]
+        return ["bhqk"]
+    raise TypeError(f"no operand letters for {type(layer).__name__} {layer.name}")
+
+
+def datalane_audit(model) -> list[dict]:
+    """One row per datalane quantizer of ``model`` (built): see ``datalane`` in the module docstring.
+
+    Raises:
+        RuntimeError: If a datalane quantizer is not the input quantizer of a leaf (no owner to classify it by).
+    """
+    from hgq.layers.core.base import MultipleQuantizers  # noqa: PLC0415
+    from hgq.quantizer import Quantizer  # noqa: PLC0415
+
+    owners: dict[int, tuple] = {}
+    for layer in model._flatten_layers(include_self=False, recursive=True):  # noqa: SLF001
+        iq = getattr(layer, "iq", None) if getattr(layer, "enable_iq", False) else None
+        if iq is None:
+            continue
+        quantizers = iq.quantizers if isinstance(iq, MultipleQuantizers) else [iq]
+        specs = _operand_specs(layer)
+        for n, q in enumerate(quantizers):
+            owners[id(q)] = (layer, n, specs[n] if n < len(specs) else "?")
+    rows = []
+    for q in model._flatten_layers(include_self=False, recursive=True):  # noqa: SLF001
+        if not isinstance(q, Quantizer) or q.config.place != "datalane":
+            continue
+        if id(q) not in owners:
+            raise RuntimeError(f"datalane quantizer {q.path} has no owner leaf")
+        layer, operand, spec = owners[id(q)]
+        mapper = q.quantizer.bw_mapper
+        bits_shape = tuple(int(d) for d in q.quantizer.kif[2].shape) if hasattr(q.quantizer, "kif") else None
+        hetero = tuple(int(a) for a in (mapper.heterogeneous_axis or ()))
+        rank = len(bits_shape) if bits_shape is not None else None
+        last = spec[-1] if spec and spec != "?" else "?"
+        role = "fixed (homogeneous)" if not hetero else LETTER_ROLES.get(last, "?")
+        token_axes = [a for a in hetero if a < len(spec) and LETTER_ROLES.get(spec[a]) == "token"]
+        rows.append({
+            "quantizer": q.path,
+            "leaf": layer.name,
+            "leaf_type": type(layer).__name__,
+            "operand": operand,
+            "letters": spec,
+            "rank": rank,
+            "bits_shape": bits_shape,
+            "heterogeneous_axes": hetero,
+            "last_axis": last,
+            "last_axis_role": role,
+            "overflow": q.quantizer.overflow_mode if hasattr(q.quantizer, "overflow_mode") else None,
+            "flag": bool(token_axes) or (bool(hetero) and role != "channel"),
+            "heterogeneous_token_axes": token_axes,
+        })  # fmt: skip
+    return rows
+
+
+def _pattern(name: str) -> str:
+    """A leaf name with its layer indices replaced by ``*`` (one table row per repeated leaf)."""
+    import re  # noqa: PLC0415
+
+    return re.sub(r"(_l|task|innet)\d+", r"\1*", name)
+
+
+def cmd_datalane(args) -> int:
+    from collections import Counter  # noqa: PLC0415
+
+    from hepattn.experiments.clic.convert_to_native import sample_batch  # noqa: PLC0415
+    from hepattn.keras_native.config import load_config  # noqa: PLC0415
+
+    rc = load_config(args.config)
+    model = rc.build_model()
+    inputs, _ = sample_batch(rc, 2)
+    model(inputs, training=False)
+    rows = datalane_audit(model)
+    groups: Counter = Counter()
+    first: dict = {}
+    for r in rows:
+        key = (_pattern(r["leaf"]), r["leaf_type"], r["operand"], r["letters"], r["bits_shape"], r["last_axis_role"], r["flag"])
+        groups[key] += 1
+        first.setdefault(key, r)
+    table = [{"leaf": k[0], "type": k[1], "operand": k[2], "letters": k[3], "bits_shape": k[4], "last_axis_role": k[5], "flag": k[6], "count": n}
+             for k, n in sorted(groups.items(), key=lambda kv: (not kv[0][6], kv[0][0]))]  # fmt: skip
+    summary = {"datalane_quantizers": len(rows), "flagged": sum(r["flag"] for r in rows), "config": args.config}
+    Path(args.out).write_text(json.dumps({"summary": summary, "table": table, "rows": rows}, indent=1, default=str) + "\n")
+    for t in table:
+        flag = "FLAG " if t["flag"] else "     "
+        bits = f"bits {t['bits_shape']} last={t['last_axis_role']}"
+        print(f"{flag}{t['count']:3d} x {t['leaf']:45s} {t['type']:18s} op{t['operand']} {t['letters']:5s} {bits}")
+    print("RESULT " + json.dumps(summary))
+    return 0
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(prog="23_ws_diag", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -556,6 +682,9 @@ def parse_args(argv=None):
     c = sub.choices["census"]
     c.add_argument("--val-batches", type=int, default=8)
     c.add_argument("--cal-batches", type=int, default=256)
+    a = sub.add_parser("datalane")
+    a.add_argument("--config", action="append", required=True)
+    a.add_argument("--out", required=True)
     d = sub.add_parser("census-diff")
     d.add_argument("--base", required=True)
     d.add_argument("--new", required=True)
@@ -568,7 +697,15 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     if args.command not in {"replay", "census-diff"} and os.environ.get("KERAS_BACKEND") != "jax":
         raise SystemExit("KERAS_BACKEND must be jax")
-    commands = {"grads": cmd_grads, "replay": cmd_replay, "honest": cmd_honest, "ste": cmd_ste, "census": cmd_census, "census-diff": cmd_census_diff}
+    commands = {
+        "grads": cmd_grads,
+        "replay": cmd_replay,
+        "honest": cmd_honest,
+        "ste": cmd_ste,
+        "census": cmd_census,
+        "census-diff": cmd_census_diff,
+        "datalane": cmd_datalane,
+    }
     return commands[args.command](args)
 
 
