@@ -1,0 +1,65 @@
+#!/bin/bash -l
+#PBS -N clic-sector
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -j oe
+#
+# One arm of the sectored-decoder comparison on one Polaris node (4 A100-40GB). Submit with submit.sh, which passes
+# -A / -q / -l filesystems / walltime and REPO_DIR, ENV_SH, VENV_DIR, CFG, SMOKE, RESUME_CKPT, LOG_ROOT. Lightning starts the
+# 4 DDP ranks itself (trainer.devices: 4), so this runs ONE python process, not mpiexec.
+set -euo pipefail
+
+: "${REPO_DIR:?}" "${ENV_SH:?}" "${VENV_DIR:?}" "${CFG:?}"
+source "${ENV_SH}"   # PBS_PROJECT, DATA_ROOT, WORK_ROOT
+export PYTHONNOUSERSITE=1
+
+# hepattn is not installed in the venv, so PYTHONPATH decides which clone runs; the preflight proves it is this one.
+source "${VENV_DIR}/bin/activate"
+export PYTHONPATH="${REPO_DIR}/src"
+python - <<'PY'
+import os, sys, hepattn, masked_linformer, yaml
+repo = os.environ["REPO_DIR"]
+if not hepattn.__file__.startswith(os.path.join(repo, "src")):
+    sys.exit(f"FATAL: hepattn is {hepattn.__file__}, not {repo}/src")
+cfg = yaml.safe_load(open(os.path.join(repo, "src/hepattn/experiments/clic", os.environ["CFG"])))
+cls = cfg["model"]["model"]["class_path"]
+mod, name = cls.rsplit(".", 1)
+getattr(__import__(mod, fromlist=[name]), name)
+print(f"preflight OK: hepattn {hepattn.__file__}, masked_linformer {masked_linformer.__file__}, model {cls}")
+PY
+
+# Triton (torch.compile in loss.py and the Compile callback) builds with $CC; Polaris' default nvc rejects GCC flags.
+export CC="$(command -v gcc)" CXX="$(command -v g++)"
+export OMP_NUM_THREADS=8   # 32 cores / 4 ranks
+export COMET_OFFLINE_DIRECTORY="${WORK_ROOT}/comet-offline"
+mkdir -p "${COMET_OFFLINE_DIRECTORY}"
+
+ARGS=()
+if [ "${SMOKE:-0}" = "1" ]; then
+  # >= 40 steps: OneCycleLR phase 1 spans pct_start * total_steps - 1 steps (0 at 20 steps -> division by zero).
+  ARGS+=(--trainer.max_epochs 1 --trainer.limit_train_batches 200 --trainer.limit_val_batches 10)
+fi
+# -r y requeues a preempted job: continue from the newest last.ckpt of this arm unless RESUME_CKPT says otherwise.
+# Each (re)start makes a new timestamped run dir, so pick the evaluation checkpoint across all of them.
+ARM="$(basename "${CFG}" .yaml)"
+if [ -z "${RESUME_CKPT:-}" ] && [ "${SMOKE:-0}" != "1" ] && [ -n "${LOG_ROOT:-}" ]; then
+  RESUME_CKPT="$(ls -t "${LOG_ROOT}"/clic_sector_"${ARM}"_*/ckpts/last.ckpt 2>/dev/null | head -1 || true)"
+fi
+[ -n "${RESUME_CKPT:-}" ] && ARGS+=(--ckpt_path "${RESUME_CKPT}")
+[ -n "${LOG_ROOT:-}" ] && { mkdir -p "${LOG_ROOT}"; ARGS+=(--trainer.default_root_dir "${LOG_ROOT}"); }
+
+# GPU memory, sampled every 5 s for the whole run (peak = max per GPU in this file).
+MEMLOG="${LOG_ROOT:-${REPO_DIR}}/gpumem_${PBS_JOBID%%.*}.csv"
+nvidia-smi --query-gpu=timestamp,index,memory.used --format=csv,noheader,nounits -l 5 > "${MEMLOG}" &
+SMI=$!
+trap 'kill ${SMI} 2>/dev/null || true' EXIT
+
+echo "==> $(hostname) $(date -Is) cfg ${CFG} args ${ARGS[*]:-}"
+cd "${REPO_DIR}/src/hepattn/experiments/clic"
+python main.py fit --config "${CFG}" \
+  --data.train_path "${DATA_ROOT}/train_clic_fix.root" \
+  --data.valid_path "${DATA_ROOT}/val_clic_fix.root" \
+  --data.test_path "${DATA_ROOT}/val_clic_fix.root" \
+  "${ARGS[@]}"
+echo "==> finished $(date -Is); peak MiB per GPU:"
+awk -F', ' '{if ($3 > m[$2]) m[$2] = $3} END {for (g in m) print "gpu " g ": " m[g]}' "${MEMLOG}"
