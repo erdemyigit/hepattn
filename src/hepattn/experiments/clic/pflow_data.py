@@ -87,8 +87,6 @@ class CLICDataset(Dataset):
                 raise ValueError(f"unsupported sector options {sectors}")
             if num_objects % sectors["num_sectors"] or sectors["num_sectors"] * sectors["max_nodes_per_sector"] < max_nodes - 1:
                 raise ValueError(f"{sectors} does not fit num_objects {num_objects} and max_nodes {max_nodes}")
-            if dummy_data:
-                raise ValueError("sectors need real data")
 
         if dummy_data:
             print(f"Creating CLIC dataset with dummy data and {num_events} samples")
@@ -541,6 +539,12 @@ class CLICDataset(Dataset):
                 tgt[:n_particles] = torch.randn(n_particles)  # Random regression targets
                 labels[f"particle_{label}"] = tgt
 
+        if self.sectors is not None:
+            # the incidence of the dummy targets stands in for their energy on the nodes
+            weight = (labels["particle_incidence"] * labels["particle_node_valid"])[:n_particles, :n_nodes].double().numpy()
+            phi = normalize_phi(inputs["node_phi"][:n_nodes].double().numpy())
+            self.sector_blocks(phi, weight, weight.sum(1), np.zeros(n_particles), inputs, labels)
+
         return inputs, labels
 
     def __getitem__(self, idx):
@@ -595,35 +599,49 @@ class CLICDataset(Dataset):
 
     def sectorise(self, idx: int, inputs: dict, labels: dict) -> None:
         """Add the sector inputs and turn the targets into per-sector blocks (see `sectors` in __init__)."""
-        num_sectors = self.sectors["num_sectors"]
-        slots = self.num_objects // num_sectors
         n_tracks, n_topos, n_particles = int(self.n_tracks[idx]), int(self.n_topos[idx]), int(self.n_particles[idx])
-        n_nodes = n_tracks + n_topos
         track = slice(self.track_cumsum[idx], self.track_cumsum[idx + 1])
         particle = slice(self.particle_cumsum[idx], self.particle_cumsum[idx + 1])
 
         track_phi = self.full_data_array["track_phi_int" if self.sectors["track_phi"] == "calo" else "track_phi"][track]
         topo_phi = self.full_data_array["topo_phi"][self.topo_cumsum[idx] : self.topo_cumsum[idx + 1]]
         phi = torch.cat([track_phi, topo_phi]).double().numpy()
+
+        # energy of each particle on each node, as the incidence is built in load_event (last write wins)
+        energy = self.full_data_array["particle_e"][particle].double().numpy()
+        weight = np.zeros((n_particles, n_tracks + n_topos))
+        track_particle = np.clip(np.asarray(self.aux_data_array["track_particle_idx"][idx], dtype=np.int64), 0, None)
+        weight[track_particle, np.arange(n_tracks)] = energy[track_particle]
+        topo_idx = np.asarray(self.aux_data_array["topo2particle_topo_idx"][idx], dtype=np.int64)
+        topo_particle = np.asarray(self.aux_data_array["topo2particle_particle_idx"][idx], dtype=np.int64)
+        weight[topo_particle, topo_idx + n_tracks] = self.aux_data_array["topo2particle_energy"][idx]
+        particle_phi = self.full_data_array["particle_phi"][particle].double().numpy()
+        self.sector_blocks(phi, weight, energy, particle_phi, inputs, labels)
+
+    def sector_blocks(self, phi: np.ndarray, weight: np.ndarray, energy: np.ndarray, particle_phi: np.ndarray, inputs: dict, labels: dict) -> None:
+        """Partition the nodes and place each target in its owner's block.
+
+        Args:
+            phi: (n_nodes,) node phi used for the partition.
+            weight: (n_particles, n_nodes) energy of each particle on each node; the owner sector holds most of it.
+            energy: (n_particles,) particle energy; overflow keeps the highest.
+            particle_phi: (n_particles,) phi that places a particle without weight on any node.
+            inputs: Input dict, gets node_sector and node_sector_rank.
+            labels: Target dict, modified in place.
+        """
+        num_sectors = self.sectors["num_sectors"]
+        slots = self.num_objects // num_sectors
+        n_particles, n_nodes = weight.shape
         sector, rank, edges = partition(phi, num_sectors, self.sectors["max_nodes_per_sector"])
         node_sector = torch.full((self.max_nodes,), -1, dtype=torch.int64)
         node_sector[:n_nodes] = torch.from_numpy(sector)
         node_rank = torch.zeros(self.max_nodes, dtype=torch.int64)
         node_rank[:n_nodes] = torch.from_numpy(rank)
 
-        # energy of each particle on each node, as the incidence is built in load_event (last write wins)
-        energy = self.full_data_array["particle_e"][particle].double().numpy()
-        weight = np.zeros((n_particles, n_nodes))
-        track_particle = np.clip(np.asarray(self.aux_data_array["track_particle_idx"][idx], dtype=np.int64), 0, None)
-        weight[track_particle, np.arange(n_tracks)] = energy[track_particle]
-        topo_idx = np.asarray(self.aux_data_array["topo2particle_topo_idx"][idx], dtype=np.int64)
-        topo_particle = np.asarray(self.aux_data_array["topo2particle_particle_idx"][idx], dtype=np.int64)
-        weight[topo_particle, topo_idx + n_tracks] = self.aux_data_array["topo2particle_energy"][idx]
         in_sector = weight @ np.eye(num_sectors)[sector]
         owner = in_sector.argmax(1)
         # a particle without energy on any node goes to the sector of its own phi
         invisible = in_sector.sum(1) <= 0
-        particle_phi = self.full_data_array["particle_phi"][particle].double().numpy()
         owner[invisible] = (np.searchsorted(edges, particle_phi[invisible], side="right") - 1) % len(edges)
 
         valid = labels["particle_valid"][:n_particles].numpy()

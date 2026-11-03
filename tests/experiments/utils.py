@@ -1,13 +1,14 @@
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 
-def run_test(main_module: Any, config_path: str) -> None:
-    """Run an experiment test with the given main module and config."""
+def run_test(main_module: Any, config_path: str, after_fit: Callable[[Path], None] | None = None) -> None:
+    """Run an experiment test with the given main module and config; `after_fit` gets the run directory before the test."""
     # Load the config to get the name for the directory prefix
     config_file = Path(config_path)
     with config_file.open() as f:
@@ -30,6 +31,8 @@ def run_test(main_module: Any, config_path: str) -> None:
     latest_dir = max(exp_dirs, key=os.path.getmtime)
     test_config_path = latest_dir / "config.yaml"
     assert test_config_path.exists(), f"Config file not found at {test_config_path.absolute()}"
+    if after_fit is not None:
+        after_fit(latest_dir)
 
     args = ["test", "--config", str(test_config_path)]
     main_module.main(args)
