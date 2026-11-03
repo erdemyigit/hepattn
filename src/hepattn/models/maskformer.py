@@ -155,7 +155,7 @@ class MaskFormer(nn.Module):
             outputs["encoder"][task.name] = task(x)
 
         # Pass through decoder layers
-        x, decoder_outputs = self.decoder(x, self.input_names)
+        x, decoder_outputs = self.decode(x)
         outputs["encoder"].update(decoder_outputs.pop("encoder", {}))
         outputs.update(decoder_outputs)
 
@@ -177,6 +177,10 @@ class MaskFormer(nn.Module):
             outputs["final"][sort] = sort_dict
 
         return outputs
+
+    def decode(self, x: dict[str, Tensor]) -> tuple[dict[str, Tensor], dict[str, dict]]:
+        """Run the decoder on the encoded inputs; the final tasks then run on the returned embeddings."""
+        return self.decoder(x, self.input_names)
 
     def predict(self, outputs: dict) -> dict:
         """Takes the raw model outputs and produces a set of actual inferences / predictions.
@@ -341,7 +345,7 @@ class MaskFormer(nn.Module):
 
             # Get the indices that can permute the predictions to yield their optimal matching
             # Output shape: [num_layers * batch, num_pred]
-            stacked_pred_idxs = self.matcher(stacked_costs, stacked_target_valid, stacked_query_valid)
+            stacked_pred_idxs = self.solve_matching(stacked_costs, stacked_target_valid, stacked_query_valid)
 
             # Reshape back to [num_layers, batch, num_pred]
             stacked_pred_idxs = stacked_pred_idxs.view(num_layers, batch_size, num_pred)
@@ -360,6 +364,10 @@ class MaskFormer(nn.Module):
                     for output_name in task.outputs:
                         output_tensor = decoder_outputs[layer_name][task.name][output_name]
                         decoder_outputs[layer_name][task.name][output_name] = output_tensor[batch_idxs_expanded, pred_idxs]
+
+    def solve_matching(self, costs: Tensor, target_valid: Tensor, query_valid: Tensor | None) -> Tensor:
+        """Solve the assignment for (batch, pred, true) costs; returns (batch, pred) prediction indices."""
+        return self.matcher(costs, target_valid, query_valid)
 
     def _compute_decoder_losses(self, decoder_outputs: dict, targets: dict) -> dict[str, dict[str, Tensor]]:
         """Compute final losses for decoder tasks using permuted outputs.
