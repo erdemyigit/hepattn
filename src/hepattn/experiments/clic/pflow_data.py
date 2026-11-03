@@ -9,7 +9,10 @@ from lightning import seed_everything
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+from hepattn.experiments.clic.sectors import partition
 from hepattn.utils.scaling import FeatureScaler
+
+SECTOR_KEYS = {"num_sectors", "scheme", "max_nodes_per_sector", "track_phi", "overflow"}
 
 
 def normalize_phi(phi):
@@ -41,6 +44,7 @@ class CLICDataset(Dataset):
         incidence_cutval: float = 1e-4,
         is_inference: bool = False,
         dummy_data: bool = False,
+        sectors: dict | None = None,
     ):
         super().__init__()
 
@@ -68,6 +72,23 @@ class CLICDataset(Dataset):
         self.remove_wrong_idxs = remove_wrong_idxs
         self.incidence_cutval = incidence_cutval
         self.is_inference = is_inference
+        # sectors: optional partition for the sectored decoder (hepattn.models.sector): num_sectors (S), scheme ("cap"),
+        # max_nodes_per_sector (M), track_phi ("calo": calorimeter-entry phi, or "vtx") and overflow
+        # ("drop_lowest_energy"). Adds the inputs and targets node_sector and node_sector_rank, and the target
+        # sector_dropped_targets. Each valid target is placed once, in the sector holding most of its energy (track:
+        # particle energy; topocluster: its energy share), in that sector's block of num_objects / S slots, with its
+        # mask and incidence restricted to the sector's nodes. A sector with more targets than slots keeps its
+        # highest-energy ones; the event is kept. Other target slots are empty (class 5, not valid).
+        self.sectors = sectors
+        if sectors is not None:
+            if set(sectors) != SECTOR_KEYS:
+                raise ValueError(f"sectors needs exactly the keys {sorted(SECTOR_KEYS)}, got {sorted(sectors)}")
+            if sectors["scheme"] != "cap" or sectors["overflow"] != "drop_lowest_energy" or sectors["track_phi"] not in {"calo", "vtx"}:
+                raise ValueError(f"unsupported sector options {sectors}")
+            if num_objects % sectors["num_sectors"] or sectors["num_sectors"] * sectors["max_nodes_per_sector"] < max_nodes - 1:
+                raise ValueError(f"{sectors} does not fit num_objects {num_objects} and max_nodes {max_nodes}")
+            if dummy_data:
+                raise ValueError("sectors need real data")
 
         if dummy_data:
             print(f"Creating CLIC dataset with dummy data and {num_events} samples")
@@ -567,7 +588,72 @@ class CLICDataset(Dataset):
 
         labels["event_number"] = torch.tensor(self.event_number[idx], dtype=torch.int64)
 
+        if self.sectors is not None:
+            self.sectorise(idx, inputs, labels)
+
         return inputs, labels
+
+    def sectorise(self, idx: int, inputs: dict, labels: dict) -> None:
+        """Add the sector inputs and turn the targets into per-sector blocks (see `sectors` in __init__)."""
+        num_sectors = self.sectors["num_sectors"]
+        slots = self.num_objects // num_sectors
+        n_tracks, n_topos, n_particles = int(self.n_tracks[idx]), int(self.n_topos[idx]), int(self.n_particles[idx])
+        n_nodes = n_tracks + n_topos
+        track = slice(self.track_cumsum[idx], self.track_cumsum[idx + 1])
+        particle = slice(self.particle_cumsum[idx], self.particle_cumsum[idx + 1])
+
+        track_phi = self.full_data_array["track_phi_int" if self.sectors["track_phi"] == "calo" else "track_phi"][track]
+        topo_phi = self.full_data_array["topo_phi"][self.topo_cumsum[idx] : self.topo_cumsum[idx + 1]]
+        phi = torch.cat([track_phi, topo_phi]).double().numpy()
+        sector, rank, edges = partition(phi, num_sectors, self.sectors["max_nodes_per_sector"])
+        node_sector = torch.full((self.max_nodes,), -1, dtype=torch.int64)
+        node_sector[:n_nodes] = torch.from_numpy(sector)
+        node_rank = torch.zeros(self.max_nodes, dtype=torch.int64)
+        node_rank[:n_nodes] = torch.from_numpy(rank)
+
+        # energy of each particle on each node, as the incidence is built in load_event (last write wins)
+        energy = self.full_data_array["particle_e"][particle].double().numpy()
+        weight = np.zeros((n_particles, n_nodes))
+        track_particle = np.clip(np.asarray(self.aux_data_array["track_particle_idx"][idx], dtype=np.int64), 0, None)
+        weight[track_particle, np.arange(n_tracks)] = energy[track_particle]
+        topo_idx = np.asarray(self.aux_data_array["topo2particle_topo_idx"][idx], dtype=np.int64)
+        topo_particle = np.asarray(self.aux_data_array["topo2particle_particle_idx"][idx], dtype=np.int64)
+        weight[topo_particle, topo_idx + n_tracks] = self.aux_data_array["topo2particle_energy"][idx]
+        in_sector = weight @ np.eye(num_sectors)[sector]
+        owner = in_sector.argmax(1)
+        # a particle without energy on any node goes to the sector of its own phi
+        invisible = in_sector.sum(1) <= 0
+        particle_phi = self.full_data_array["particle_phi"][particle].double().numpy()
+        owner[invisible] = (np.searchsorted(edges, particle_phi[invisible], side="right") - 1) % len(edges)
+
+        valid = labels["particle_valid"][:n_particles].numpy()
+        source = np.full(self.num_objects, -1, dtype=np.int64)
+        dropped = 0
+        for j in range(num_sectors):
+            members = np.flatnonzero(valid & (owner == j))
+            if len(members) > slots:
+                dropped += len(members) - slots
+                members = np.sort(members[np.argsort(-energy[members], kind="stable")[:slots]])
+            source[j * slots : j * slots + len(members)] = members
+
+        placed = torch.from_numpy(source >= 0)
+        source = torch.from_numpy(source.clip(0))
+        in_block = node_sector[None, :] == torch.arange(num_sectors).repeat_interleave(slots)[:, None]
+        for key, value in labels.items():
+            if not key.startswith("particle_"):
+                continue
+            value = value[source]
+            if value.dim() == 2:
+                value = torch.where(placed[:, None] & in_block, value, torch.zeros((), dtype=value.dtype))
+            elif key == "particle_class":
+                value = torch.where(placed, value, 5)
+            else:
+                value = torch.where(placed, value, torch.tensor(False if value.dtype == torch.bool else torch.nan, dtype=value.dtype))
+            labels[key] = value
+        for data in (inputs, labels):
+            data["node_sector"] = node_sector
+            data["node_sector_rank"] = node_rank
+        labels["sector_dropped_targets"] = torch.tensor(dropped, dtype=torch.int64)
 
     def init_label_dicts(self):
         # charged hadron: 0, electron: 1, muon: 2, neutral hadron: 3, photon: 4, residual: 5, neutrino: -1

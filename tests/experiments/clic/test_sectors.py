@@ -1,6 +1,9 @@
 import numpy as np
 import pytest
+import torch
 
+from hepattn.experiments.clic.lightning_module import MPflow
+from hepattn.experiments.clic.pflow_data import CLICDataset
 from hepattn.experiments.clic.sectors import partition, wrap
 
 
@@ -115,3 +118,80 @@ def test_fewer_nodes_than_sectors(n):
 def test_too_many_nodes_raises():
     with pytest.raises(ValueError, match="do not fit"):
         partition(np.linspace(-3, 3, 160), 3, 53)
+
+
+def synthetic_event(energies):
+    """One event of 54 topoclusters, one neutral particle each: 52 in a tight cluster near phi 0, one at +2, one at -2.
+    The `cap` partition (S = 3, M = 53) makes the cluster one sector, so that sector owns 52 targets for 50 slots.
+    """
+    ds = CLICDataset.__new__(CLICDataset)
+    n = len(energies)
+    phi = np.concatenate([np.linspace(0.0, 0.1, n - 2), [2.0, -2.0]])
+    ds.n_tracks, ds.n_topos, ds.n_particles = np.array([0]), np.array([n]), np.array([n])
+    ds.track_cumsum, ds.topo_cumsum, ds.particle_cumsum = [0, 0], [0, n], [0, n]
+    ds.full_data_array = {
+        "track_phi_int": torch.zeros(0),
+        "track_phi": torch.zeros(0),
+        "topo_phi": torch.tensor(phi, dtype=torch.float32),
+        "particle_e": torch.tensor(energies, dtype=torch.float32),
+        "particle_phi": torch.tensor(phi, dtype=torch.float32),
+    }
+    ds.aux_data_array = {
+        "track_particle_idx": [np.zeros(0, dtype=np.int64)],
+        "topo2particle_topo_idx": [np.arange(n)],
+        "topo2particle_particle_idx": [np.arange(n)],
+        "topo2particle_energy": [np.asarray(energies)],
+    }
+    ds.num_objects, ds.max_nodes = 150, 160
+    ds.sectors = {"num_sectors": 3, "scheme": "cap", "max_nodes_per_sector": 53, "track_phi": "calo", "overflow": "drop_lowest_energy"}
+    labels = {
+        "particle_valid": torch.arange(150) < n,
+        "particle_class": torch.where(torch.arange(150) < n, 3, 5),
+        "particle_e": torch.where(torch.arange(150) < n, torch.arange(150).float(), torch.nan),
+        "particle_node_valid": torch.eye(150, 160, dtype=torch.bool) & (torch.arange(150) < n)[:, None],
+        "particle_incidence": torch.eye(150, 160) * (torch.arange(150) < n)[:, None],
+    }
+    inputs = {}
+    ds.sectorise(0, inputs, labels)
+    return inputs, labels
+
+
+def test_overflow_drops_the_lowest_energy_targets_and_keeps_the_event():
+    energies = np.random.default_rng(0).permutation(np.arange(1.0, 55.0))
+    inputs, labels = synthetic_event(energies)
+    assert labels["sector_dropped_targets"] == 2
+    # sectors by lower edge: [-pi, ..) holds the node at -2, the cluster starts near -1, the node at +2 near 1.05
+    np.testing.assert_array_equal(inputs["node_sector"][:54].numpy(), [1] * 52 + [2, 0])
+    cluster = np.arange(52)
+    kept = np.sort(cluster[np.argsort(energies[:52])[2:]])
+    # particle_e holds the particle index here: block 1 = the 50 most energetic cluster particles, in particle order
+    np.testing.assert_array_equal(labels["particle_e"][50:100].numpy(), kept)
+    np.testing.assert_array_equal(labels["particle_e"][0].numpy(), 53)
+    np.testing.assert_array_equal(labels["particle_e"][100].numpy(), 52)
+    assert labels["particle_valid"].sum() == 52
+    for j in range(3):
+        block = labels["particle_valid"][50 * j : 50 * (j + 1)]
+        n = int(block.sum())
+        assert block[:n].all()
+        assert (labels["particle_class"][50 * j + n : 50 * (j + 1)] == 5).all()
+    # the restricted masks keep each target's own node, which is inside its sector
+    assert (labels["particle_node_valid"].sum(-1) == labels["particle_valid"]).all()
+
+
+def test_dropped_targets_are_logged_as_an_epoch_sum():
+    logged = []
+
+    class Recorder:
+        def log(self, name, value, **kwargs):
+            logged.append((name, float(value), kwargs))
+
+    batch = ({}, {"sector_dropped_targets": torch.tensor([0, 2, 1])})
+    MPflow.log_sector_drops(Recorder(), batch, "val")
+    MPflow.log_sector_drops(Recorder(), ({}, {}), "val")
+    assert len(logged) == 1
+    name, value, kwargs = logged[0]
+    assert name == "val/sector_dropped_targets"
+    assert value == 3
+    assert kwargs["reduce_fx"] == "sum"
+    assert kwargs["on_epoch"]
+    assert kwargs["sync_dist"]

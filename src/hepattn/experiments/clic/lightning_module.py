@@ -25,6 +25,30 @@ class MPflow(ModelWrapper):
         self.fake = tm.classification.BinaryRecall()
         self.pur = tm.classification.BinaryPrecision()
 
+    def log_sector_drops(self, batch, stage: str) -> None:
+        """Targets a sectored dataset dropped for lack of slots, summed over the epoch and the devices."""
+        labels = batch[1]
+        if "sector_dropped_targets" in labels:
+            dropped = labels["sector_dropped_targets"]
+            self.log(
+                f"{stage}/sector_dropped_targets",
+                dropped.sum().float(),
+                on_step=False,
+                on_epoch=True,
+                reduce_fx="sum",
+                sync_dist=True,
+                batch_size=len(dropped),
+            )
+
+    def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
+        self.log_sector_drops(batch, "train")
+
+    def on_validation_batch_end(self, outputs, batch, batch_idx, dataloader_idx=0) -> None:
+        self.log_sector_drops(batch, "val")
+
+    def on_test_batch_end(self, outputs, batch, batch_idx, dataloader_idx=0) -> None:
+        self.log_sector_drops(batch, "test")
+
     def log_custom_metrics(self, preds, labels, stage):
         kwargs = {"sync_dist": True, "batch_size": 1}
 
