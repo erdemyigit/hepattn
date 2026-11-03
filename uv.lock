@@ -863,9 +863,9 @@ clic = [
 fa2 = [{ name = "flash-attn", url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.4.17/flash_attn-2.8.3%2Bcu128torch2.9-cp312-cp312-linux_x86_64.whl" }]
 hgq = [
     { name = "da4ml", marker = "platform_machine != 'aarch64'", specifier = ">=0.6" },
-    { name = "hgq2", specifier = ">=0.1.9,<0.2" },
+    { name = "hgq2", specifier = ">=0.2.0,<0.3" },
     { name = "hls4ml", specifier = ">=1.2.0,<2" },
-    { name = "keras", specifier = ">=3.8,<4" },
+    { name = "keras", specifier = ">=3.15,<4" },
 ]
 tide = [{ name = "numba", specifier = ">=0.61.2" }]
 
@@ -880,16 +880,16 @@ wheels = [
 
 [[package]]
 name = "hgq2"
-version = "0.1.9"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "keras" },
     { name = "quantizers" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c6/f8/39b61fc409aaf9918ab0800d8ce489918cf9a93473b69bdcdfc46b91722e/hgq2-0.1.9.tar.gz", hash = "sha256:865970ae20f97edd6ea69246a2beb66ad1cfce31a40e9599c92f8ef6e61ad4ad", size = 201325, upload-time = "2026-05-27T21:38:23.828Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1e/12/c8da359b843b6e2e8a16058b7b6b35a9e1a09cdf8a0adae6ca2cde0000dd/hgq2-0.2.0.tar.gz", hash = "sha256:9b10d53d13c9c88ff68ff6258ff744294d36ccd66374069e2890255598c9a59e", size = 214169, upload-time = "2026-08-28T15:12:12.311Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b4/c7/4c7b7dd5707a421a4aef17d0d5ba74d0304f426f5abd78ea8aef541eef4b/hgq2-0.1.9-py3-none-any.whl", hash = "sha256:749754214b97f2531e1f8e609308755fe857064f47d350e9ffb878fb5017c43c", size = 111432, upload-time = "2026-05-27T21:38:22.405Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/8c/0fe11c8254911e93ab403531884602c628928c07e8429c3084c744f13159/hgq2-0.2.0-py3-none-any.whl", hash = "sha256:c47086535b2bae33bdd186590733f44cebd7a0160029cab2b1d3eb05cb8c1164", size = 125161, upload-time = "2026-08-28T15:12:10.956Z" },
 ]
 
 [[package]]

@@ -34,7 +34,7 @@
 #   [ -x .venv-jax/bin/python ] || uv venv --python 3.12.0 .venv-jax
 #   uv pip install --python .venv-jax/bin/python \
 #     --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple --index-strategy unsafe-best-match \
-#     "keras==3.15.0" "hgq2==0.1.9" "quantizers==1.2.2" "numpy==2.3.5" "jax[cuda12]==0.11.2" psutil \
+#     "keras==3.15.0" "hgq2==0.2.0" "quantizers==1.2.2" "numpy==2.3.5" "jax[cuda12]==0.11.2" psutil \
 #     "torch==2.10.0" "lightning==2.5.2" "pyyaml==6.0.3" "uproot==5.7.1" "awkward==2.9.0" "atlas-ftag-tools==0.2.18" \
 #     "einops==0.8.2" "lapx==0.9.4" "scipy==1.18.1" "torchmetrics==1.8.2" "pytorch-lightning==2.6.1" \
 #     "lion-pytorch==0.2.3" "torchjd==0.7.0" "jsonargparse[signatures]==4.40.1" "matplotlib==3.10.8"

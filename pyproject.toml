@@ -46,8 +46,8 @@ dependencies = [
 clic = ["pathos", "vector", "fastjet", "energyflow"] # has problems on isambard
 tide = ["numba>=0.61.2"] # has problems on isambard
 hgq = [
-    "keras>=3.8,<4",
-    "hgq2>=0.1.9,<0.2",
+    "keras>=3.15,<4",  # hgq2 0.2.0 requires keras>=3.15
+    "hgq2>=0.2.0,<0.3",
     "hls4ml>=1.2.0,<2",
     # no linux-aarch64 wheels; only needed for the hls4ml/FPGA conversion step
     "da4ml>=0.6; platform_machine != 'aarch64'",

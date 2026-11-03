@@ -20,10 +20,10 @@
 #   cd "$HEPATTN_DIR"   # see polaris/repo_dir.sh
 #   uv venv --python 3.12.0 .venv-jax
 #   uv pip install --python .venv-jax/bin/python \
-#     "keras==3.15.0" "hgq2==0.1.9" "quantizers==1.2.2" "numpy==2.3.5" "jax[cuda12]==0.11.2" psutil
+#     "keras==3.15.0" "hgq2==0.2.0" "quantizers==1.2.2" "numpy==2.3.5" "jax[cuda12]==0.11.2" psutil
 # jax[cuda12] pulls CUDA 12 from pip wheels (jax-cuda12-plugin[with-cuda]), so no module
 # load is needed; it does need an NVIDIA driver new enough for CUDA 12 (nvidia-smi below
-# prints it). Versions match uv.lock (keras 3.15.0, hgq2 0.1.9) and the local CPU spike.
+# prints it). Versions match uv.lock (keras 3.15.0, hgq2 0.2.0 since 2026-11-03; the spike ran with 0.1.9).
 set -uo pipefail
 cd "${PBS_O_WORKDIR:-$PWD}"
 source polaris/env.sh

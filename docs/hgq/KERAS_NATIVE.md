@@ -29,11 +29,12 @@ Not started: S8 Polaris validation (plan section 4).
 `.venv-jax` (Python 3.12.0) at the worktree root runs the native code and, in the same process, the
 pure-torch hepattn reference models for float parity. Before S1 it held the backend-spike set
 (keras 3.15.0, hgq2 0.1.9, quantizers 1.2.2, numpy 2.3.5, jax/jaxlib 0.11.2, psutil, scipy 1.18.1, h5py;
-from `uv pip list`). To recreate it (reconstructed command, CPU jax wheel; plan section 5.1 has the CUDA one):
+from `uv pip list`). To recreate it (reconstructed command, CPU jax wheel; plan section 5.1 has the CUDA one). Since
+2026-11-03 (branch `warmstart/ws4`) the commands install hgq2 0.2.0; the measurements in this file were made with 0.1.9:
 
 ```bash
 uv venv --python 3.12.0 .venv-jax
-uv pip install --python .venv-jax/bin/python "keras==3.15.0" "hgq2==0.1.9" "quantizers==1.2.2" "numpy==2.3.5" "jax==0.11.2" psutil
+uv pip install --python .venv-jax/bin/python "keras==3.15.0" "hgq2==0.2.0" "quantizers==1.2.2" "numpy==2.3.5" "jax==0.11.2" psutil
 ```
 
 S1 added the torch reference stack and pytest (versions match the hybrid env `hepattn/.venv` where it has the package):
@@ -41,7 +42,7 @@ S1 added the torch reference stack and pytest (versions match the hybrid env `he
 ```bash
 uv pip install --python .venv-jax/bin/python "torch==2.10.0" "lightning==2.5.2" "pytest==8.4.2" "pyyaml==6.0.3" \
   "uproot==5.7.1" "awkward==2.9.0" "atlas-ftag-tools==0.2.18" "einops==0.8.2" "lapx==0.9.4" \
-  "numpy==2.3.5" "keras==3.15.0" "jax==0.11.2" "jaxlib==0.11.2" "hgq2==0.1.9" "quantizers==1.2.2"
+  "numpy==2.3.5" "keras==3.15.0" "jax==0.11.2" "jaxlib==0.11.2" "hgq2==0.2.0" "quantizers==1.2.2"
 uv pip install --python .venv-jax/bin/python "torchmetrics==1.8.2" "pytorch-lightning==2.6.1"
 # S1 fix: the rest of the pyproject deps that hepattn.models.wrapper, hepattn.utils.cli / visualise_pes and
 # hepattn.experiments.clic.lightning_module import (versions as in hepattn/.venv).
