@@ -17,7 +17,7 @@ import math
 import keras
 
 from hepattn.keras_native.factory import LayerFactory, apply_softmax
-from hepattn.keras_native.masked_linformer import AttendCore, ProjectCore
+from hepattn.keras_native.masked_linformer import AttendCore, ProjectCore, attention_scale
 from hepattn.keras_native.norm import check_norm, make_norm
 
 LINFORMER_CORES = ("auto", "attend", "project", "project_unmasked")
@@ -69,6 +69,7 @@ class Attention(keras.layers.Layer):
         linformer_seq_len: int | None = None,
         linformer_k: int | None = None,
         linformer_core: str = "auto",
+        scale_frac_bits: int | None = None,
         factory: LayerFactory | None = None,
         name: str | None = None,
         **kwargs,
@@ -83,6 +84,9 @@ class Attention(keras.layers.Layer):
         as org's ``q is k`` test), else ``"attend"``. A call that does not match the core raises ValueError.
         ``"auto"`` is for direct ``build`` calls: a keras auto-build of ``layer(x, x, x)`` passes distinct shape
         tuples and resolves to ``"attend"``. Model code names the core at every call site.
+
+        ``scale_frac_bits`` (keras_native only): round the score scale ``head_dim**-0.5`` to that many fractional bits
+        (``masked_linformer.attention_scale``; for Alkaid); None (default) keeps the exact scale of org.
 
         q/k/v kernels start as org's xavier-uniform on the packed (3 dim, dim) in-projection, U(+-sqrt(6 / (4 dim))),
         with zero bias. A hepattn norm that keras_native does not implement raises NotImplementedError (``check_norm``).
@@ -111,6 +115,8 @@ class Attention(keras.layers.Layer):
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
+        self.scale_frac_bits = scale_frac_bits
+        self.scale = attention_scale(self.head_dim, scale_frac_bits)
         self.attn_type = attn_type
         self.qkv_norm = qkv_norm
         self.value_residual = value_residual
@@ -189,9 +195,9 @@ class Attention(keras.layers.Layer):
         name = f"{self.name}_{kind}"
         with self._factory.scopes():
             if kind == "attend":
-                core = AttendCore(self._factory, *dims, name=name)
+                core = AttendCore(self._factory, *dims, scale=self.scale, name=name)
             else:
-                core = ProjectCore(self._factory, *dims, masked=kind == "project", name=name)
+                core = ProjectCore(self._factory, *dims, masked=kind == "project", scale=self.scale, name=name)
         core.build()
         self.core = core
         self.core_kind = kind
@@ -250,7 +256,7 @@ class Attention(keras.layers.Layer):
             mask = merge_masks(q_mask, kv_mask, attn_mask, q.shape, k.shape)
             if mask is not None and len(mask.shape) == 3:
                 mask = keras.ops.expand_dims(mask, -3)  # broadcast over heads
-            qp = qp * (self.head_dim**-0.5)  # scale before the matmul, as torch SDPA does
+            qp = qp * self.scale  # scale before the matmul, as torch SDPA does
             scores = self.scores_einsum([qp, kp], training=training)
             attn = apply_softmax(self.attn_softmax, scores, attn_mask=mask, training=training)
             out = self.values_einsum([attn, vp], training=training)

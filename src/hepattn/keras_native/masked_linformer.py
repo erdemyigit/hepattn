@@ -41,6 +41,24 @@ from hepattn.keras_native.factory import LayerFactory, apply_softmax
 RSQRT_FLOOR = 1e-16  # masked_linformer clamps kept^2 >= eps^2 = 1e-16; binds only on all-False rows, whose output is masked
 
 
+def attention_scale(head_dim: int, frac_bits: int | None = None) -> float:
+    """The score scale ``head_dim**-0.5``, or that value rounded to ``frac_bits`` fractional bits.
+
+    A rounded scale is a short dyadic constant: Alkaid implements a constant multiply exactly as shifts and adds (SCM),
+    but its solver raises or hangs on non-dyadic float64 constants such as ``8**-0.5`` (calad0i/alkaid#8). ``None``
+    keeps the exact float (the torch scale).
+
+    Raises:
+        ValueError: For ``frac_bits`` < 1.
+    """
+    scale = head_dim**-0.5
+    if frac_bits is None:
+        return scale
+    if frac_bits < 1:
+        raise ValueError(f"frac_bits must be >= 1, got {frac_bits}")
+    return round(scale * 2**frac_bits) / 2**frac_bits
+
+
 def renorm_bits(frac_cap: int) -> dict[str, tuple[int, int]]:
     """Fixed ``(integer, fractional)`` bits of the renorm leaves for E/F weights with at most ``frac_cap`` fractional bits.
 
@@ -179,9 +197,23 @@ class AttendCore(keras.layers.Layer):
     Fold key padding into ``attn_mask``. A query with an all-False row gets a zero output.
     """
 
-    def __init__(self, factory: LayerFactory, heads: int, head_dim: int, nq: int, n: int, seq_len: int, k: int, renorm: bool = True, name=None):
+    def __init__(
+        self,
+        factory: LayerFactory,
+        heads: int,
+        head_dim: int,
+        nq: int,
+        n: int,
+        seq_len: int,
+        k: int,
+        renorm: bool = True,
+        scale: float | None = None,
+        name=None,
+    ):
+        """``scale``: the score scale (default ``head_dim**-0.5``; see ``attention_scale``)."""
         super().__init__(name=name)
         self.h, self.d, self.nq, self.n, self.seq_len, self.k, self.renorm = heads, head_dim, nq, n, seq_len, k, renorm
+        self.scale = head_dim**-0.5 if scale is None else scale
         self.qk = factory.einsum("bhqd,bhnd->bhqn", name=_sub(name, "qk"))
         self.E = SeqProjection(factory, "bhqn,nk->bhqk", (heads, nq, k), n, seq_len, k, renorm, name=_sub(name, "E"))
         self.F = SeqProjection(factory, "bhqk,nk->bhqn", (heads, nq, n), n, seq_len, k, renorm, name=_sub(name, "F"))
@@ -208,7 +240,7 @@ class AttendCore(keras.layers.Layer):
         # keys no query sees may hold NaN (padding); where-selecting the scores alone would let it into the matmuls
         seen = ops.expand_dims(ops.any(m, axis=-2), -1)
         k, v = ops.where(seen, k, 0.0), ops.where(seen, v, 0.0)
-        s = ops.where(m, self.qk([q * self.d**-0.5, k], training=training), 0.0)
+        s = ops.where(m, self.qk([q * self.scale, k], training=training), 0.0)
         s = self.E(s, training=training)
         if self.renorm:
             s = self.mul_k([s, rescale(self.kept_k, self.lut_k, attn_mask, self.E.energy(training), training)], training=training)
@@ -238,10 +270,13 @@ class ProjectCore(keras.layers.Layer):
         k: int,
         renorm: bool = True,
         masked: bool = True,
+        scale: float | None = None,
         name=None,
     ):
+        """``scale``: the score scale (default ``head_dim**-0.5``; see ``attention_scale``)."""
         super().__init__(name=name)
         self.h, self.d, self.nq, self.n, self.seq_len, self.k = heads, head_dim, nq, n, seq_len, k
+        self.scale = head_dim**-0.5 if scale is None else scale
         self.masked = masked
         self.renorm = renorm and masked
         self.E = SeqProjection(factory, "bhnd,nk->bhkd", (heads, k, head_dim), n, seq_len, k, self.renorm, name=_sub(name, "E"))
@@ -275,6 +310,6 @@ class ProjectCore(keras.layers.Layer):
         if kv_mask is not None and self.renorm:
             kp = self.mul_k([kp, rescale(self.kept_k, self.lut_k, kv_mask, self.E.energy(training), training)], training=training)
             vp = self.mul_v([vp, rescale(self.kept_v, self.lut_v, kv_mask, self.F.energy(training), training)], training=training)
-        s = self.qk([q * self.d**-0.5, kp], training=training)
+        s = self.qk([q * self.scale, kp], training=training)
         a = apply_softmax(self.softmax, s, training=training)
         return self.av([a, vp], training=training)
