@@ -144,3 +144,33 @@ def test_datalane_audit_flags_only_token_axes(tmp_path):
     model = rc.build_model()
     model(inputs, training=False)
     assert sum(bool(r["heterogeneous_token_axes"]) for r in diag.datalane_audit(model)) > len(token) * 4
+
+
+def test_native_init_hash_needs_the_same_model(tmp_path):
+    """``init --native-init``: the checkpoint's model hash must equal the init config's (a longer float fine-tune of a run)."""
+    os.environ.setdefault("KERAS_BACKEND", "jax")
+    import json  # noqa: PLC0415
+
+    from hepattn.keras_native.config import load_config  # noqa: PLC0415
+
+    ws = load("22_warmstart.py")
+    config = tmp_path / "float.yaml"
+    config.write_text(yaml.safe_dump(ws.floatify(yaml.safe_load(HYBRID.read_text()))))
+    want = load_config([config]).model_hash
+    ckpt = tmp_path / "step-000000024.npz"
+    for meta_hash in (want, "0" * 64):
+        ckpt.with_suffix(".json").write_text(json.dumps({"meta": {"config_hash": meta_hash}}))
+        if meta_hash == want:
+            assert ws.native_init_hash(config, ckpt) == want
+        else:
+            with pytest.raises(SystemExit, match="written for model"):
+                ws.native_init_hash(config, ckpt)
+    # the QAT twin of the same network is another model
+    qat = tmp_path / "qat.yaml"
+    qat.write_text(HYBRID.read_text())
+    ckpt.with_suffix(".json").write_text(json.dumps({"meta": {"config_hash": want}}))
+    with pytest.raises(SystemExit):
+        ws.native_init_hash(qat, ckpt)
+    args = ws.parse_args(["init", "--root", "r", "--tag", "t", "--source-config", "c", "--data-dir", "d", "--ckpt", "x",
+                          "--model-ebops", "1", "--target-ebops", "1", "--init-beta", "1", "--native-init", str(ckpt)])  # fmt: skip
+    assert args.native_init == str(ckpt)

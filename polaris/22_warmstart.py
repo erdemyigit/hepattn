@@ -23,6 +23,10 @@ replaces the checkpoint's non-affine LayerNorms with DyT at its init, ``--ln-to-
 skipped: the models differ by design), ``--datalane-axis last`` (one datalane bitwidth per channel, ``HGQ_DATALANE_AXIS``),
 ``--attn-scale-frac-bits F`` (the score scale rounded to F fractional bits), ``--float`` (the float model: no quant spec,
 no beta / EBOPs callbacks; for the float fine-tune arms ``ws4-ft-*``).
+``init --native-init CKPT`` A warm restart: the arms start from the weights of a native checkpoint of an earlier run
+            (fresh optimizer, LR schedule and data order; ``--k`` steps), e.g. a longer float fine-tune from a finished
+            arm's last checkpoint. The config's model hash must equal the checkpoint's. A finished run cannot be resumed
+            with a longer schedule (``Trainer.restore`` refuses another ``total_steps``).
 ``init-qat`` The QAT init from a float run of this script (``--from-tag``, ``--from-arm``: its ``last`` checkpoint; ``auto``:
             the DONE arm with the lowest last ``val/loss``): the QAT config (as ``init``, from the same
             ``--source-config``), whose model section must equal the float run's plus the quant spec, and the float
@@ -181,6 +185,41 @@ def make_config(args, init_dir: Path, name: str = "config", **extra_env: str) ->
     return out
 
 
+def native_init_hash(config: Path, ckpt: Path) -> str:
+    """The model hash of ``config``, which must equal that of the native checkpoint ``ckpt`` (its ``.json`` sidecar).
+
+    Raises:
+        SystemExit: If the hashes differ (``Trainer.warm_start`` would refuse the checkpoint in the job).
+    """
+    from hepattn.keras_native.checkpoint import read_meta  # noqa: PLC0415
+    from hepattn.keras_native.config import load_config  # noqa: PLC0415
+
+    want, have = load_config([config]).model_hash, read_meta(ckpt).get("config_hash")
+    if want != have:
+        raise SystemExit(f"{ckpt} was written for model {have}, the init config {config} is model {want}")
+    return want
+
+
+def cmd_init_native(args, root: Path, config: Path) -> int:
+    """``init --native-init``: the arms warm-start from a native checkpoint of an earlier run (weights only)."""
+    ckpt = Path(args.native_init).resolve()
+    manifest = {
+        "complete": True,
+        "git": g4.git_head(),
+        "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "config": str(config),
+        "native_init": str(ckpt),
+        "source": {"native_init": str(ckpt), "native_init_sha256": g4.sha256(ckpt)},
+        "settings": {k: v for k, v in vars(args).items() if k not in {"func", "command"}},
+        "config_hash": native_init_hash(config, ckpt),
+        "parity_ok": None,
+        "files_sha256": {config.name: g4.sha256(config)},
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest, indent=1, default=str) + "\n")
+    print(json.dumps({"complete": True, "native_init": str(ckpt), "config_hash": manifest["config_hash"]}))
+    return 0
+
+
 def cmd_init(args) -> int:
     root = Path(args.root) / args.tag
     init_dir = root / "init"
@@ -190,6 +229,8 @@ def cmd_init(args) -> int:
     init_dir.mkdir(parents=True, exist_ok=True)
     config = make_config(args, init_dir)
     check_onecycle(config, args.k)
+    if args.native_init:
+        return cmd_init_native(args, root, config)
     log = init_dir / "init.log"
     cpu = g4.env_with_src(KERAS_BACKEND="jax", JAX_PLATFORMS="cpu")
     convert = [args.jax_python, "-m", "hepattn.experiments.clic.convert_to_native", "--config", args.source_config, "--ckpt", args.ckpt]
@@ -612,6 +653,10 @@ def parse_args(argv=None):
     init = sub.choices["init"]
     init.add_argument("--ckpt", required=True, help="its Lightning checkpoint")
     init.add_argument("--sat-cal-batches", type=int, default=0, help="also build the SAT-datalane model, seeded from N batches")
+    init.add_argument(
+        "--native-init",
+        help="a native checkpoint of an earlier run of the same model: the arms warm-start from it (no conversion; --ckpt is not read)",
+    )
     iq = sub.choices["init-qat"]
     iq.add_argument("--from-tag", required=True, help="the float run's tag (an init with --float)")
     iq.add_argument("--from-arm", default="auto", help="its arm; auto: the DONE arm with the lowest last val/loss")
