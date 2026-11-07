@@ -174,3 +174,41 @@ def test_native_init_hash_needs_the_same_model(tmp_path):
     args = ws.parse_args(["init", "--root", "r", "--tag", "t", "--source-config", "c", "--data-dir", "d", "--ckpt", "x",
                           "--model-ebops", "1", "--target-ebops", "1", "--init-beta", "1", "--native-init", str(ckpt)])  # fmt: skip
     assert args.native_init == str(ckpt)
+
+
+def test_init_native_runs_without_keras_backend(tmp_path):
+    """The PBS job runs the driver without ``KERAS_BACKEND`` (keras then falls back to TensorFlow, not installed): the
+    hash check of ``init --native-init`` must not import keras in the driver process (Polaris job 7824459).
+    """
+    import json  # noqa: PLC0415
+
+    config = tmp_path / "float.yaml"
+    config.write_text(yaml.safe_dump(load("22_warmstart.py").floatify(yaml.safe_load(HYBRID.read_text()))))
+    root = tmp_path / "runs" / "t"
+    (root / "init").mkdir(parents=True)
+    ckpt = tmp_path / "step-000000024.npz"
+    ckpt.write_bytes(b"weights")
+    code = f"""
+import importlib.util, json, sys, types
+spec = importlib.util.spec_from_file_location("ws", {str(REPO / "polaris/22_warmstart.py")!r})
+ws = importlib.util.module_from_spec(spec); spec.loader.exec_module(ws)
+args = types.SimpleNamespace(native_init={str(ckpt)!r}, jax_python=sys.executable)
+ws.cmd_init_native(args, ws.Path({str(root)!r}), ws.Path({str(config)!r}))
+assert "keras" not in sys.modules
+"""
+    env = {k: v for k, v in os.environ.items() if k not in {"KERAS_BACKEND", "PYTHONPATH"}}
+    env["PYTHONPATH"] = str(REPO / "src")
+    for meta_hash, ok in (("from_config", True), ("0" * 64, False)):
+        if meta_hash == "from_config":
+            os.environ.setdefault("KERAS_BACKEND", "jax")
+            from hepattn.keras_native.config import load_config  # noqa: PLC0415
+
+            meta_hash = load_config([config]).model_hash
+        ckpt.with_suffix(".json").write_text(json.dumps({"meta": {"config_hash": meta_hash}}))
+        proc = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=300, check=False)
+        assert (proc.returncode == 0) == ok, proc.stderr[-2000:]
+        if ok:
+            manifest = json.loads((root / "manifest.json").read_text())
+            assert manifest["config_hash"] == meta_hash and manifest["native_init"] == str(ckpt.resolve())
+        else:
+            assert "native-init hash check failed" in proc.stderr

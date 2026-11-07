@@ -200,9 +200,26 @@ def native_init_hash(config: Path, ckpt: Path) -> str:
     return want
 
 
+def cmd_native_hash(args) -> int:
+    """(called by ``init --native-init``) ``native_init_hash`` in a process with the JAX backend, written to ``--out``."""
+    Path(args.out).write_text(native_init_hash(Path(args.config), Path(args.ckpt)) + "\n")
+    return 0
+
+
 def cmd_init_native(args, root: Path, config: Path) -> int:
-    """``init --native-init``: the arms warm-start from a native checkpoint of an earlier run (weights only)."""
+    """``init --native-init``: the arms warm-start from a native checkpoint of an earlier run (weights only).
+
+    The hash check imports keras, so it runs in a subprocess with the JAX backend (the driver process has no
+    ``KERAS_BACKEND``; keras would fall back to its configured backend), as ``transfer`` does.
+
+    Raises:
+        SystemExit: If the hash check fails (``init.log`` has the reason).
+    """
     ckpt = Path(args.native_init).resolve()
+    out, log = root / "init" / "native_hash.txt", root / "init" / "init.log"
+    cmd = [args.jax_python, REPO / "polaris/22_warmstart.py", "native-hash", "--config", config, "--ckpt", ckpt, "--out", out]
+    if g4.run_logged(cmd, g4.env_with_src(KERAS_BACKEND="jax", JAX_PLATFORMS="cpu"), log) != 0:
+        raise SystemExit(f"native-init hash check failed: {log}")
     manifest = {
         "complete": True,
         "git": g4.git_head(),
@@ -211,7 +228,7 @@ def cmd_init_native(args, root: Path, config: Path) -> int:
         "native_init": str(ckpt),
         "source": {"native_init": str(ckpt), "native_init_sha256": g4.sha256(ckpt)},
         "settings": {k: v for k, v in vars(args).items() if k not in {"func", "command"}},
-        "config_hash": native_init_hash(config, ckpt),
+        "config_hash": out.read_text().strip(),
         "parity_ok": None,
         "files_sha256": {config.name: g4.sha256(config)},
     }
@@ -645,6 +662,9 @@ def parse_args(argv=None):
     for key in ("--wrap-config", "--wrap-init", "--sat-config", "--sat-init", "--out", "--report", "--work-dir"):
         seed.add_argument(key, required=True)
     seed.add_argument("--n", type=int, required=True, help="train micro-batches traced")
+    nh = sub.add_parser("native-hash", help="(called by init --native-init) the model hash check, in a JAX process")
+    for key in ("--config", "--ckpt", "--out"):
+        nh.add_argument(key, required=True)
     tr = sub.add_parser("transfer", help="(called by init-qat) float checkpoint -> QAT init")
     for key in ("--float-config", "--float-ckpt", "--qat-config", "--out", "--report"):
         tr.add_argument(key, required=True)
@@ -673,7 +693,15 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    commands = {"init": cmd_init, "init-qat": cmd_init_qat, "transfer": cmd_transfer, "run": cmd_run, "report": cmd_report, "seed-sat": cmd_seed_sat}
+    commands = {
+        "init": cmd_init,
+        "init-qat": cmd_init_qat,
+        "transfer": cmd_transfer,
+        "run": cmd_run,
+        "report": cmd_report,
+        "seed-sat": cmd_seed_sat,
+        "native-hash": cmd_native_hash,
+    }
     return commands[args.command](args)
 
 
